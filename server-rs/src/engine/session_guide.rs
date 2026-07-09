@@ -102,6 +102,37 @@ worker read the files itself. Do NOT inline file contents or long absolute-path 
 forward slashes. A large, escape-heavy payload makes the model more likely to emit the `delegate` \
 call as malformed JSON, which is rejected and costs a wasted retry turn.";
 
+/// Build-environment guidance, written into every session's CLAUDE.md next to ROUTING_GUIDE.
+/// A session worktree has the tracked source but none of the machine-local, gitignored build
+/// environment (deps, SDK pointers, caches, signing keys) that lives in the repo's main checkout.
+/// This tells the agent to symlink what a build needs from `~/src/<repo>` — the platform links
+/// nothing itself, keeping this repo-agnostic.
+pub const WORKTREE_SETUP_GUIDE: &str = r#"## Build environment — inherit it from the main checkout
+
+Your repo worktrees have the source but NOT the machine-local, gitignored build
+environment that lives in each repo's main checkout at `~/src/<repo>` (the repos
+root `$AGENTIC_SRC_ROOT`, default `~/src`): dependency dirs, SDK pointers, build
+caches, signing keys. A freshly-created worktree may fail to build or run until you
+bring those over.
+
+**When you need to BUILD or RUN** (not just edit), symlink the pieces the build needs
+from the main checkout into the matching worktree — don't reinstall from scratch. Use
+your judgment about what the build actually needs. Typical local env:
+- dependency dirs: `node_modules` (incl. nested like `server-rs/node_modules`), `.venv`, `vendor/`
+- local config / pointers: `local.properties` (Android SDK dir), `.env`
+- caches: `.gradle/`
+- signing material, only when you need a signed build: `*.keystore`, `keystore.properties`
+
+**Do NOT link build OUTPUT** (`target/`, `build/`, `app/build/`, `dist/`) — each
+worktree builds its own; sharing it causes stale or corrupt results.
+
+How (run at the worktree's repo root, e.g. inside `agentic-dev-android/`):
+    ln -s ~/src/<repo>/local.properties .
+    ln -s ~/src/<repo>/.gradle .gradle
+Symlinks share the main checkout's deps/caches/keys (fine on this single-user machine)
+and are gitignored, so they never get committed. If a repo ships its own setup
+(`make setup` / a bootstrap script), prefer that."#;
+
 /// Write the session-dir `CLAUDE.md` from an ordered list of `sections` (e.g. the multi-repo
 /// orientation guide followed by the user's session-scoped custom guidance). Blank/whitespace-only
 /// sections are dropped; the rest are trimmed and joined with a Markdown horizontal-rule separator.
@@ -211,5 +242,18 @@ mod tests {
         let sess3 = tmp();
         write_session_claude_md(&sess3, &[]);
         assert!(!sess3.join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn worktree_setup_guide_present_and_composed_into_claude_md() {
+        // The const carries its heading and the actionable verbs.
+        assert!(WORKTREE_SETUP_GUIDE.contains("## Build environment — inherit it from the main checkout"));
+        assert!(WORKTREE_SETUP_GUIDE.contains("symlink the pieces the build needs"));
+        // It composes into the written session CLAUDE.md alongside the routing guide.
+        let sess = tmp();
+        write_session_claude_md(&sess, &[ROUTING_GUIDE.to_string(), WORKTREE_SETUP_GUIDE.to_string()]);
+        let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("Build environment — inherit it from the main checkout"));
+        assert!(content.contains("Do NOT link build OUTPUT"));
     }
 }
