@@ -550,6 +550,60 @@ impl Engine {
         self.0.store.read_log(id)
     }
 
+    // ── Native re-sync (adopt / detach round-trip) ────────────
+
+    /// Import the native transcript (#2) delta into this session's rendered log (#1),
+    /// advance the watermark, and return the count of #1 lines appended.
+    ///
+    /// The native transcript at `~/.claude/projects/<slug(cwd)>/<csid>.jsonl` is the
+    /// complete record (every turn, from either agentic-dev or a terminal `claude`);
+    /// #1 is what the client renders. `nativeWatermarkLines` marks how many #2 lines
+    /// are already reflected in #1, so translating only `[watermark .. end)` imports
+    /// exactly the new turns without per-line dedup.
+    ///
+    /// Idempotent: a second call with no new native lines translates an empty slice and
+    /// appends nothing (returns 0). Returns `Ok(0)` when the transcript file is absent
+    /// (e.g. an adopted csid whose file was moved) — nothing to import, not an error.
+    /// Engine stays axum-free: this is pure store + filesystem work.
+    pub async fn reconcile_from_native(&self, id: &str) -> Result<usize, String> {
+        let s = self
+            .0
+            .store
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no such session")?;
+        let csid = s
+            .claude_session_id
+            .clone()
+            .ok_or("session has no claudeSessionId")?;
+        let cwd = s.worktree_path.clone().unwrap_or_default();
+        let path = crate::engine::native_transcript::transcript_path(
+            &self.0.cfg.claude_config_base,
+            &cwd,
+            &csid,
+        );
+        if !path.is_file() {
+            return Ok(0);
+        }
+        let from = s.native_watermark_lines.max(0) as usize;
+        let (lines, total) =
+            crate::engine::native_transcript::translate_range(&path, from);
+        for line in &lines {
+            self.0
+                .store
+                .append_log(id, line)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        self.0
+            .store
+            .set_watermark(id, total as i64)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(lines.len())
+    }
+
     // ── Close ────────────────────────────────────────────────
 
     /// Shut the engine down. `kill_running = true` stops every in-flight claude run;
