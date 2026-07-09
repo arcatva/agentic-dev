@@ -234,6 +234,8 @@ pub async fn templates_start(State(st): State<AppState>, body: axum::body::Bytes
         permission_mode: None, // templates don't carry a permission_mode (yet)
         hidden_skills: Vec::new(), // templates don't carry a skill blacklist (yet)
         hidden_plugins: Vec::new(), // templates don't carry a plugin blacklist (yet)
+        hidden_mcp_servers: Vec::new(), // templates don't carry an MCP blacklist (yet)
+        extra_mcp_servers: Vec::new(), // templates don't carry extra MCP servers (yet)
         claude_md: None, // templates don't carry session-scoped CLAUDE.md (yet)
         staged_uploads: Vec::new(), // templates don't carry pre-session attachments
     };

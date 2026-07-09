@@ -238,6 +238,8 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
         permission_mode: b.permission_mode,
         hidden_skills: b.hidden_skills.unwrap_or_default(),
         hidden_plugins: b.hidden_plugins.unwrap_or_default(),
+        hidden_mcp_servers: vec![],  // populated in Task 4
+        extra_mcp_servers: vec![],   // populated in Task 4
         claude_md: b.claude_md,
         staged_uploads: b.staged_uploads.unwrap_or_default(),
     };
