@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::Row;
 
+/// MCP server definition for per-session ad-hoc injection.
+/// Supports stdio (`command`+`args`+`env`) and http/sse (`url`+`type`+`headers`) transports.
+/// Serde uses the field names verbatim (camelCase where needed via rename).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct McpServerDef {
+    pub name: String,
+    // stdio transport:
+    #[serde(skip_serializing_if = "Option::is_none")] pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub env: Option<std::collections::BTreeMap<String, String>>,
+    // http/sse transport:
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")] pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum StoreError {
     #[error("sqlite error: {0}")] Sqlx(#[from] sqlx::Error),
