@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -163,6 +164,26 @@ pub fn set_skill_enabled(config_base: &Path, name: &str, enabled: bool) -> std::
     })
 }
 
+/// The set of skills to turn OFF for a session: the union of globally-off skills
+/// (`skillOverrides == "off"`) and the session's own hidden-skill list. This makes a session
+/// inherit the global skill state while still applying its own hides on top.
+pub fn resolve_session_hidden_skills(config_base: &Path, hidden_skills: &[String]) -> Vec<String> {
+    let toggles = read_global_toggles(config_base);
+    let mut set: BTreeSet<String> = toggles
+        .skill_overrides
+        .iter()
+        .filter(|(_, v)| v.as_str() == "off")
+        .map(|(k, _)| k.clone())
+        .collect();
+    for h in hidden_skills {
+        let h = h.trim();
+        if !h.is_empty() {
+            set.insert(h.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +276,16 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         // file left untouched
         assert_eq!(std::fs::read_to_string(dir.join("settings.local.json")).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn resolve_session_hidden_skills_unions_global_off_and_session_hidden() {
+        let dir = tmp();
+        std::fs::write(dir.join("settings.local.json"),
+            r#"{"skillOverrides":{"g-off":"off","on-one":"on"}}"#).unwrap();
+        // global off: g-off ; session hides: sess-hide
+        let mut out = resolve_session_hidden_skills(&dir, &["sess-hide".into(), " ".into()]);
+        out.sort();
+        assert_eq!(out, vec!["g-off".to_string(), "sess-hide".to_string()]);
     }
 }
