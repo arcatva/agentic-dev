@@ -210,6 +210,12 @@ pub struct CreateBody {
     /// the wire; absent = no attachments.
     #[serde(rename = "stagedUploads")]
     pub staged_uploads: Option<Vec<crate::engine::StagedUpload>>,
+    /// MCP server names to disable for this session (blacklist). camelCase on the wire.
+    #[serde(rename = "hiddenMcpServers")]
+    pub hidden_mcp_servers: Option<Vec<String>>,
+    /// Ad-hoc MCP server defs for this session only. Validated: name non-empty, exactly one transport.
+    #[serde(rename = "extraMcpServers")]
+    pub extra_mcp_servers: Option<Vec<crate::engine::store::McpServerDef>>,
 }
 
 /// Parse a JSON request body leniently: treat absent, empty, or unparseable bodies as the
@@ -231,6 +237,20 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
     let Some(prompt) = b.prompt.filter(|p| !p.is_empty()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"prompt required"}))).into_response();
     };
+    let extra_mcp_servers = b.extra_mcp_servers.unwrap_or_default();
+    for def in &extra_mcp_servers {
+        if def.name.trim().is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":"extraMcpServers: name must be non-empty"}))).into_response();
+        }
+        let has_stdio = def.command.is_some();
+        let has_http = def.url.is_some();
+        if !has_stdio && !has_http {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":format!("extraMcpServers[{}]: must have either command (stdio) or url (http/sse)", def.name)}))).into_response();
+        }
+        if has_stdio && has_http {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":format!("extraMcpServers[{}]: cannot have both command and url", def.name)}))).into_response();
+        }
+    }
     let meta = SubmitMeta {
         model: b.model,
         effort: b.effort,
@@ -238,8 +258,8 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
         permission_mode: b.permission_mode,
         hidden_skills: b.hidden_skills.unwrap_or_default(),
         hidden_plugins: b.hidden_plugins.unwrap_or_default(),
-        hidden_mcp_servers: vec![],  // populated in Task 4
-        extra_mcp_servers: vec![],   // populated in Task 4
+        hidden_mcp_servers: b.hidden_mcp_servers.unwrap_or_default(),
+        extra_mcp_servers,
         claude_md: b.claude_md,
         staged_uploads: b.staged_uploads.unwrap_or_default(),
     };
@@ -1620,6 +1640,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_rejects_extra_mcp_with_no_transport() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"bad-mcp"}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("must have either command"), "expected transport error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_extra_mcp_with_empty_name() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"","command":"npx"}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("name must be non-empty"), "expected name error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_extra_mcp_with_both_transports() {
+        let st = test_state().await;
+        let (status, _body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"bad","command":"npx","url":"https://x.com"}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn detach_route_unknown_session_is_400() {
         // Route is registered (not 404); engine errors on an unknown id → 400.
         let st = test_state().await;
@@ -1627,5 +1684,16 @@ mod tests {
             .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].is_string(), "error body expected, got {body}");
+    }
+
+    #[tokio::test]
+    async fn create_session_accepts_valid_extra_mcp_servers() {
+        let st = test_state().await;
+        let (status, _body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"stdio-mcp","command":"npx","args":["server"]},{"name":"http-mcp","url":"https://example.com/mcp","type":"http"}],"hiddenMcpServers":["some-mcp"]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
