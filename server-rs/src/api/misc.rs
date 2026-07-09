@@ -113,12 +113,28 @@ pub async fn global_settings_toggle_route(
     Json(req): Json<ToggleReq>,
 ) -> Response {
     let base = &st.config.claude_config_base;
-    let res = match req.kind.as_str() {
-        "plugin" => crate::engine::global_settings::set_plugin_enabled(base, &req.id, req.enabled),
-        "skill" => crate::engine::global_settings::set_skill_enabled(base, &req.id, req.enabled),
+
+    // Validate kind first; then confirm the id is an installed/enumerable component of that kind.
+    // Globally-disabled components are still enumerated by list_components, so toggling them back
+    // on must succeed — we only reject ids that are not installed at all.
+    match req.kind.as_str() {
+        "plugin" | "skill" => {
+            let components = crate::engine::components::list_components(base, &st.config.skills_dir);
+            let known = components.iter().any(|c| c.kind == req.kind && c.id == req.id);
+            if !known {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown {} id: {}", req.kind, req.id)}))).into_response();
+            }
+        }
         other => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown kind: {other}")}))).into_response();
         }
+    }
+
+    let res = match req.kind.as_str() {
+        "plugin" => crate::engine::global_settings::set_plugin_enabled(base, &req.id, req.enabled),
+        "skill" => crate::engine::global_settings::set_skill_enabled(base, &req.id, req.enabled),
+        // Unreachable: the match above already validated kind.
+        _ => unreachable!(),
     };
     match res {
         Ok(()) => Json(crate::engine::components::list_components(base, &st.config.skills_dir)).into_response(),
