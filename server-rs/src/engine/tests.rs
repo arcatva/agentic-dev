@@ -3764,4 +3764,80 @@ mod submit_titles_via_generator {
             "log carries the imported assistant turn"
         );
     }
+
+    // ── Task 5: adopt_session ─────────────────────────────────
+    //
+    // Adopt an existing external Claude session: create a first-class
+    // agentic-dev row pointing at the external `claudeSessionId`, seed the
+    // prompt/title from the first native user turn, and import the FULL native
+    // history (#2) into the rendered log (#1). Worktree strategy is
+    // adopt-in-place — `worktree_path` is the native cwd, no new git worktree.
+    #[tokio::test]
+    async fn adopt_creates_row_and_imports_full_history() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await; // claude_config_base = work/claude-config
+
+        // The native session ran in this cwd (a plain, non-git dir).
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+
+        // Write the native transcript (#2) at the slug path the engine computes:
+        // one authored user turn + one end_turn assistant turn = 2 native lines.
+        let tp = native_transcript::transcript_path(
+            &e.0.cfg.claude_config_base,
+            &cwd_s,
+            "csidX",
+        );
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first prompt\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\"}}\n",
+        )
+        .unwrap();
+
+        let id = e.adopt_session("csidX", &cwd_s).await.unwrap();
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert_eq!(s.origin, "adopted", "row is marked adopted provenance");
+        assert_eq!(
+            s.claude_session_id.as_deref(),
+            Some("csidX"),
+            "row points at the external Claude session id"
+        );
+        assert_eq!(
+            s.worktree_path.as_deref(),
+            Some(cwd_s.as_str()),
+            "adopt-in-place: worktree_path is the native cwd"
+        );
+        assert_eq!(s.status, "pending", "adopted row is pending until opened");
+        assert_eq!(
+            s.prompt, "first prompt",
+            "prompt/title seeded from the first native user turn"
+        );
+        assert_eq!(
+            s.native_watermark_lines, 2,
+            "watermark set to the native line count after full import"
+        );
+
+        // #1 now renders the imported history (agentic_prompt + assistant).
+        let log = e.0.store.read_log(&id);
+        assert!(
+            log.iter().any(|l| l.contains("\"agentic_prompt\"")),
+            "imported log carries the user prompt"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("\"assistant\"")),
+            "imported log carries the assistant turn"
+        );
+
+        // Double-adopt is rejected.
+        assert!(
+            e.adopt_session("csidX", &cwd_s).await.is_err(),
+            "adopting an already-adopted csid is an error"
+        );
+    }
 }

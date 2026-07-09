@@ -296,6 +296,30 @@ pub fn new_session_id() -> String {
 }
 
 // ──────────────────────────────────────────────────────────────
+// read_git_head — branch + HEAD sha of a directory (empty if non-git)
+// ──────────────────────────────────────────────────────────────
+/// Read `(branch, sha)` for `cwd` via `git -C <cwd> rev-parse`. Returns
+/// `("", "")` when `cwd` is not a git repo (or `git` is unavailable) — adopt
+/// treats a non-git cwd as having no branch/base. Mirrors the `git -C … rev-parse`
+/// pattern `fork_session` uses to snapshot a source worktree's HEAD.
+fn read_git_head(cwd: &str) -> (String, String) {
+    let run = |args: &[&str]| -> String {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let sha = run(&["rev-parse", "HEAD"]);
+    (branch, sha)
+}
+
+// ──────────────────────────────────────────────────────────────
 // has_active_workflow
 // ──────────────────────────────────────────────────────────────
 /// Returns true iff any workflow run under `base` is not in a terminal state.
@@ -602,6 +626,96 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
         Ok(lines.len())
+    }
+
+    /// Adopt an existing external Claude Code CLI session as a first-class
+    /// agentic-dev session. The native session ran in `cwd` and wrote its
+    /// transcript (#2) to `~/.claude/projects/<slug(cwd)>/<csid>.jsonl`; this
+    /// creates an agentic-dev row pointing at that `csid` and imports the full
+    /// native history into the rendered log (#1). Returns the new session id.
+    ///
+    /// Worktree strategy is **adopt-in-place** (v1): `worktree_path = cwd` and
+    /// no new git worktree is created, so a later resume turn computes the same
+    /// cwd → slug and `--resume` finds #2. `branch`/`baseSha` are read from
+    /// `cwd` if it is a git repo, else left empty.
+    ///
+    /// Errors on a double-adopt (a row already carries this csid) or when no
+    /// native transcript exists at the computed path. Engine stays axum-free:
+    /// this is pure store + filesystem + `git` work.
+    pub async fn adopt_session(&self, csid: &str, cwd: &str) -> Result<String, String> {
+        use crate::engine::store::{CreateInput, SessionPatch};
+
+        // Guard: an external csid maps to at most one adopted row.
+        if self
+            .0
+            .store
+            .session_by_csid(csid)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err(format!("session {csid} already adopted"));
+        }
+
+        // Require the native transcript to exist at the slug path.
+        let path = crate::engine::native_transcript::transcript_path(
+            &self.0.cfg.claude_config_base,
+            cwd,
+            csid,
+        );
+        if !path.is_file() {
+            return Err(format!("no transcript at {}", path.display()));
+        }
+
+        // Seed the prompt/title from the first authored native user turn.
+        let native = crate::engine::native_transcript::read_lines(&path);
+        let first_prompt = native
+            .iter()
+            .find_map(crate::engine::native_transcript::user_prompt_text)
+            .unwrap_or_default();
+
+        let id = new_session_id();
+        let group_id = self
+            .0
+            .store
+            .ensure_group("Claude Code Adopted")
+            .await
+            .map_err(|e| e.to_string())?;
+        let (branch, base_sha) = read_git_head(cwd);
+
+        // `Store::create` forces `claude_session_id = None` and `status = "pending"`,
+        // so build the row with the fields CreateInput carries, then set the csid
+        // via an update patch (mirrors the Init handler / reconcile test).
+        self.0
+            .store
+            .create(CreateInput {
+                id: id.clone(),
+                prompt: first_prompt,
+                worktree_path: Some(cwd.to_string()),
+                branch: (!branch.is_empty()).then(|| branch.clone()),
+                base_sha: (!base_sha.is_empty()).then(|| base_sha.clone()),
+                group_id: Some(group_id),
+                origin: Some("adopted".into()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        self.0
+            .store
+            .update(
+                &id,
+                SessionPatch {
+                    claude_session_id: Some(Some(csid.to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Full history import + watermark (#2 → #1).
+        self.reconcile_from_native(&id).await?;
+        Ok(id)
     }
 
     // ── Close ────────────────────────────────────────────────
