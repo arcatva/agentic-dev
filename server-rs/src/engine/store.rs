@@ -634,6 +634,17 @@ impl Store {
         Ok(row.map(|r| row_to_session(&r)))
     }
 
+    /// Look up a session by its external Claude session id (`claudeSessionId`).
+    /// Used by `Engine::adopt_session` to reject a double-adopt: an external
+    /// csid maps to at most one adopted agentic-dev row. Returns the first match.
+    pub async fn session_by_csid(&self, csid: &str) -> Result<Option<Session>, StoreError> {
+        let row = sqlx::query("SELECT * FROM sessions WHERE claudeSessionId = ? LIMIT 1")
+            .bind(csid)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| row_to_session(&r)))
+    }
+
     /// Return every session whose `parentSessionId` equals `parent_id`. The list is in
     /// creation-order (seq ASC). Used by callers that want to render "forked to N sessions"
     /// on a parent session; not exposed via the API in v1.
