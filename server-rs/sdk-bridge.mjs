@@ -43,6 +43,8 @@ process.stderr.write(
   `stderr_path=${STDERR_PATH} stderr_path_set=${STDERR_PATH ? "yes" : "no"} ` +
   `hidden_skills=${process.env.SDK_BRIDGE_HIDDEN_SKILLS || ""} ` +
   `enabled_plugins=${process.env.SDK_BRIDGE_ENABLED_PLUGINS || ""} ` +
+  `hidden_mcp=${process.env.SDK_BRIDGE_HIDDEN_MCP || ""} ` +
+  `extra_mcp=${process.env.SDK_BRIDGE_EXTRA_MCP ? "set" : ""} ` +
   `log_path=${process.env.SDK_BRIDGE_LOG || ""}\n`
 );
 let stderrBuf = "";
@@ -242,6 +244,43 @@ const enabledPlugins = Object.entries(parseObjectEnv("SDK_BRIDGE_ENABLED_PLUGINS
 if (enabledPlugins.length) {
   settings.enabledPlugins = Object.fromEntries(enabledPlugins.map(([id, on]) => [id.trim(), on === true]));
 }
+// Per-session MCP hidden list: set settings.disabledMcpjsonServers so Claude Code
+// disables those .mcp.json-configured servers for this session.
+const hiddenMcp = (() => {
+  try {
+    const parsed = JSON.parse(process.env.SDK_BRIDGE_HIDDEN_MCP || "[]");
+    return Array.isArray(parsed) ? parsed.filter((n) => typeof n === "string" && n.trim()) : [];
+  } catch { return []; }
+})();
+if (hiddenMcp.length) settings.disabledMcpjsonServers = hiddenMcp;
+
+// Per-session extra MCP server defs: build {[name]: config} for the mcpServers option.
+const extraMcpDefs = (() => {
+  try {
+    const parsed = JSON.parse(process.env.SDK_BRIDGE_EXTRA_MCP || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+})();
+const hiddenMcpSet = new Set(hiddenMcp);
+const extraMcpServers = {};
+for (const def of extraMcpDefs) {
+  if (!def || typeof def.name !== "string" || !def.name.trim()) continue;
+  if (hiddenMcpSet.has(def.name)) continue;
+  if (typeof def.command === "string") {
+    extraMcpServers[def.name] = {
+      command: def.command,
+      ...(Array.isArray(def.args) ? { args: def.args } : {}),
+      ...(def.env && typeof def.env === "object" ? { env: def.env } : {}),
+    };
+  } else if (typeof def.url === "string") {
+    extraMcpServers[def.name] = {
+      type: def.type || "http",
+      url: def.url,
+      ...(def.headers && typeof def.headers === "object" ? { headers: def.headers } : {}),
+    };
+  }
+}
+
 if (Object.keys(settings).length) extraArgs.settings = JSON.stringify(settings);
 
 const abort = new AbortController();
@@ -347,7 +386,9 @@ const q = query({
     stderr: (d) => { if (STDERR_PATH) { try { appendFileSync(STDERR_PATH, d); } catch { /* best-effort */ } } },
     ...(model ? { model } : {}),
     ...(resume ? { resume } : {}),
-    ...(delegateServer ? { mcpServers: { agentic: delegateServer } } : {}),
+    ...(delegateServer || Object.keys(extraMcpServers).length
+      ? { mcpServers: { ...(delegateServer ? { agentic: delegateServer } : {}), ...extraMcpServers } }
+      : {}),
     ...(workflowHook ? { hooks: { PreToolUse: [{ hooks: [workflowHook] }] } } : {}),
     ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
   },
