@@ -242,6 +242,9 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
         if def.name.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, Json(json!({"error":"extraMcpServers: name must be non-empty"}))).into_response();
         }
+        if def.name.trim() == "agentic" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":"extraMcpServers: name \"agentic\" is reserved by the platform delegate server and cannot be overridden"}))).into_response();
+        }
         let has_stdio = def.command.is_some();
         let has_http = def.url.is_some();
         if !has_stdio && !has_http {
@@ -249,6 +252,16 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
         }
         if has_stdio && has_http {
             return (StatusCode::BAD_REQUEST, Json(json!({"error":format!("extraMcpServers[{}]: cannot have both command and url", def.name)}))).into_response();
+        }
+        if has_stdio {
+            if def.command.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error":format!("extraMcpServers[{}]: command must be non-empty", def.name)}))).into_response();
+            }
+        }
+        if has_http {
+            if def.url.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error":format!("extraMcpServers[{}]: url must be non-empty", def.name)}))).into_response();
+            }
         }
     }
     let meta = SubmitMeta {
@@ -1695,5 +1708,61 @@ mod tests {
             .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"stdio-mcp","command":"npx","args":["server"]},{"name":"http-mcp","url":"https://example.com/mcp","type":"http"}],"hiddenMcpServers":["some-mcp"]}"#))
             .unwrap()).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    // Fix 1: reserved name "agentic" must be rejected.
+    #[tokio::test]
+    async fn create_session_rejects_reserved_agentic_name() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"agentic","command":"npx"}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("reserved"), "expected reserved-name error, got: {msg}");
+    }
+
+    // Fix 2: empty command string must be rejected (stdio transport).
+    #[tokio::test]
+    async fn create_session_rejects_empty_command() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"my-mcp","command":""}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("command must be non-empty"), "expected empty-command error, got: {msg}");
+    }
+
+    // Fix 2: whitespace-only command string must be rejected (stdio transport).
+    #[tokio::test]
+    async fn create_session_rejects_whitespace_command() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"my-mcp","command":"   "}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("command must be non-empty"), "expected whitespace-command error, got: {msg}");
+    }
+
+    // Fix 2: empty url string must be rejected (http/sse transport).
+    #[tokio::test]
+    async fn create_session_rejects_empty_url() {
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","extraMcpServers":[{"name":"my-mcp","url":""}]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("url must be non-empty"), "expected empty-url error, got: {msg}");
     }
 }

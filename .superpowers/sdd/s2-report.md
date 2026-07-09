@@ -114,3 +114,66 @@ Syntax is validated with `node --check sdk-bridge.mjs` — passes.
 4. **`components.rs` test pollution concern.** Using `base.join(".claude")` as `config_base` avoids writing `.claude.json` to the system temp dir root. The test creates `<tmp>/agentic-comp-<pid>-<nanos>/.claude.json` — contained within the test-specific temp dir.
 
 5. **No global write-back for MCP.** Per spec, `global_enabled` stays `true` for all MCP servers and there is no write-back to `~/.claude.json`. This is by design.
+
+---
+
+## Fix wave — S2 adversarial review fixes (2026-07-10)
+
+### Fix 1 — Reserve the `agentic` MCP server name
+
+**`server-rs/src/api/sessions.rs`** (`create_session` validation, ~line 244): added a check after the empty-name guard — if `def.name.trim() == "agentic"` return 400 with message `"extraMcpServers: name \"agentic\" is reserved by the platform delegate server and cannot be overridden"`.
+
+**`server-rs/sdk-bridge.mjs`** (~line 390): swapped the spread order so `extraMcpServers` is spread FIRST and the built-in delegate server is spread LAST:
+```js
+// Before (user entry wins, silently disables delegate):
+{ agentic: delegateServer, ...extraMcpServers }
+// After (built-in always wins — defense in depth):
+{ ...extraMcpServers, ...(delegateServer ? { agentic: delegateServer } : {}) }
+```
+
+New tests: `create_session_rejects_reserved_agentic_name`.
+
+### Fix 2 — Reject empty/whitespace command/url
+
+**`server-rs/src/api/sessions.rs`** (same validation block): after the transport-presence checks, added two guards:
+- `has_stdio && command.trim().is_empty()` → 400 `"extraMcpServers[<name>]: command must be non-empty"`
+- `has_http && url.trim().is_empty()` → 400 `"extraMcpServers[<name>]: url must be non-empty"`
+
+The `is_some()` checks for presence still gate stdio/http detection; the new `.trim().is_empty()` checks reject whitespace-only values that previously slipped through.
+
+New tests: `create_session_rejects_empty_command`, `create_session_rejects_whitespace_command`, `create_session_rejects_empty_url`.
+
+### Fix 3 — fork_session already copies MCP fields
+
+Confirmed: `server-rs/src/engine/mod.rs` `fork_session` at ~lines 1220-1221 already copies both:
+```rust
+hidden_mcp_servers: src.hidden_mcp_servers.clone(),
+extra_mcp_servers: src.extra_mcp_servers.clone(),
+```
+No change needed.
+
+### Fix 4 — Test the threading seams
+
+Added `spawn_opts_threads_mcp_fields` to `server-rs/src/engine/tests.rs` (sibling of `spawn_opts_resolves_hidden_plugins_to_enable_map`). The test creates a session with non-empty `hidden_mcp_servers` (`["disabled-mcp"]`) and `extra_mcp_servers` (one stdio, one http), then asserts both appear verbatim on:
+1. `store.get()` result (catches mod.rs ~713-714, the CreateInput build seam)
+2. `spawn_opts()` result (catches mod.rs ~1841-1842, the SpawnOptions build seam)
+
+**RED evidence** — temporarily replaced mod.rs ~1841-1842 with `vec![]` and ran the new test:
+```
+test engine::tests::spawn_opts_threads_mcp_fields ... FAILED
+assertion `left == right` failed: hidden_mcp_servers not in SpawnOptions
+  left: []
+ right: ["disabled-mcp"]
+```
+Lines restored; full suite green.
+
+### Test command + result
+
+```
+cd server-rs && cargo test
+test result: ok. 499 passed; 0 failed; 0 ignored; 0 measured (lib)
+test result: ok. 4 passed; 0 failed  (integration)
+test result: ok. 3 passed; 0 failed  (api tests)
+test result: ok. 15 passed; 0 failed (title client)
+```
+`cargo build` — `Finished dev profile` — 0 errors, 1 pre-existing dead_code warning.
