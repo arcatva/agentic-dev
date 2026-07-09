@@ -701,7 +701,8 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
 
-        self.0
+        if let Err(e) = self
+            .0
             .store
             .update(
                 &id,
@@ -711,10 +712,19 @@ impl Engine {
                 },
             )
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            // Roll back the row we just created — leaving a half-created row behind
+            // would permanently lock this csid against re-adoption via the
+            // session_by_csid guard above (mirrors fork_session's rollback).
+            let _ = self.0.store.remove(&id).await;
+            return Err(e.to_string());
+        }
 
         // Full history import + watermark (#2 → #1).
-        self.reconcile_from_native(&id).await?;
+        if let Err(e) = self.reconcile_from_native(&id).await {
+            let _ = self.0.store.remove(&id).await;
+            return Err(e);
+        }
         Ok(id)
     }
 
