@@ -3675,4 +3675,93 @@ mod submit_titles_via_generator {
         assert_eq!(wire["autoResume"], serde_json::json!(false));
         assert!(wire.get("autoResumeAt").is_none());
     }
+
+    // ── Task 4: reconcile_from_native ─────────────────────────
+    //
+    // Watermark-based import of the native transcript (#2) delta into the
+    // rendered log (#1): the first reconcile imports everything past the
+    // watermark, a repeat call with no new native lines imports nothing
+    // (idempotent), and a later terminal turn is picked up exactly once.
+    #[tokio::test]
+    async fn reconcile_imports_delta_and_is_idempotent() {
+        use crate::engine::native_transcript;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await; // claude_config_base = work/claude-config
+        let id = "sess-recon";
+
+        // Adopted-style row: origin=adopted, worktree_path = a cwd we control.
+        // CreateInput has no claude_session_id builder, so we set it via a patch.
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        e.0.store
+            .create(CreateInput {
+                id: id.into(),
+                origin: Some("adopted".into()),
+                worktree_path: Some(cwd_s.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        e.0.store
+            .update(
+                id,
+                SessionPatch {
+                    claude_session_id: Some(Some("csidR".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Write a native transcript (#2) at the slug path the engine will compute.
+        let tp = native_transcript::transcript_path(
+            &e.0.cfg.claude_config_base,
+            &cwd_s,
+            "csidR",
+        );
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        // First reconcile imports the single user prompt → one agentic_prompt line.
+        let n = e.reconcile_from_native(id).await.unwrap();
+        assert_eq!(n, 1, "first reconcile imports the one user prompt");
+        // Idempotent: no new native lines → nothing appended.
+        assert_eq!(
+            e.reconcile_from_native(id).await.unwrap(),
+            0,
+            "second reconcile with no delta is a no-op"
+        );
+
+        // A terminal assistant turn arrives while agentic-dev was stopped.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tp)
+            .unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_9\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"yo\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+        // end_turn assistant → assistant line + result turn-boundary marker = 2.
+        assert_eq!(
+            e.reconcile_from_native(id).await.unwrap(),
+            2,
+            "delta reconcile pulls assistant + result for the terminal turn"
+        );
+
+        // #1 now renders the imported history.
+        let log = e.0.store.read_log(id);
+        assert!(
+            log.iter().any(|l| l.contains("\"agentic_prompt\"")),
+            "log carries the imported user prompt"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("\"assistant\"")),
+            "log carries the imported assistant turn"
+        );
+    }
 }
