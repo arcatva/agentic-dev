@@ -582,6 +582,30 @@ impl Engine {
         self.0.store.read_log(id)
     }
 
+    /// The Claude config base dir (`~/.claude` by default) this engine reads native
+    /// transcripts from. Thin accessor so the API layer can call
+    /// [crate::engine::native_transcript::scan_adoptable] without reaching into engine
+    /// internals — keeps the engine axum-free.
+    pub fn config_base(&self) -> std::path::PathBuf {
+        self.0.cfg.claude_config_base.clone()
+    }
+
+    /// The set of `claudeSessionId`s already linked to a stored session — the exclusion
+    /// set for [crate::engine::native_transcript::scan_adoptable] so an already-adopted (or
+    /// natively-linked) transcript is hidden from the adoptable list. Rows without a linked
+    /// csid contribute nothing; a store error degrades to an empty set (scan then offers
+    /// everything, which the adopt guard still rejects on a double-adopt).
+    pub async fn known_claude_session_ids(&self) -> std::collections::HashSet<String> {
+        self.0
+            .store
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| s.claude_session_id)
+            .collect()
+    }
+
     // ── Native re-sync (adopt / detach round-trip) ────────────
 
     /// Import the native transcript (#2) delta into this session's rendered log (#1),
@@ -2965,7 +2989,9 @@ pub mod worktree;
 // Engine method clusters split across sibling files (multi-file inherent impls).
 mod diff;
 mod error;
-mod native_transcript;
+// `pub(crate)` so the API layer (`api::sessions`) can call `scan_adoptable` /
+// `transcript_path` for the adopt / adoptable HTTP routes. The engine stays axum-free.
+pub(crate) mod native_transcript;
 mod recover;
 mod resume_gate;
 mod watchdog;

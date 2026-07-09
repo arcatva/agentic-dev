@@ -3841,6 +3841,40 @@ mod submit_titles_via_generator {
         );
     }
 
+    /// `config_base()` is a thin clone of the configured claude config dir — the base the
+    /// API layer passes to `scan_adoptable`. Backs the `GET /api/adoptable` handler.
+    #[tokio::test]
+    async fn config_base_returns_configured_claude_config_base() {
+        let work = tmp();
+        let e = engine_from(&work).await;
+        assert_eq!(e.config_base(), work.join("claude-config"));
+    }
+
+    /// `known_claude_session_ids()` is the exclusion set for `scan_adoptable`: it collects
+    /// the linked csids across all stored sessions and skips rows with none. Backs the
+    /// `GET /api/adoptable` handler's "hide already-adopted" behavior.
+    #[tokio::test]
+    async fn known_claude_session_ids_collects_only_linked_csids() {
+        use crate::engine::store::{CreateInput, SessionPatch};
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        // Fresh store → no linked csids.
+        assert!(e.known_claude_session_ids().await.is_empty(), "fresh store has no linked csids");
+
+        // Row A: linked to a csid.
+        e.0.store.create(CreateInput { id: "a".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
+        e.0.store.update("a", SessionPatch {
+            claude_session_id: Some(Some("csidA".into())), ..Default::default()
+        }).await.unwrap();
+        // Row B: no csid.
+        e.0.store.create(CreateInput { id: "b".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
+
+        let known = e.known_claude_session_ids().await;
+        assert!(known.contains("csidA"), "linked csid must be present, got {known:?}");
+        assert_eq!(known.len(), 1, "rows without a claudeSessionId are excluded, got {known:?}");
+    }
+
     /// If a post-create step fails (here: `reconcile_from_native`'s history import),
     /// the half-created row must be rolled back — otherwise its `claudeSessionId`
     /// permanently locks the csid against re-adoption via the `session_by_csid` guard.

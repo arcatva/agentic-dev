@@ -48,7 +48,13 @@ pub fn app(state: AppState) -> Router {
         // path segments and the route would 404.
         .route("/api/sessions/search", get(sessions::search_sessions))
         .route("/api/sessions/{id}/events", get(sessions::get_session_events))
+        // Native Claude re-sync surface. `/api/adoptable` lists importable transcripts;
+        // `/api/sessions/adopt` MUST be registered BEFORE `/api/sessions/{id}` — otherwise
+        // axum's `{id}` capture would swallow the literal "adopt" segment and 404 the POST.
+        .route("/api/adoptable", get(sessions::list_adoptable))
+        .route("/api/sessions/adopt", post(sessions::adopt_session_route))
         .route("/api/sessions/{id}", get(sessions::get_session).patch(sessions::patch_session).delete(sessions::delete_session_route))
+        .route("/api/sessions/{id}/detach", post(sessions::detach_session_route))
         .route("/api/sessions/{id}/messages", post(sessions::post_message))
         .route("/api/sessions/{id}/interrupt", post(sessions::interrupt_route))
         .route("/api/sessions/{id}/permission", post(sessions::permission_route))

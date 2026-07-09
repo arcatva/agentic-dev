@@ -412,6 +412,55 @@ pub async fn fork_session_route(State(st): State<AppState>, Path(id): Path<Strin
     }
 }
 
+// ── Adopt / detach / adoptable (native Claude re-sync) ────────────
+
+/// Body of `POST /api/sessions/adopt`. camelCase `claudeSessionId` on the wire.
+#[derive(Deserialize)]
+pub struct AdoptBody {
+    #[serde(rename = "claudeSessionId")]
+    pub claude_session_id: String,
+    pub cwd: String,
+}
+
+/// `GET /api/adoptable` — native Claude transcripts not yet tracked by a session, newest
+/// first. Excludes csids already linked to a stored session (so an adopted session never
+/// re-appears as adoptable). Always 200 with a JSON array.
+pub async fn list_adoptable(State(st): State<AppState>) -> Response {
+    let known = st.engine.known_claude_session_ids().await;
+    let items = crate::engine::native_transcript::scan_adoptable(&st.engine.config_base(), &known);
+    Json(items).into_response()
+}
+
+/// `POST /api/sessions/adopt` body `{claudeSessionId, cwd}` → `201 {id}`. 400 on a
+/// malformed body or when the engine rejects the adopt (no transcript at the slug path,
+/// or the csid is already adopted). Mirrors [create_session]'s Bytes-body style, but adopt
+/// requires a well-formed body so a parse error is a 400 (not a lenient default).
+pub async fn adopt_session_route(State(st): State<AppState>, body: Bytes) -> Response {
+    let b: AdoptBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    match st.engine.adopt_session(&b.claude_session_id, &b.cwd).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({"id": id}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+/// `POST /api/sessions/{id}/detach` → `200 {cwd, claudeSessionId, resumeCmd}`. Hands an
+/// adopted session off to a terminal `claude --resume`: hard-stops the live process,
+/// freezes the native watermark, marks the row detached, and returns the resume command.
+/// 400 on engine error (unknown session / no linked csid).
+pub async fn detach_session_route(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    match st.engine.detach_session(&id).await {
+        Ok(info) => Json(json!({
+            "cwd": info.cwd,
+            "claudeSessionId": info.claude_session_id,
+            "resumeCmd": info.resume_cmd,
+        })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 pub async fn workflows_route(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let Some(s) = st.engine.get(&id).await else {
         return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response();
@@ -1432,5 +1481,149 @@ mod tests {
         assert_eq!(parent, Some(id));
         // New session is idle (not auto-spawned): status == "done".
         assert_eq!(body["session"]["status"].as_str(), Some("done"));
+    }
+
+    // ── Task 8: adopt / detach / adoptable HTTP surface ──────────────
+    //
+    // NOTE on the harness: the shared `test_state` helper wires the engine's
+    // `claude_config_base` to the real default (`~/.claude`), with NO per-test
+    // override hook — so the full adopt round-trip (which must read a native
+    // transcript at `<config_base>/projects/<slug(cwd)>/<csid>.jsonl`) can't seed
+    // into a temp dir through it. `adopt_state_with_config_base` rebuilds the
+    // engine over the SAME store, overriding only `claude_config_base` to a temp
+    // dir, so we CAN run a full 201 + origin:"adopted" HTTP test. The error/edge
+    // paths (bad body, unknown session, missing transcript) don't need a seeded
+    // transcript and run against plain `test_state`.
+
+    use std::sync::atomic::{AtomicU64, Ordering as AO};
+    static ADOPT_CTR: AtomicU64 = AtomicU64::new(0);
+
+    /// A `test_state` whose engine reads native transcripts from `cb` (a temp dir)
+    /// instead of the real `~/.claude`. Rebuilds the engine over the existing store
+    /// (so `GET /api/sessions` still sees rows the adopt writes), overriding only
+    /// `claude_config_base`. Mirrors `test_support::test_state`'s engine wiring.
+    async fn adopt_state_with_config_base(cb: std::path::PathBuf) -> crate::api::state::AppState {
+        use std::sync::Arc;
+        let mut st = test_state().await;
+        let c = (*st.config).clone();
+        let engine_cfg = crate::engine::EngineConfig {
+            src_root: c.src_root.clone(),
+            worktrees_root: c.worktrees_root.clone(),
+            log_dir: c.log_dir.clone(),
+            db_path: c.db_path.clone(),
+            title_generator: Arc::new(crate::api::test_support::NoopTitleGenerator),
+            retitle_enabled: c.retitle_enabled,
+            max_concurrent: Some(2),
+            git_org: c.git_org.clone(),
+            claude_config_base: cb,
+            clone_fn: Some(Arc::new(|_u: &str, _d: &str| Err(std::io::Error::other("clone disabled in tests")))),
+            sync_fn: None,
+            runner: Some(Arc::new(crate::engine::sdk_runner::SdkRunner::with_node(
+                "bash",
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/fake-sdk-bridge-ok.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+            ))),
+            log_fn: None, now_fn: None, push_fn: None, usage_fn: None,
+            idle_max_ms: None, wall_max_ms: None, idle_ttl_ms: None,
+            memory_max: None, memory_high: None, cpu_quota: None, tasks_max: None,
+        };
+        st.engine = Arc::new(crate::engine::Engine::with_store(
+            engine_cfg, st.store.clone(), Some(st.transcript.clone()),
+        ));
+        st
+    }
+
+    #[tokio::test]
+    async fn adopt_route_creates_session_with_adopted_origin() {
+        let n = ADOPT_CTR.fetch_add(1, AO::SeqCst);
+        let cb = std::env::temp_dir().join(format!("agentic-adopt-http-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cb);
+        let st = adopt_state_with_config_base(cb.clone()).await;
+
+        // Seed a native transcript (#2) at the slug path the engine computes for this cwd.
+        let cwd = format!("/tmp/adopt-http-proj-{n}");
+        let csid = "csidHTTP";
+        let tp = crate::engine::native_transcript::transcript_path(&cb, &cwd, csid);
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hey\"}}\n").unwrap();
+
+        // Adopt → 201 { id }.
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions/adopt")
+            .header("authorization", auth(&st)).header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"claudeSessionId":"{csid}","cwd":"{cwd}"}}"#))).unwrap()).await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        let id = body["id"].as_str().unwrap().to_string();
+
+        // The created session serializes origin:"adopted" on the list route.
+        let (status, list) = oneshot_req(st.clone(), Request::get("/api/sessions")
+            .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(list["sessions"].as_array().unwrap().iter()
+            .any(|s| s["id"] == json!(id) && s["origin"] == json!("adopted")),
+            "adopted session must appear with origin:adopted, got {list}");
+
+        // /api/adoptable now EXCLUDES the just-adopted csid (its csid is a known linked id).
+        let (status, adoptable) = oneshot_req(st.clone(), Request::get("/api/adoptable")
+            .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(adoptable.as_array().unwrap().iter().all(|a| a["sessionId"] != json!(csid)),
+            "adopted csid must not remain adoptable, got {adoptable}");
+
+        let _ = std::fs::remove_dir_all(&cb);
+    }
+
+    #[tokio::test]
+    async fn adoptable_route_lists_seeded_transcript() {
+        let n = ADOPT_CTR.fetch_add(1, AO::SeqCst);
+        let cb = std::env::temp_dir().join(format!("agentic-adoptable-http-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cb);
+        let st = adopt_state_with_config_base(cb.clone()).await;
+
+        let cwd = format!("/tmp/adoptable-http-proj-{n}");
+        let csid = "csidLIST";
+        let tp = crate::engine::native_transcript::transcript_path(&cb, &cwd, csid);
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"cwd\":\"x\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+
+        let (status, body) = oneshot_req(st.clone(), Request::get("/api/adoptable")
+            .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.as_array().unwrap().iter().any(|a| a["sessionId"] == json!(csid)),
+            "seeded transcript must be listed as adoptable, got {body}");
+
+        let _ = std::fs::remove_dir_all(&cb);
+    }
+
+    #[tokio::test]
+    async fn adopt_route_missing_transcript_is_400() {
+        // No seeded transcript → engine rejects the adopt → 400 with an error body.
+        // Also proves the route is registered (a 404 here would mean it isn't).
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions/adopt")
+            .header("authorization", auth(&st)).header("content-type", "application/json")
+            .body(Body::from(r#"{"claudeSessionId":"nope","cwd":"/tmp/does-not-exist-xyz"}"#)).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].is_string(), "error body expected, got {body}");
+    }
+
+    #[tokio::test]
+    async fn adopt_route_malformed_body_is_400() {
+        let st = test_state().await;
+        let (status, _body) = oneshot_req(st.clone(), Request::post("/api/sessions/adopt")
+            .header("authorization", auth(&st)).header("content-type", "application/json")
+            .body(Body::from("{not json")).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn detach_route_unknown_session_is_400() {
+        // Route is registered (not 404); engine errors on an unknown id → 400.
+        let st = test_state().await;
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions/nope/detach")
+            .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].is_string(), "error body expected, got {body}");
     }
 }
