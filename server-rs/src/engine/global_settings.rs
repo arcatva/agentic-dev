@@ -49,6 +49,28 @@ pub fn skill_globally_enabled(t: &GlobalToggles, name: &str) -> bool {
     t.skill_overrides.get(name.trim()).map(|v| v != "off").unwrap_or(true)
 }
 
+/// True if the BASE file (`settings.json` only, ignoring `settings.local.json`) explicitly disables
+/// this plugin. When enabling, this decides whether deleting our local key is enough (base allows
+/// it) or whether we must write an explicit local override that wins over the base disable.
+fn base_disables_plugin(config_base: &Path, id: &str) -> bool {
+    read_object_lossy(&config_base.join("settings.json"))
+        .get("enabledPlugins")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.get(id.trim()))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+}
+
+/// True if the BASE file (`settings.json` only) force-disables this skill (`"off"`).
+fn base_disables_skill(config_base: &Path, name: &str) -> bool {
+    read_object_lossy(&config_base.join("settings.json"))
+        .get("skillOverrides")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.get(name.trim()))
+        .and_then(|v| v.as_str())
+        == Some("off")
+}
+
 /// Serializes all global-settings writes within this process. Cross-process races
 /// (the CLI editing the same file) are an accepted small risk for a single-user tool.
 static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -150,18 +172,36 @@ fn set_nested(map: &mut serde_json::Map<String, serde_json::Value>, parent: &str
 
 pub fn set_plugin_enabled(config_base: &Path, id: &str, enabled: bool) -> std::io::Result<()> {
     let id = id.trim().to_string();
-    edit_local(config_base, |m| {
-        let v = if enabled { None } else { Some(serde_json::Value::Bool(false)) };
-        set_nested(m, "enabledPlugins", &id, v);
-    })
+    // Enabling: if the base settings.json force-disables this plugin (`false`), deleting our local
+    // key would leave it disabled (base wins in read_global_toggles), so write an explicit local
+    // `true` override that wins over the base. Otherwise delete our key (installed ⇒ on by default).
+    let value = if enabled {
+        if base_disables_plugin(config_base, &id) {
+            Some(serde_json::Value::Bool(true))
+        } else {
+            None
+        }
+    } else {
+        Some(serde_json::Value::Bool(false))
+    };
+    edit_local(config_base, |m| set_nested(m, "enabledPlugins", &id, value))
 }
 
 pub fn set_skill_enabled(config_base: &Path, name: &str, enabled: bool) -> std::io::Result<()> {
     let name = name.trim().to_string();
-    edit_local(config_base, |m| {
-        let v = if enabled { None } else { Some(serde_json::Value::String("off".into())) };
-        set_nested(m, "skillOverrides", &name, v);
-    })
+    // Enabling: if the base settings.json force-disables this skill ("off"), deleting our local key
+    // would leave it disabled (base wins in read_global_toggles), so write an explicit local "on"
+    // override that wins over the base. Otherwise delete our key (skills are on by default).
+    let value = if enabled {
+        if base_disables_skill(config_base, &name) {
+            Some(serde_json::Value::String("on".into()))
+        } else {
+            None
+        }
+    } else {
+        Some(serde_json::Value::String("off".into()))
+    };
+    edit_local(config_base, |m| set_nested(m, "skillOverrides", &name, value))
 }
 
 /// The set of skills to turn OFF for a session: the union of globally-off skills
@@ -287,5 +327,42 @@ mod tests {
         let mut out = resolve_session_hidden_skills(&dir, &["sess-hide".into(), " ".into()]);
         out.sort();
         assert_eq!(out, vec!["g-off".to_string(), "sess-hide".to_string()]);
+    }
+
+    #[test]
+    fn enable_over_base_disabled_plugin_writes_true_override() {
+        let dir = tmp();
+        // Base file force-disables the plugin; no local file yet.
+        std::fs::write(dir.join("settings.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        set_plugin_enabled(&dir, "gh@m", true).unwrap();
+        // Local override wins: an explicit `true` is written (not a delete).
+        let local = read_object_lossy(&dir.join("settings.local.json"));
+        assert_eq!(local["enabledPlugins"]["gh@m"], serde_json::json!(true));
+        // Effective merged state is now enabled.
+        assert!(plugin_globally_enabled(&read_global_toggles(&dir), "gh@m"));
+        // Base file is never modified.
+        let base = read_object_lossy(&dir.join("settings.json"));
+        assert_eq!(base["enabledPlugins"]["gh@m"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn enable_over_base_disabled_skill_writes_on_override() {
+        let dir = tmp();
+        std::fs::write(dir.join("settings.json"), r#"{"skillOverrides":{"rke2-ops":"off"}}"#).unwrap();
+        set_skill_enabled(&dir, "rke2-ops", true).unwrap();
+        let local = read_object_lossy(&dir.join("settings.local.json"));
+        assert_eq!(local["skillOverrides"]["rke2-ops"], serde_json::json!("on"));
+        assert!(skill_globally_enabled(&read_global_toggles(&dir), "rke2-ops"));
+    }
+
+    #[test]
+    fn enable_without_base_disable_deletes_local_key() {
+        let dir = tmp();
+        // No base settings.json; local currently disables the plugin.
+        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        set_plugin_enabled(&dir, "gh@m", true).unwrap();
+        // Base allows it → minimal behavior: local key removed (empty parent collapsed).
+        let local = read_object_lossy(&dir.join("settings.local.json"));
+        assert!(local.get("enabledPlugins").and_then(|m| m.get("gh@m")).is_none());
     }
 }
