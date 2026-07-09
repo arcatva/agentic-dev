@@ -25,6 +25,10 @@ pub struct RunSpec {
     /// to sdk-bridge, which writes it verbatim as settings `enabledPlugins`. `true` force-enables
     /// (command-line settings layer wins over on-disk settings); `false` disables for this session.
     pub enabled_plugins: std::collections::BTreeMap<String, bool>,
+    /// Per-session MCP server name blacklist. Bridge writes them to `settings.disabledMcpjsonServers`.
+    pub hidden_mcp_servers: Vec<String>,
+    /// Per-session ad-hoc MCP server definitions. Hidden names are removed by sdk_runner before injection.
+    pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
     pub permission_mode: Option<String>,
 }
 
