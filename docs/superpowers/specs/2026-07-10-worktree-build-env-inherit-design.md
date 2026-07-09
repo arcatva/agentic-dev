@@ -95,8 +95,8 @@ your judgment about what the build actually needs. Typical local env:
 worktree builds its own; sharing it causes stale or corrupt results.
 
 How (run at the worktree's repo root, e.g. inside `agentic-dev-android/`):
-    ln -s ~/src/<repo>/local.properties .
-    ln -s ~/src/<repo>/.gradle .gradle
+    ln -s "${AGENTIC_SRC_ROOT:-$HOME/src}/<repo>/local.properties" .
+    ln -s "${AGENTIC_SRC_ROOT:-$HOME/src}/<repo>/.gradle" .gradle
 Symlinks point at the main checkout's deps/caches/keys — reuse, not copies. This session
 pushes its branch and opens PRs, so before you link secrets (`*.keystore`,
 `keystore.properties`, `.env`) confirm they're gitignored in that repo and never `git add`
