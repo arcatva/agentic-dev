@@ -72,6 +72,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/repos", get(misc::repos_route))
         .route("/api/skills", get(misc::skills_route))
         .route("/api/plugins", get(misc::plugins_route))
+        .route("/api/global-settings", get(misc::global_settings_route))
+        .route("/api/global-settings/toggle", post(misc::global_settings_toggle_route))
         .route("/api/groups", get(misc::groups_list).post(misc::groups_create))
         .route("/api/groups/{id}", patch(misc::groups_update).delete(misc::groups_delete))
         .route("/api/devices", post(misc::devices_post))
@@ -186,6 +188,8 @@ mod tests {
         c.templates_path = dir.join("templates.json");
         c.device_token_path = dir.join("device.json");
         c.skills_dir = dir.join("skills");
+        c.claude_config_base = dir.join("claude");
+        let _ = std::fs::create_dir_all(&c.claude_config_base);
         let store = Arc::new(crate::engine::store::Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap());
         let transcript = Arc::new(crate::engine::transcript::TranscriptCache::new(c_budget()));
         let engine_cfg = crate::engine::EngineConfig {
@@ -496,6 +500,68 @@ mod tests {
         let s = resp.status();
         assert!(s.is_client_error(), "malformed JSON must be a 4xx, got {s}");
         assert_ne!(s, StatusCode::INTERNAL_SERVER_ERROR, "must not be a 500");
+    }
+
+    #[tokio::test]
+    async fn global_settings_get_and_toggle() {
+        let st = test_state().await;
+        let base = st.config.claude_config_base.clone();
+        let skills = st.config.skills_dir.clone();
+
+        // Seed one installed plugin and one user skill.
+        std::fs::create_dir_all(base.join("plugins")).unwrap();
+        std::fs::write(base.join("plugins").join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{"gh@m":[{"scope":"user"}]}}"#).unwrap();
+        std::fs::create_dir_all(skills.join("rke2-ops")).unwrap();
+        std::fs::write(skills.join("rke2-ops").join("SKILL.md"),
+            "---\nname: rke2-ops\ndescription: d\n---\nb").unwrap();
+
+        let token = issue_token("s3cret", 3600, now_secs());
+
+        // GET → both components present, default enabled.
+        let resp = app(st.clone())
+            .oneshot(Request::builder()
+                .uri("/api/global-settings")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr: serde_json::Value = body_json(resp).await;
+        assert!(arr.as_array().unwrap().iter().any(|c| c["id"] == "gh@m" && c["globalEnabled"] == true));
+
+        // POST toggle → disable the plugin globally.
+        let resp = app(st.clone())
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/global-settings/toggle")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"plugin","id":"gh@m","enabled":false}"#)).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // settings.local.json now records the disable; settings.json untouched.
+        let local: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(base.join("settings.local.json")).unwrap()).unwrap();
+        assert_eq!(local["enabledPlugins"]["gh@m"], serde_json::json!(false));
+        assert!(!base.join("settings.json").exists());
+    }
+
+    #[tokio::test]
+    async fn global_settings_toggle_unknown_kind_is_400() {
+        let st = test_state().await;
+        let token = issue_token("s3cret", 3600, now_secs());
+        let resp = app(st.clone())
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/global-settings/toggle")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"mcp","id":"x","enabled":false}"#)).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(v["error"].as_str().unwrap().contains("unknown kind"));
     }
 
 }
