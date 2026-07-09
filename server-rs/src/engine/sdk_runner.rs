@@ -223,6 +223,21 @@ impl Runner for SdkRunner {
                 cmd.env("SDK_BRIDGE_HIDDEN_SKILLS", json);
             }
         }
+        // Forced-on skills: globally-off skills the session forces back ON.
+        // The bridge applies these as skillOverrides[name]="on" AFTER the "off" entries so
+        // forced-on wins even when a name appears in both (belt-and-suspenders; the API
+        // rejects that combination, but we stay safe here too).
+        let forced_on_skills: Vec<&str> = spec
+            .forced_on_skills
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !forced_on_skills.is_empty() {
+            if let Ok(json) = serde_json::to_string(&forced_on_skills) {
+                cmd.env("SDK_BRIDGE_FORCED_ON_SKILLS", json);
+            }
+        }
         // Explicit per-plugin enable map (see RunSpec::enabled_plugins). BTreeMap → compact JSON
         // object with sorted keys; blank ids are dropped defensively (mirrors the skills filtering).
         let enabled_plugins: std::collections::BTreeMap<&str, bool> = spec
@@ -565,6 +580,44 @@ mod tests {
         assert!(
             recorded.contains("SDK_BRIDGE_HIDDEN_SKILLS=[\"rke2-ops\",\"cloudstack-ops\"]"),
             "hidden skills env must be compact JSON without blank entries; recorded={recorded}"
+        );
+    }
+
+    #[test]
+    fn start_passes_forced_on_skills_to_bridge_env() {
+        let dir = tmpdir();
+        let rec = dir.join("rec.txt");
+        let log = dir.join("session.jsonl");
+        let fake = fake_node(&dir, &rec);
+        let bridge = dir.join("bridge.mjs");
+        std::fs::write(&bridge, "// fake bridge").unwrap();
+
+        let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+
+        let spec = RunSpec {
+            cwd: dir.to_string_lossy().into_owned(),
+            env,
+            log_path: log,
+            forced_on_skills: vec!["rke2-ops".into(), "".into(), "cloudstack-ops".into()],
+            ..Default::default()
+        };
+
+        let handle = runner.start(spec);
+        let mut recorded = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            recorded = std::fs::read_to_string(&rec).unwrap_or_default();
+            if recorded.contains("SDK_BRIDGE_FORCED_ON_SKILLS=[\"rke2-ops\",\"cloudstack-ops\"]") {
+                break;
+            }
+        }
+        handle.stop();
+
+        assert!(
+            recorded.contains("SDK_BRIDGE_FORCED_ON_SKILLS=[\"rke2-ops\",\"cloudstack-ops\"]"),
+            "forced-on skills env must be compact JSON without blank entries; recorded={recorded}"
         );
     }
 

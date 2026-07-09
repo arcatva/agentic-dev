@@ -30,6 +30,12 @@ pub struct RunSpec {
     /// Per-session ad-hoc MCP server definitions. Hidden names are removed by sdk_runner before injection.
     pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
     pub permission_mode: Option<String>,
+    /// Plugin ids forced ON for this session (forcedOn > hidden > global).
+    pub forced_on_plugins: Vec<String>,
+    /// Skill names forced ON for this session that the global baseline disables → bridge sets "on".
+    pub forced_on_skills: Vec<String>,
+    /// MCP server names forced ON (stored; no-op at spawn until global MCP disable exists).
+    pub forced_on_mcp_servers: Vec<String>,
 }
 
 /// A started turn. Liveness + exit are polled. Optional methods default to no-ops.

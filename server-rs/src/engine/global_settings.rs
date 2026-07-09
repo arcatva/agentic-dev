@@ -205,9 +205,10 @@ pub fn set_skill_enabled(config_base: &Path, name: &str, enabled: bool) -> std::
 }
 
 /// The set of skills to turn OFF for a session: the union of globally-off skills
-/// (`skillOverrides == "off"`) and the session's own hidden-skill list. This makes a session
-/// inherit the global skill state while still applying its own hides on top.
-pub fn resolve_session_hidden_skills(config_base: &Path, hidden_skills: &[String]) -> Vec<String> {
+/// (`skillOverrides == "off"`) and the session's own hidden-skill list, minus any skill in
+/// `forced_on` (which wins over both). This makes a session inherit the global skill state
+/// while still applying its own hides on top, with session force-on as the final override.
+pub fn resolve_session_hidden_skills(config_base: &Path, hidden_skills: &[String], forced_on: &[String]) -> Vec<String> {
     let toggles = read_global_toggles(config_base);
     let mut set: BTreeSet<String> = toggles
         .skill_overrides
@@ -221,7 +222,25 @@ pub fn resolve_session_hidden_skills(config_base: &Path, hidden_skills: &[String
             set.insert(h.to_string());
         }
     }
+    // Forced-on wins: remove any forced-on name from the off set.
+    for f in forced_on {
+        set.remove(f.trim());
+    }
     set.into_iter().collect()
+}
+
+/// The subset of `forced_on` skills that the global baseline disables (`skillOverrides == "off"`).
+/// These need an explicit `"on"` bridge override so they win over the global-off; skills that are
+/// globally-on by default need no special entry (the bridge default covers them).
+pub fn resolve_session_forced_on_skills(config_base: &Path, forced_on: &[String]) -> Vec<String> {
+    let toggles = read_global_toggles(config_base);
+    forced_on
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter(|s| !skill_globally_enabled(&toggles, s))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -324,7 +343,7 @@ mod tests {
         std::fs::write(dir.join("settings.local.json"),
             r#"{"skillOverrides":{"g-off":"off","on-one":"on"}}"#).unwrap();
         // global off: g-off ; session hides: sess-hide
-        let mut out = resolve_session_hidden_skills(&dir, &["sess-hide".into(), " ".into()]);
+        let mut out = resolve_session_hidden_skills(&dir, &["sess-hide".into(), " ".into()], &[]);
         out.sort();
         assert_eq!(out, vec!["g-off".to_string(), "sess-hide".to_string()]);
     }
@@ -364,5 +383,34 @@ mod tests {
         // Base allows it → minimal behavior: local key removed (empty parent collapsed).
         let local = read_object_lossy(&dir.join("settings.local.json"));
         assert!(local.get("enabledPlugins").and_then(|m| m.get("gh@m")).is_none());
+    }
+
+    #[test]
+    fn forced_on_removed_from_hidden_skills_off_set() {
+        let dir = tmp();
+        std::fs::write(dir.join("settings.local.json"),
+            r#"{"skillOverrides":{"g-off":"off","forced-skill":"off"}}"#).unwrap();
+        // forced_on=[forced-skill]: it must be removed from the off set even though globally off.
+        let mut off = resolve_session_hidden_skills(&dir, &[], &["forced-skill".to_string()]);
+        off.sort();
+        // g-off stays in the off set; forced-skill is removed because it's forced on.
+        assert_eq!(off, vec!["g-off".to_string()]);
+        assert!(!off.contains(&"forced-skill".to_string()));
+    }
+
+    #[test]
+    fn resolve_session_forced_on_skills_returns_globally_off_ones() {
+        let dir = tmp();
+        // Global disables g-off; also-off not forced on here.
+        std::fs::write(dir.join("settings.json"),
+            r#"{"skillOverrides":{"g-off":"off","also-off":"off"}}"#).unwrap();
+        // Force on g-off (globally disabled) and always-on (globally enabled by default).
+        let forced = resolve_session_forced_on_skills(&dir, &["g-off".to_string(), "always-on".to_string()]);
+        // g-off is globally disabled → needs explicit "on" in bridge → in returned set.
+        assert!(forced.contains(&"g-off".to_string()),
+            "globally-off forced skill must appear in forced-on set");
+        // always-on is globally enabled → no bridge "on" needed → NOT in set.
+        assert!(!forced.contains(&"always-on".to_string()),
+            "globally-on skill must NOT appear in forced-on set");
     }
 }

@@ -2422,6 +2422,9 @@ mod fork_session {
                     extra_mcp_servers: vec![],
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await
@@ -2735,6 +2738,9 @@ mod fork_session {
                     extra_mcp_servers: vec![],
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await
@@ -2784,6 +2790,9 @@ mod fork_session {
                     extra_mcp_servers: vec![],
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await
@@ -2847,6 +2856,9 @@ mod fork_session {
                     extra_mcp_servers: vec![],
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await
@@ -2926,6 +2938,9 @@ mod fork_session {
                     extra_mcp_servers: extra.clone(),
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await
@@ -2957,6 +2972,63 @@ mod fork_session {
         assert_eq!(opts.extra_mcp_servers[0].command, Some("npx".into()));
         assert_eq!(opts.extra_mcp_servers[1].name, "my-http");
         assert_eq!(opts.extra_mcp_servers[1].url, Some("https://example.com/mcp".into()));
+    }
+
+    /// forced_on_plugins / forced_on_skills / forced_on_mcp_servers must thread from
+    /// submit_session → store → spawn_opts and appear on SpawnOptions.
+    /// A missing forced_on_* assignment in the spawn_opts build causes this test to FAIL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_opts_threads_forced_on_fields() {
+        let src = tmp();
+        let e = make_engine(&src, EngineOverrides::default()).await;
+
+        let plugins = vec!["superpowers@claude-plugins-official".to_string()];
+        let skills  = vec!["rke2-ops".to_string()];
+        let mcp     = vec!["forced-server".to_string()];
+
+        let id = e
+            .submit_session(
+                vec![],
+                vec![],
+                "forced-on threading test".into(),
+                HashMap::new(),
+                SubmitMeta {
+                    forced_on_plugins:     plugins.clone(),
+                    forced_on_skills:      skills.clone(),
+                    forced_on_mcp_servers: mcp.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        // Verify store persistence.
+        assert_eq!(s.forced_on_plugins,     plugins, "forced_on_plugins not persisted to store");
+        assert_eq!(s.forced_on_skills,      skills,  "forced_on_skills not persisted to store");
+        assert_eq!(s.forced_on_mcp_servers, mcp,     "forced_on_mcp_servers not persisted to store");
+
+        let item = QueueItem {
+            id: id.clone(),
+            prompt: "go".into(),
+            env: HashMap::new(),
+            resume_session_id: None,
+            enqueued_at: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            context_prefix: None,
+        };
+        let opts = e.spawn_opts(&s, &item);
+        // forced_on_plugins threads verbatim to SpawnOptions.
+        assert_eq!(opts.forced_on_plugins, plugins, "forced_on_plugins not in SpawnOptions");
+        // forced_on_mcp_servers threads verbatim (spawn no-op, but must be stored).
+        assert_eq!(opts.forced_on_mcp_servers, mcp, "forced_on_mcp_servers not in SpawnOptions");
+        // forced_on_skills: rke2-ops is globally on (no global overrides in test env),
+        // so resolve_session_forced_on_skills returns [] — no explicit "on" needed.
+        // The raw session value is still preserved (tested above via store assertion).
+        assert!(opts.forced_on_skills.is_empty(),
+            "forced_on_skills in SpawnOptions should be empty when skill is globally on: {:?}", opts.forced_on_skills);
     }
 
     // ── cwd resolution: Claude CLI's --resume is cwd-scoped (project slug = pwd-derived).
@@ -3159,6 +3231,9 @@ mod fork_session {
                     extra_mcp_servers: vec![],
                     claude_md: None,
                     staged_uploads: vec![],
+                    forced_on_plugins: vec![],
+                    forced_on_skills: vec![],
+                    forced_on_mcp_servers: vec![],
                 },
             )
             .await

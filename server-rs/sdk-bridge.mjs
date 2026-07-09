@@ -42,6 +42,7 @@ process.stderr.write(
   `permission_mode=${process.env.SDK_BRIDGE_PERMISSION_MODE || ""} ` +
   `stderr_path=${STDERR_PATH} stderr_path_set=${STDERR_PATH ? "yes" : "no"} ` +
   `hidden_skills=${process.env.SDK_BRIDGE_HIDDEN_SKILLS || ""} ` +
+  `forced_on_skills=${process.env.SDK_BRIDGE_FORCED_ON_SKILLS || ""} ` +
   `enabled_plugins=${process.env.SDK_BRIDGE_ENABLED_PLUGINS || ""} ` +
   `hidden_mcp=${process.env.SDK_BRIDGE_HIDDEN_MCP || ""} ` +
   `extra_mcp=${process.env.SDK_BRIDGE_EXTRA_MCP ? "set" : ""} ` +
@@ -222,8 +223,14 @@ const parseNameListEnv = (envName) => {
 const settings = {};
 if (ultracode) settings.ultracode = true;
 const hiddenSkills = parseNameListEnv("SDK_BRIDGE_HIDDEN_SKILLS");
-if (hiddenSkills.length) {
-  settings.skillOverrides = Object.fromEntries(hiddenSkills.map((name) => [name.trim(), "off"]));
+const forcedOnSkills = parseNameListEnv("SDK_BRIDGE_FORCED_ON_SKILLS");
+if (hiddenSkills.length || forcedOnSkills.length) {
+  // Build skillOverrides: "off" entries first, then "on" entries (forced-on wins if a name
+  // appears in both — API rejects that combination, but belt-and-suspenders here too).
+  const overrides = {};
+  for (const name of hiddenSkills) { if (name.trim()) overrides[name.trim()] = "off"; }
+  for (const name of forcedOnSkills) { if (name.trim()) overrides[name.trim()] = "on"; }
+  if (Object.keys(overrides).length) settings.skillOverrides = overrides;
 }
 // Per-session EXPLICIT plugin enable map: `{"<plugin>@<marketplace>": true|false}` resolved by the
 // engine from the New-request Filters selection × the installed-plugin registry. Explicit
