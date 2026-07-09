@@ -2717,6 +2717,7 @@ pub mod worktree;
 // Engine method clusters split across sibling files (multi-file inherent impls).
 mod diff;
 mod error;
+mod native_transcript;
 mod recover;
 mod resume_gate;
 mod watchdog;
