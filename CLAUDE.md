@@ -94,3 +94,11 @@ ONLY when the user asks for one:
 Cost note: on a private repo the two macOS matrix jobs bill at 10x minutes (~60–80 billed
 minutes per release run); on a public repo standard-runner minutes are free. Either way,
 release on demand — not per-merge.
+
+## Delivering a build artifact to the user
+The user is remote (no terminal): hand off any built binary/tarball via `./outbox/` (see the global
+outbox note). **Naming rule:**
+- **Default (ad-hoc build) → build timestamp** `<YYYYMMDD-HHMM>.<ext>` (e.g. `20260709-2248.tar.gz`)
+  so ad-hoc builds are distinguishable.
+- **When the user explicitly says "tag" or "release" → version number** `v<version>.<ext>`
+  (e.g. `v0.4.2.tar.gz`), matching the `server-rs/Cargo.toml` version / git tag — NOT the timestamp.
