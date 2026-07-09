@@ -1053,7 +1053,10 @@ impl Engine {
         //   2. the user's session-scoped custom guidance from the New-request form.
         // Best-effort — a write failure must never abort the session.
         {
-            let mut sections: Vec<String> = vec![crate::engine::session_guide::ROUTING_GUIDE.to_string()];
+            let mut sections: Vec<String> = vec![
+                crate::engine::session_guide::ROUTING_GUIDE.to_string(),
+                crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
+            ];
             if wts.len() > 1 {
                 let repo_summaries: Vec<(String, Option<String>)> = wts
                     .iter()
@@ -1632,7 +1635,10 @@ impl Engine {
 
         // Session CLAUDE.md: the routing rule (always) + multi-repo orientation (when >1 worktree).
         {
-            let mut sections = vec![crate::engine::session_guide::ROUTING_GUIDE.to_string()];
+            let mut sections = vec![
+                crate::engine::session_guide::ROUTING_GUIDE.to_string(),
+                crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
+            ];
             if wts.len() > 1 {
                 let repo_summaries: Vec<(String, Option<String>)> = wts.iter()
                     .map(|w| (w.repo.clone(), crate::engine::session_guide::summarize_repo(&w.worktree_path)))
