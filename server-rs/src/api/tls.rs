@@ -136,11 +136,21 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp.{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes)?;
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    // Clean the temp file on EVERY failure path, not just a failed rename: an early `?` return
+    // after a failed set_permissions would otherwise leave a world-readable temp copy of a
+    // PRIVATE KEY on disk (flagged in the HTTPS PR review).
+    let staged: io::Result<()> = (|| {
+        std::fs::write(&tmp, bytes)?;
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

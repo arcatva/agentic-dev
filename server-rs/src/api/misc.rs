@@ -439,22 +439,24 @@ mod tests {
 
     /// Points `providers_file_path()` at a fresh temp file for the duration of a test, so tests
     /// exercising the BYOK registry NEVER touch the real `~/.agentic-dev/providers.json` (a
-    /// non-empty upsert there would overwrite the user's stored API keys). The env var is
-    /// process-global, so a lock serializes the tests that use it; Drop restores the env.
+    /// non-empty upsert there would overwrite the user's stored API keys). Uses the data-race-free
+    /// PROVIDERS_FILE_OVERRIDE static instead of `env::set_var` — setenv racing a concurrent getenv
+    /// from any other test thread is UB in glibc (the "process-global set_var race" flake). The
+    /// override is process-global, so a lock still serializes the tests that use it; Drop clears it.
     struct ProvidersFileGuard {
         _dir: tempfile::TempDir,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl Drop for ProvidersFileGuard {
         fn drop(&mut self) {
-            std::env::remove_var("AGENTIC_PROVIDERS_FILE");
+            *crate::engine::providers::PROVIDERS_FILE_OVERRIDE.lock() = None;
         }
     }
     fn isolated_providers_file() -> ProvidersFileGuard {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("AGENTIC_PROVIDERS_FILE", dir.path().join("providers.json"));
+        *crate::engine::providers::PROVIDERS_FILE_OVERRIDE.lock() = Some(dir.path().join("providers.json"));
         ProvidersFileGuard { _dir: dir, _lock: lock }
     }
 
