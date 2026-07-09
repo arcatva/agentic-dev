@@ -528,6 +528,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let arr: serde_json::Value = body_json(resp).await;
         assert!(arr.as_array().unwrap().iter().any(|c| c["id"] == "gh@m" && c["globalEnabled"] == true));
+        assert!(arr.as_array().unwrap().iter().any(|c| c["kind"] == "skill" && c["id"] == "rke2-ops" && c["globalEnabled"] == true));
 
         // POST toggle → disable the plugin globally.
         let resp = app(st.clone())
@@ -562,6 +563,32 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let v = body_json(resp).await;
         assert!(v["error"].as_str().unwrap().contains("unknown kind"));
+    }
+
+    #[tokio::test]
+    async fn global_settings_toggle_unknown_id_is_400() {
+        // A valid kind but an id that has no installed component must return 400 with no side effect.
+        let st = test_state().await;
+        let base = st.config.claude_config_base.clone();
+        let token = issue_token("s3cret", 3600, now_secs());
+
+        // No plugins or skills seeded — "does-not-exist@x" is unknown.
+        let resp = app(st.clone())
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/global-settings/toggle")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"plugin","id":"does-not-exist@x","enabled":false}"#)).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(v["error"].as_str().unwrap().contains("does-not-exist@x"),
+            "error message should name the bogus id: {}", v["error"]);
+
+        // No settings.local.json must have been written — rejection produces no side effect.
+        assert!(!base.join("settings.local.json").exists(),
+            "settings.local.json must not be created on a rejected toggle");
     }
 
 }
