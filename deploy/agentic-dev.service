@@ -1,0 +1,25 @@
+[Unit]
+Description=agentic-dev platform (LAN agent-driven dev)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h = the user's home directory (systemd expands specifiers in Environment= too).
+WorkingDirectory=%h
+# claude + node must be on PATH: the server spawns the Node SDK bridge (sdk-bridge.mjs) per turn,
+# which drives claude. Adjust if your node/claude live elsewhere.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGENTIC_PORT=7420
+Environment=AGENTIC_HOST=0.0.0.0
+# AGENTIC_MAX_CONCURRENT unset -> unlimited concurrent sessions; set a number here to cap.
+# Secrets (AGENTIC_PASSWORD, AGENTIC_AUTH_SECRET) live here, NOT in this unit:
+EnvironmentFile=%h/.agentic-dev/service.env
+# Packaged install layout (install.sh): binary + sdk-bridge.mjs side by side.
+# Building from source instead? Point this at <repo>/server-rs/target/release/agentic-dev-server.
+ExecStart=%h/.local/share/agentic-dev/agentic-dev-server
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

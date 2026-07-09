@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for agentic-dev (macOS equivalent of deploy/agentic-dev.service).
+  @HOME@ placeholders are substituted by install.sh (launchd does not expand ~ or variables
+  in ProgramArguments/EnvironmentVariables). Secrets stay in ~/.agentic-dev/service.env,
+  sourced by the /bin/sh wrapper below — they are never written into this plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.agentic.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>set -a; . "$HOME/.agentic-dev/service.env"; exec "@INSTALL_DIR@/agentic-dev-server"</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- claude + node must be resolvable: the server spawns the Node SDK bridge per turn.
+             install.sh substitutes the PATH that actually passed its preflight. -->
+        <key>PATH</key>
+        <string>@SVC_PATH@</string>
+        <key>AGENTIC_PORT</key>
+        <string>7420</string>
+        <key>AGENTIC_HOST</key>
+        <string>0.0.0.0</string>
+        <!-- AGENTIC_MAX_CONCURRENT unset -> unlimited concurrent sessions; add the key to cap. -->
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@HOME@/.agentic-dev/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/.agentic-dev/server.log</string>
+</dict>
+</plist>
