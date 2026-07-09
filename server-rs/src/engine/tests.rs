@@ -2164,6 +2164,12 @@ mod fork_session {
         ).unwrap().trim().to_string();
         assert_eq!(wt_sha, sha, "forked worktree must point at source HEAD");
 
+        // Regression guard for the real fork_session assembly site: it injects the build-env guide too.
+        let fork_md = std::fs::read_to_string(wt.join("CLAUDE.md"))
+            .expect("forked session must get an injected CLAUDE.md");
+        assert!(fork_md.contains("## Build environment — inherit it from the main checkout"),
+            "fork_session must inject the worktree build-env guide");
+
         // No claude process was spawned — there is no RunningTurn with the new id.
         let list = e.list().await;
         let fork_in_list = list.iter().find(|s| s.id == forked.id).unwrap();
@@ -2536,6 +2542,10 @@ mod fork_session {
         assert!(body.contains("Run my tests before committing."), "custom guidance must be present");
         assert!(!body.contains("# agentic-dev multi-repo session"),
             "single-repo session must NOT get the multi-repo orientation guide");
+        // Regression guard for the real submit_session assembly site: the build-env guide is
+        // injected on every session (single-repo too), not just hand-built in a unit test.
+        assert!(body.contains("## Build environment — inherit it from the main checkout"),
+            "submit_session must inject the worktree build-env guide");
     }
 
     /// Multi-repo + custom CLAUDE.md combines both into one file, separated by a horizontal rule:

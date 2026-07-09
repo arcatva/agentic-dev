@@ -129,9 +129,10 @@ worktree builds its own; sharing it causes stale or corrupt results.
 How (run at the worktree's repo root, e.g. inside `agentic-dev-android/`):
     ln -s ~/src/<repo>/local.properties .
     ln -s ~/src/<repo>/.gradle .gradle
-Symlinks share the main checkout's deps/caches/keys (fine on this single-user machine)
-and are gitignored, so they never get committed. If a repo ships its own setup
-(`make setup` / a bootstrap script), prefer that."#;
+Symlinks point at the main checkout's deps/caches/keys — reuse, not copies. This session
+pushes its branch and opens PRs, so before you link secrets (`*.keystore`,
+`keystore.properties`, `.env`) confirm they're gitignored in that repo and never `git add`
+a symlink to one. If a repo ships its own setup (`make setup` / a bootstrap script), prefer that."#;
 
 /// Write the session-dir `CLAUDE.md` from an ordered list of `sections` (e.g. the multi-repo
 /// orientation guide followed by the user's session-scoped custom guidance). Blank/whitespace-only
