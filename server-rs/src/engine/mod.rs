@@ -2678,6 +2678,7 @@ pub mod atomic_write;
 pub mod auto_resume;
 pub mod classify_error;
 pub mod delegate;
+pub mod global_settings;
 pub mod groups;
 pub mod plugins;
 pub mod providers;
