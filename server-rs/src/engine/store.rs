@@ -497,6 +497,11 @@ impl Store {
             }
         }
         sqlx::query("UPDATE sessions SET lastUserMessageAt = createdAt WHERE lastUserMessageAt IS NULL").execute(&pool).await?;
+        // Idempotent backfill: any session that has a parent (created by fork_session) but
+        // still has the legacy `origin='native'` (or NULL on rows that predate the column)
+        // is upgraded in place to 'fork'. Re-running this on already-migrated data is a
+        // no-op because `origin='fork'` is excluded by the WHERE.
+        sqlx::query("UPDATE sessions SET origin='fork' WHERE parentSessionId IS NOT NULL AND (origin IS NULL OR origin='native')").execute(&pool).await?;
         Ok(Store { pool, log_dir: log_dir.as_ref().to_path_buf(), seq: AtomicI64::new(0) })
     }
 

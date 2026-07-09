@@ -54,7 +54,11 @@ pub struct Adoptable {
 }
 
 /// RFC 3339 → epoch ms. Reuses the minimal parser in `auto_resume` (no chrono dep).
-fn iso_to_ms(ts: &str) -> i64 {
+/// `pub(crate)` so engine callers (e.g. `reconcile_from_native`'s recency-bump helper)
+/// can re-parse the `at` field of imported `agentic_prompt` lines for lastUserMessageAt
+/// bookkeeping. Tests also exercise this directly through `translate_lines`, which uses
+/// the same function internally.
+pub(crate) fn iso_to_ms(ts: &str) -> i64 {
     super::auto_resume::rfc3339_to_epoch_ms(ts).unwrap_or(0)
 }
 
