@@ -236,6 +236,30 @@ impl Runner for SdkRunner {
                 cmd.env("SDK_BRIDGE_ENABLED_PLUGINS", json);
             }
         }
+        // Per-session MCP hidden list → SDK_BRIDGE_HIDDEN_MCP (JSON name array).
+        let hidden_mcp: Vec<&str> = spec
+            .hidden_mcp_servers
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !hidden_mcp.is_empty() {
+            if let Ok(json) = serde_json::to_string(&hidden_mcp) {
+                cmd.env("SDK_BRIDGE_HIDDEN_MCP", json);
+            }
+        }
+        // Per-session extra MCP defs → SDK_BRIDGE_EXTRA_MCP (JSON array, hidden names removed).
+        let hidden_set: std::collections::HashSet<&str> = hidden_mcp.iter().copied().collect();
+        let extra_mcp: Vec<&crate::engine::store::McpServerDef> = spec
+            .extra_mcp_servers
+            .iter()
+            .filter(|d| !d.name.trim().is_empty() && !hidden_set.contains(d.name.trim()))
+            .collect();
+        if !extra_mcp.is_empty() {
+            if let Ok(json) = serde_json::to_string(&extra_mcp) {
+                cmd.env("SDK_BRIDGE_EXTRA_MCP", json);
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -644,6 +668,105 @@ mod tests {
         assert!(
             captured.contains("fake stderr line 1") && captured.contains("fake stderr line 2"),
             "bridge stderr must be captured to <log_path>.stderr: {captured}"
+        );
+    }
+
+    #[test]
+    fn start_passes_mcp_envs_to_bridge() {
+        let dir = tmpdir();
+        let rec = dir.join("rec.txt");
+        let log = dir.join("session.jsonl");
+        let fake = fake_node(&dir, &rec);
+        let bridge = dir.join("bridge.mjs");
+        std::fs::write(&bridge, "// fake bridge").unwrap();
+
+        let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+
+        let spec = RunSpec {
+            cwd: dir.to_string_lossy().into_owned(),
+            env,
+            log_path: log,
+            hidden_mcp_servers: vec!["hidden-one".into()],
+            extra_mcp_servers: vec![
+                crate::engine::store::McpServerDef {
+                    name: "extra-mcp".into(),
+                    command: Some("npx".into()),
+                    args: Some(vec!["my-server".into()]),
+                    ..Default::default()
+                },
+                crate::engine::store::McpServerDef {
+                    name: "hidden-one".into(), // must be excluded from EXTRA_MCP
+                    command: Some("npx".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let handle = runner.start(spec);
+        let mut recorded = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            recorded = std::fs::read_to_string(&rec).unwrap_or_default();
+            if recorded.contains("SDK_BRIDGE_HIDDEN_MCP") && recorded.contains("SDK_BRIDGE_EXTRA_MCP") {
+                break;
+            }
+        }
+        handle.stop();
+
+        assert!(
+            recorded.contains("SDK_BRIDGE_HIDDEN_MCP=[\"hidden-one\"]"),
+            "hidden MCP names must be a JSON array; recorded={recorded}"
+        );
+        // Extra MCP must contain "extra-mcp" and must NOT contain "hidden-one" in the EXTRA var.
+        // Parse just the line that starts with SDK_BRIDGE_EXTRA_MCP= to avoid false-positives from
+        // SDK_BRIDGE_HIDDEN_MCP appearing later in the recorded env dump.
+        let extra_mcp_line = recorded.lines()
+            .find(|l| l.starts_with("SDK_BRIDGE_EXTRA_MCP="))
+            .unwrap_or("");
+        assert!(
+            extra_mcp_line.contains("\"extra-mcp\""),
+            "extra MCP must be set and contain extra-mcp; recorded={recorded}"
+        );
+        assert!(
+            !extra_mcp_line.contains("hidden-one"),
+            "hidden-one must be excluded from extra MCP; extra_mcp_line={extra_mcp_line}"
+        );
+    }
+
+    #[test]
+    fn start_omits_mcp_envs_when_empty() {
+        let dir = tmpdir();
+        let rec = dir.join("rec.txt");
+        let log = dir.join("session.jsonl");
+        let fake = fake_node(&dir, &rec);
+        let bridge = dir.join("bridge.mjs");
+        std::fs::write(&bridge, "// fake bridge").unwrap();
+
+        let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+
+        let spec = RunSpec {
+            cwd: dir.to_string_lossy().into_owned(),
+            env,
+            log_path: log,
+            ..Default::default()
+        };
+        let handle = runner.start(spec);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let recorded = std::fs::read_to_string(&rec).unwrap_or_default();
+        handle.stop();
+
+        assert!(
+            !recorded.contains("SDK_BRIDGE_HIDDEN_MCP"),
+            "must not set SDK_BRIDGE_HIDDEN_MCP when empty; recorded={recorded}"
+        );
+        assert!(
+            !recorded.contains("SDK_BRIDGE_EXTRA_MCP"),
+            "must not set SDK_BRIDGE_EXTRA_MCP when empty; recorded={recorded}"
         );
     }
 }

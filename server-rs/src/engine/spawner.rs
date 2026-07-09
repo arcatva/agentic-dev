@@ -22,6 +22,10 @@ pub struct SpawnOptions {
     /// the installed-plugin registry; `true` entries force-enable a plugin for this session even when
     /// it is disabled globally (command-line settings win). Empty map → no env → CLI defaults.
     pub enabled_plugins: std::collections::BTreeMap<String, bool>,
+    /// MCP server names to disable for this session (blacklist). Forwarded as SDK_BRIDGE_HIDDEN_MCP.
+    pub hidden_mcp_servers: Vec<String>,
+    /// Ad-hoc MCP server defs for this session only. Hidden names are removed before injection.
+    pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
     pub log_path: PathBuf,                  // the bridge appends stream-json here; the tailer reads it
     pub unit: String,                       // label (agentic-<id>)
     pub memory_max: Option<String>,
@@ -79,6 +83,8 @@ pub fn build_spec(opts: &SpawnOptions) -> RunSpec {
         resume_session_id: opts.resume_session_id.clone(),
         hidden_skills: opts.hidden_skills.clone(),
         enabled_plugins: opts.enabled_plugins.clone(),
+        hidden_mcp_servers: opts.hidden_mcp_servers.clone(),
+        extra_mcp_servers: opts.extra_mcp_servers.clone(),
         permission_mode: opts.permission_mode.clone(),
     }
 }
