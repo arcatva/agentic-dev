@@ -355,6 +355,15 @@ fn read_git_head(cwd: &str) -> (String, String) {
     (branch, sha)
 }
 
+/// Single-quote `s` for safe interpolation into a POSIX shell command line. Wraps the whole
+/// string in single quotes and rewrites any embedded single quote as `'\''` (close-quote,
+/// backslash-escaped literal quote, reopen-quote) — the standard shell-quoting idiom. Used by
+/// `detach_session` so a `cwd` containing spaces or shell metacharacters can't break out of the
+/// generated `cd <cwd> && claude --resume …` command when pasted into a terminal.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 // ──────────────────────────────────────────────────────────────
 // has_active_workflow
 // ──────────────────────────────────────────────────────────────
@@ -846,6 +855,28 @@ impl Engine {
             let _ = self.0.store.remove(&id).await;
             return Err(e);
         }
+
+        // An adopted row is a FINISHED/idle resumable session: it carries real history but
+        // nothing is enqueued. `Store::create` leaves it 'pending', but `pending` reads as BUSY
+        // to `follow_up`'s `is_busy` gate — so the user's next message would be rejected — and
+        // restart recovery treats a `pending` row as a queued turn and re-enqueues the seeded
+        // prompt. Flip it to the same status a normally-FINISHED turn lands on ('done', mirrors
+        // fork_session's post-create flip) so the session sits idle and accepts a follow-up.
+        if let Err(e) = self
+            .0
+            .store
+            .update(
+                &id,
+                SessionPatch {
+                    status: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            let _ = self.0.store.remove(&id).await;
+            return Err(e.to_string());
+        }
         Ok(id)
     }
 
@@ -871,44 +902,55 @@ impl Engine {
             .ok_or("session has no claudeSessionId")?;
         let cwd = s.worktree_path.clone().unwrap_or_default();
 
-        // Best-effort hard-stop the live streaming process so the terminal becomes
-        // the single writer. `kill` is the existing SIGTERM path; it only *sends* the
-        // stop signal (via `run.stop()`) and returns immediately — it does not wait for
-        // the pump task to actually exit. Without waiting, an in-flight turn's last
-        // lines may not be flushed to the native transcript (#2) yet, and the line
-        // count read below would freeze the watermark too low. `wait_for_exit` is the
-        // engine's real "is this session still running" signal — it polls
-        // `state.running`, the same map `is_busy`/`kill` consult — bounded at 5s so a
-        // stuck process can't hang detach forever; a no-op when already idle.
-        self.kill(id).await;
-        self.wait_for_exit(id).await;
+        // Recompute the watermark ONLY on the FIRST detach. A repeat detach (double-click /
+        // retry) while the row is ALREADY detached must not touch the watermark: between the
+        // first handoff and now the terminal may have appended turns, and re-reading the
+        // transcript length here would mark those new terminal lines as already-imported,
+        // permanently skipping them on the next reclaim. Leave the first-detach watermark
+        // frozen and just hand back the resume command again.
+        if !s.detached {
+            // Best-effort hard-stop the live streaming process so the terminal becomes
+            // the single writer. `kill` is the existing SIGTERM path; it only *sends* the
+            // stop signal (via `run.stop()`) and returns immediately — it does not wait for
+            // the pump task to actually exit. Without waiting, an in-flight turn's last
+            // lines may not be flushed to the native transcript (#2) yet, and the line
+            // count read below would freeze the watermark too low. `wait_for_exit` is the
+            // engine's real "is this session still running" signal — it polls
+            // `state.running`, the same map `is_busy`/`kill` consult — bounded at 5s so a
+            // stuck process can't hang detach forever; a no-op when already idle.
+            self.kill(id).await;
+            self.wait_for_exit(id).await;
 
-        // Freeze the watermark at the current native line count — but never let it
-        // regress below what's already been imported (`s.native_watermark_lines`,
-        // read before the kill above). `read_lines` returns an empty vec when the
-        // transcript file is missing or unreadable (e.g. moved/deleted out from under
-        // us), and naively trusting that count would zero out an already-nonzero
-        // watermark; a later reopen would then re-translate the ENTIRE native history
-        // back into #1, duplicating every line already imported.
-        let path = crate::engine::native_transcript::transcript_path(
-            &self.0.cfg.claude_config_base,
-            &cwd,
-            &csid,
-        );
-        let read_count = crate::engine::native_transcript::read_lines(&path).len() as i64;
-        let total = read_count.max(s.native_watermark_lines);
-        self.0
-            .store
-            .set_watermark(id, total)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.0
-            .store
-            .set_detached(id, true)
-            .await
-            .map_err(|e| e.to_string())?;
+            // Freeze the watermark at the current native line count — but never let it
+            // regress below what's already been imported (`s.native_watermark_lines`,
+            // read before the kill above). `read_lines` returns an empty vec when the
+            // transcript file is missing or unreadable (e.g. moved/deleted out from under
+            // us), and naively trusting that count would zero out an already-nonzero
+            // watermark; a later reopen would then re-translate the ENTIRE native history
+            // back into #1, duplicating every line already imported.
+            let path = crate::engine::native_transcript::transcript_path(
+                &self.0.cfg.claude_config_base,
+                &cwd,
+                &csid,
+            );
+            let read_count = crate::engine::native_transcript::read_lines(&path).len() as i64;
+            let total = read_count.max(s.native_watermark_lines);
+            self.0
+                .store
+                .set_watermark(id, total)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.0
+                .store
+                .set_detached(id, true)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
-        let resume_cmd = format!("cd {} && claude --resume {}", cwd, csid);
+        // Shell-single-quote `cwd`: it may contain spaces or shell metacharacters, which would
+        // otherwise break (or inject into) the `cd` when the user pastes this into a terminal.
+        // `csid` is already validated (`is_valid_csid`) at adopt time, so it needs no quoting.
+        let resume_cmd = format!("cd {} && claude --resume {}", shell_single_quote(&cwd), csid);
         Ok(DetachInfo {
             cwd,
             claude_session_id: csid,
@@ -1355,21 +1397,47 @@ impl Engine {
             return Err(EngineError::Busy);
         }
 
+        // FIX (reclaim cursor): snapshot the log-position cursor BEFORE the reclaim reconcile
+        // below. The reclaim appends the terminal-added turns to #1; if the returned stream
+        // cursor were computed AFTER that append, the client would start its stream past the
+        // reclaimed lines and silently skip the terminal turns. Capturing `since` here — at the
+        // pre-reclaim log length — makes the returned cursor PRECEDE the reconciled lines so the
+        // client stream includes them.
+        let since = self.0.store.read_log(id).len() as i64;
+
         // Reclaim-on-reopen: if this session was detached to a terminal `claude`, the
         // terminal may have appended turns to #2 while we were stopped. Pull that delta
         // into #1 and clear the flag BEFORE preparing the resume turn, so `--resume`
         // continues from the reconciled history and turn counts self-correct.
         if s.detached {
-            // Only reclaim ownership (clear `detached`) when the import actually succeeded.
-            // Clearing it unconditionally — even on a failed reconcile — would silently and
-            // PERMANENTLY drop whatever terminal-added delta failed to import: the watermark
-            // stays wherever the failed call left it, but nothing will ever retry the pull
-            // because the next reopen no longer sees `detached == true`. Leaving the flag set
-            // on failure means the next reopen retries the same reconcile. Either way the turn
-            // itself still proceeds — this is best-effort bookkeeping around it, not a gate.
+            // Clear `detached` (reclaim ownership) ONLY when the native transcript file actually
+            // EXISTS and the import succeeded. `reconcile_from_native` returns Ok(0) when the
+            // transcript file is ABSENT (nothing to import) — but a transiently-missing file
+            // (moved/not yet synced) is exactly the case we must retry, not abandon. Clearing the
+            // flag on that Ok(0) would drop the retry (the next reopen no longer sees
+            // `detached == true`). So: only a present-file + successful reconcile clears detached;
+            // an absent file or a failed reconcile leaves detached=true for the next reopen. The
+            // turn itself still proceeds either way — this is best-effort bookkeeping, not a gate.
+            let transcript_exists = s
+                .claude_session_id
+                .as_deref()
+                .map(|csid| {
+                    crate::engine::native_transcript::transcript_path(
+                        &self.0.cfg.claude_config_base,
+                        s.worktree_path.as_deref().unwrap_or_default(),
+                        csid,
+                    )
+                    .is_file()
+                })
+                .unwrap_or(false);
             match self.reconcile_from_native(id).await {
-                Ok(_) => {
+                Ok(_) if transcript_exists => {
                     let _ = self.0.store.set_detached(id, false).await; // agentic-dev reclaims ownership
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "[engine] follow_up reclaim: native transcript missing for {id}, leaving detached=true for retry on next reopen"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1379,8 +1447,9 @@ impl Engine {
             }
         }
 
-        // Read the log once and reuse it for both the snapshot turn index and the `since` offset
-        // (log files can be large — avoid a second full read).
+        // Read the (possibly reclaim-grown) log for the snapshot turn index. NOTE: the returned
+        // `since` cursor was captured ABOVE, before the reclaim, on purpose (see the FIX comment);
+        // do NOT recompute it from this post-reclaim read or the client will skip reclaimed lines.
         let log = self.0.store.read_log(id);
 
         // Rewind support: snapshot the (stable, idle) working tree BEFORE this resumed turn runs, so
@@ -1388,9 +1457,6 @@ impl Engine {
         // turn's index = number of prompts already in the log. Best-effort — never fails the turn.
         let turn_index = crate::engine::title::count_user_turns(&log);
         self.snapshot_worktrees(&s, turn_index);
-
-        // Queued/idle branch: re-enqueue for a resumed turn.
-        let since = log.len() as i64;
 
         // Fork's first turn: deliver the source session's transcript (the "seed prompt") as
         // context for this turn. fork_session stored it in the new session's `prompt` column but
@@ -1792,6 +1858,25 @@ The new session is now active. Awaiting the user's next message.",
         Ok(s)
     }
 
+    /// True when `path` lives INSIDE the managed worktrees root (`cfg.worktrees_root`).
+    ///
+    /// DATA-LOSS guard for adopt-in-place: an adopted session's `worktree_path` is the user's
+    /// REAL project cwd, which is OUTSIDE `worktrees_root`. Every `remove_dir_all` on a session's
+    /// worktree dir must first pass this check so `delete`/`discard` never blow away the user's
+    /// actual project directory — they may only remove the managed `<worktrees_root>/<id>` dirs.
+    /// Canonicalizes both sides where possible (resolving symlinks/`..`); when a path can't be
+    /// canonicalized (e.g. already gone) it falls back to raw-prefix comparison against both the
+    /// canonicalized and raw root, so a genuinely-managed dir is never mis-skipped.
+    fn within_worktrees_root(&self, path: &std::path::Path) -> bool {
+        let root_raw = self.0.cfg.worktrees_root.clone();
+        let root_canon = std::fs::canonicalize(&root_raw).unwrap_or_else(|_| root_raw.clone());
+        let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        path_canon.starts_with(&root_canon)
+            || path_canon.starts_with(&root_raw)
+            || path.starts_with(&root_canon)
+            || path.starts_with(&root_raw)
+    }
+
     /// Discard the worktree for a done/idle session.
     pub async fn discard(&self, id: &str) -> Result<(), EngineError> {
         let s = self.live_session(id).await?;
@@ -1810,9 +1895,18 @@ The new session is now active. Awaiting the user's next message.",
                 tracing::warn!("[engine] discard_worktree {repo} failed: {e}");
             }
         }
-        // Remove the session worktree dir itself
-        if let Err(e) = std::fs::remove_dir_all(&wt_path) {
-            tracing::warn!("[engine] remove worktree dir failed: {e}");
+        // Remove the session worktree dir itself — but ONLY if it is inside the managed
+        // worktrees root. An adopt-in-place session's worktree_path is the user's real project
+        // cwd (outside the root); removing it would destroy the user's actual directory.
+        if self.within_worktrees_root(&wt_path) {
+            if let Err(e) = std::fs::remove_dir_all(&wt_path) {
+                tracing::warn!("[engine] remove worktree dir failed: {e}");
+            }
+        } else {
+            tracing::warn!(
+                "[engine] discard: skipping remove_dir_all of {} — outside worktrees_root (adopt-in-place cwd)",
+                wt_path.display()
+            );
         }
         // Drop any per-turn rewind snapshot refs for this session (best-effort).
         for repo in &s.repos {
@@ -1969,9 +2063,18 @@ The new session is now active. Awaiting the user's next message.",
                 }
                 // Remove the whole session dir (worktrees + any per-session scratch). Credentials
                 // and transcripts live in the shared ~/.claude, so there is no per-session config
-                // dir to clean up here anymore.
-                if let Err(e) = std::fs::remove_dir_all(&wt_path) {
-                    tracing::warn!("[engine] remove session dir failed: {e}");
+                // dir to clean up here anymore. Guard with within_worktrees_root: an adopt-in-place
+                // session's worktree_path is the user's real project cwd (outside the root) —
+                // remove_dir_all'ing it would destroy the user's actual directory (DATA LOSS).
+                if self.within_worktrees_root(&wt_path) {
+                    if let Err(e) = std::fs::remove_dir_all(&wt_path) {
+                        tracing::warn!("[engine] remove session dir failed: {e}");
+                    }
+                } else {
+                    tracing::warn!(
+                        "[engine] delete: skipping remove_dir_all of {} — outside worktrees_root (adopt-in-place cwd)",
+                        wt_path.display()
+                    );
                 }
             }
         }

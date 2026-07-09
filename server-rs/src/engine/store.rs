@@ -502,6 +502,18 @@ impl Store {
         // is upgraded in place to 'fork'. Re-running this on already-migrated data is a
         // no-op because `origin='fork'` is excluded by the WHERE.
         sqlx::query("UPDATE sessions SET origin='fork' WHERE parentSessionId IS NOT NULL AND (origin IS NULL OR origin='native')").execute(&pool).await?;
+        // Atomic adopt: enforce that a non-null external Claude session id maps to at most one
+        // row. A PARTIAL unique index (WHERE claudeSessionId IS NOT NULL) lets the many rows with
+        // NULL csid coexist while making a concurrent double-adopt of the same csid fail the
+        // second csid-setting UPDATE with a constraint error — which adopt_session's existing
+        // rollback then cleans up. Guarded on the column actually existing: a very old/minimal
+        // legacy table (claudeSessionId is a base column, not in ADDED_COLUMNS, so it isn't
+        // back-migrated) would otherwise make the index DDL fail on a missing column.
+        let cols_now: Vec<String> = sqlx::query("PRAGMA table_info(sessions)").fetch_all(&pool).await?
+            .iter().map(|r| r.get::<String, _>("name")).collect();
+        if cols_now.iter().any(|c| c == "claudeSessionId") {
+            sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_claude_session_id ON sessions(claudeSessionId) WHERE claudeSessionId IS NOT NULL").execute(&pool).await?;
+        }
         Ok(Store { pool, log_dir: log_dir.as_ref().to_path_buf(), seq: AtomicI64::new(0) })
     }
 
