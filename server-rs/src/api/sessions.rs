@@ -242,9 +242,13 @@ pub(crate) fn parse_body_lenient<T: serde::de::DeserializeOwned + Default>(bytes
 /// Returns `Some(error_message)` if the same component id appears in both a hidden list
 /// and the corresponding forced-on list, which is invalid (contradictory overrides).
 fn validate_disjoint(hidden: &[String], forced_on: &[String], kind: &str) -> Option<String> {
-    let hidden_set: std::collections::HashSet<&str> = hidden.iter().map(|s| s.as_str()).collect();
+    // Trim both sides so a whitespace-padded duplicate is caught — the resolve layer trims ids too,
+    // so an untrimmed check here would let a contradictory pair through the 400 and silently resolve
+    // via forced-on precedence instead of erroring.
+    let hidden_set: std::collections::HashSet<&str> = hidden.iter().map(|s| s.trim()).collect();
     for id in forced_on {
-        if hidden_set.contains(id.as_str()) {
+        let id = id.trim();
+        if hidden_set.contains(id) {
             return Some(format!("{kind}: \"{id}\" appears in both hidden and forcedOn lists — choose one"));
         }
     }
@@ -1834,6 +1838,16 @@ mod tests {
         assert!(validate_disjoint(&[], &[], "skills").is_none());
         assert!(validate_disjoint(&["a".to_string()], &[], "mcp").is_none());
         assert!(validate_disjoint(&[], &["a".to_string()], "plugins").is_none());
+    }
+
+    #[test]
+    fn validate_disjoint_catches_whitespace_padded_conflict() {
+        // A trailing/leading-space duplicate must still be caught (the resolve layer trims, so an
+        // untrimmed check here would let a contradictory pair through the 400).
+        assert!(validate_disjoint(&["gh@m".to_string()], &["gh@m ".to_string()], "plugins").is_some());
+        assert!(validate_disjoint(&[" rke2-ops".to_string()], &["rke2-ops".to_string()], "skills").is_some());
+        // A genuinely different id (case-sensitive) is NOT a conflict.
+        assert!(validate_disjoint(&["gh@m".to_string()], &["GH@m".to_string()], "plugins").is_none());
     }
 
     #[tokio::test]
