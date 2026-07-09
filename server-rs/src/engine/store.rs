@@ -100,7 +100,27 @@ pub struct Session {
     /// Cleared by any accepted follow-up (manual or automatic). Column `autoResumeAt`.
     #[serde(rename = "autoResumeAt", skip_serializing_if = "Option::is_none")]
     pub auto_resume_at: Option<i64>,
+    /// Provenance of this session row: `"native"` (default — created normally),
+    /// `"fork"` (created by `Engine::fork_session`), or `"adopted"` (imported from
+    /// an external `claude` transcript). Immutable source of truth (survives user
+    /// regrouping). Column `origin` (TEXT DEFAULT 'native').
+    #[serde(default = "default_origin")] pub origin: String,
+    /// `true` while this session has been handed off to a terminal `claude` and the
+    /// server is paused. Used as a single-writer guard and as the reconcile trigger:
+    /// when `detached == true` on a follow-up / reopen path, the engine imports any
+    /// native-transcript delta into `#1` and clears the flag. Column `detached`
+    /// (INTEGER DEFAULT 0 — SQLite has no native bool, stored as 0/1).
+    #[serde(default)] pub detached: bool,
+    /// Line-count of the native Claude transcript (#2) already reflected in this
+    /// session's rendered log (#1). Updated by adopt (full import) and reconcile
+    /// (delta import). Column `nativeWatermarkLines` (INTEGER DEFAULT 0).
+    #[serde(rename = "nativeWatermarkLines", default)] pub native_watermark_lines: i64,
 }
+
+/// Serde default for `Session::origin` — keeps the wire shape `"native"` for
+/// legacy rows that predate the column (and any row written before `origin`
+/// was set explicitly).
+fn default_origin() -> String { "native".into() }
 
 /// Serde default for `Session::auto_resume` — the toggle is opt-OUT.
 fn default_true() -> bool {
@@ -152,6 +172,19 @@ pub struct CreateInput {
     pub permission_mode: Option<String>,
     /// Optional group assignment. `None` = uncategorized.
     pub group_id: Option<String>,
+    /// Provenance of the session: `"native"` (default — created normally),
+    /// `"fork"` (created by `Engine::fork_session`), or `"adopted"` (imported
+    /// from an external `claude` transcript). `None` writes the column
+    /// default `"native"`. Column `origin` (TEXT DEFAULT 'native').
+    pub origin: Option<String>,
+}
+
+impl CreateInput {
+    /// Builder: set the provenance marker (e.g. `"adopted"` for `Engine::adopt_session`).
+    pub fn origin(mut self, v: impl Into<String>) -> Self {
+        self.origin = Some(v.into());
+        self
+    }
 }
 
 /// A partial update. Only `Some` fields are written. Extend as new fields are needed.
@@ -421,6 +454,11 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("autoResume", "INTEGER"), ("autoResumeAt", "INTEGER"),
     // NULL = no plugins disabled (rows written before the column existed keep the default).
     ("hiddenPlugins", "TEXT"),
+    // Adopt / detach / re-sync provenance & handoff columns. Added for the
+    // "Adopt & Re-sync Claude Code Sessions" feature.
+    ("origin", "TEXT DEFAULT 'native'"),
+    ("detached", "INTEGER DEFAULT 0"),
+    ("nativeWatermarkLines", "INTEGER DEFAULT 0"),
 ];
 
 use crate::util::now_ms;
@@ -571,18 +609,22 @@ impl Store {
             // Default ON; the INSERT leaves the column NULL, which reads back as true.
             auto_resume: true,
             auto_resume_at: None,
+            // Adopt / detach / watermark defaults; origin can be overridden via CreateInput::origin().
+            origin: input.origin.clone().unwrap_or_else(|| "native".into()),
+            detached: false,
+            native_watermark_lines: 0,
         };
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         // Bind repo column as the raw string ("" not NULL for no-repo sessions).
-        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId) \
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId,origin) \
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&s.id).bind(&s.repo).bind(serde_json::to_string(&s.repos)?).bind(serde_json::to_string(&s.skills)?).bind(serde_json::to_string(&s.hidden_skills)?).bind(serde_json::to_string(&s.hidden_plugins)?)
             .bind(&s.prompt).bind(&s.worktree_path).bind(&s.branch).bind(&s.claude_session_id).bind(&s.status)
             .bind(s.cost_usd).bind(s.exit_code).bind(&s.error).bind(&s.error_kind).bind(s.created_at)
             .bind(s.started_at).bind(s.ended_at).bind(s.last_user_message_at).bind(&base_sha)
             .bind(serde_json::to_string(&s.base_shas)?).bind(&s.worktree_state)
             .bind(&s.model).bind(&s.effort).bind(&s.mode).bind(&input.permission_mode).bind(s.title_pinned).bind(&input.parent_session_id).bind(seq)
-            .bind(&input.group_id).bind(s.unread_event_id).bind(s.acked_event_id)
+            .bind(&input.group_id).bind(s.unread_event_id).bind(s.acked_event_id).bind(&s.origin)
             .execute(&self.pool).await?;
         Ok(s)
     }
@@ -774,6 +816,32 @@ impl Store {
         Ok(())
     }
 
+    /// Set the `detached` flag for an adopted session. `true` = handed off to a
+    /// terminal `claude` (single-writer guard / reconcile trigger); `false` =
+    /// agentic-dev reclaims ownership after a successful reconcile on reopen.
+    /// SQLite has no native bool — stored as INTEGER 0/1.
+    pub async fn set_detached(&self, id: &str, v: bool) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sessions SET detached = ? WHERE id = ?")
+            .bind(v as i64)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Set `nativeWatermarkLines` for a session — the line-count of the native
+    /// Claude transcript (#2) already reflected in this session's rendered log (#1).
+    /// Updated by `Engine::adopt_session` (full import) and
+    /// `Engine::reconcile_from_native` (delta import).
+    pub async fn set_watermark(&self, id: &str, n: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sessions SET nativeWatermarkLines = ? WHERE id = ?")
+            .bind(n)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Delete the row + best-effort remove the log file. Idempotent.
     pub async fn remove(&self, id: &str) -> Result<(), StoreError> {
         sqlx::query("DELETE FROM sessions WHERE id = ?").bind(id).execute(&self.pool).await?;
@@ -942,6 +1010,19 @@ fn row_to_session(r: &SqliteRow) -> Session {
             .map(|n| n != 0)
             .unwrap_or(true),
         auto_resume_at: r.try_get::<Option<i64>, _>("autoResumeAt").ok().flatten(),
+        // Adopt / detach / watermark — legacy rows (pre-ALTER) read as defaults via the column DEFAULT.
+        origin: r.try_get::<Option<String>, _>("origin").ok().flatten().unwrap_or_else(|| "native".into()),
+        detached: r
+            .try_get::<Option<i64>, _>("detached")
+            .ok()
+            .flatten()
+            .map(|n| n != 0)
+            .unwrap_or(false),
+        native_watermark_lines: r
+            .try_get::<Option<i64>, _>("nativeWatermarkLines")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
     }
 }
 
@@ -1441,6 +1522,36 @@ mod tests {
         seqs.sort();
         assert_eq!(seqs, (0..16).collect::<Vec<i64>>(),
             "16 concurrent creates must consume a distinct contiguous seq range 0..16");
+    }
+
+    /// Adopted session round-trip: `origin` is persisted at create time,
+    /// `nativeWatermarkLines` and `detached` are updated via the dedicated
+    /// setters and read back through `get()`.
+    #[tokio::test]
+    async fn adopted_origin_and_watermark_round_trip() {
+        let dir = tmp();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let id = "sess-adopt-1";
+        store.create(CreateInput {
+            id: id.into(),
+            prompt: "p".into(),
+            origin: Some("adopted".into()),
+            ..Default::default()
+        }).await.unwrap();
+        let s = store.get(id).await.unwrap().unwrap();
+        assert_eq!(s.origin, "adopted");
+        assert_eq!(s.detached, false);
+        assert_eq!(s.native_watermark_lines, 0);
+
+        store.set_watermark(id, 42).await.unwrap();
+        store.set_detached(id, true).await.unwrap();
+        let s2 = store.get(id).await.unwrap().unwrap();
+        assert_eq!(s2.native_watermark_lines, 42);
+        assert_eq!(s2.detached, true);
+
+        store.set_detached(id, false).await.unwrap();
+        let s3 = store.get(id).await.unwrap().unwrap();
+        assert_eq!(s3.detached, false);
     }
 
     #[tokio::test]
