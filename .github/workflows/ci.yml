@@ -1,0 +1,23 @@
+# CI: run the Rust test suite (never hits real claude — tests use the fake bridge fixtures).
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+      - name: cargo test
+        run: cargo test
+        working-directory: server-rs
