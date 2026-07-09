@@ -677,6 +677,15 @@ impl Engine {
     pub async fn adopt_session(&self, csid: &str, cwd: &str) -> Result<String, String> {
         use crate::engine::store::{CreateInput, SessionPatch};
 
+        // Security: `csid` comes straight from the HTTP request body and is interpolated
+        // into a filesystem path below (`native_transcript::transcript_path`). Reject
+        // anything that isn't a bare filename component BEFORE it touches the filesystem —
+        // otherwise a csid like `../../../../etc/passwd` or an absolute path escapes
+        // `claude_config_base/projects/<slug>` entirely.
+        if !crate::engine::native_transcript::is_valid_csid(csid) {
+            return Err("invalid claudeSessionId".to_string());
+        }
+
         // Guard: an external csid maps to at most one adopted row.
         if self
             .0
@@ -783,17 +792,31 @@ impl Engine {
         let cwd = s.worktree_path.clone().unwrap_or_default();
 
         // Best-effort hard-stop the live streaming process so the terminal becomes
-        // the single writer. `kill` is the existing SIGTERM path; it's a no-op /
-        // idle-safe when the session isn't running, so ignore the outcome.
+        // the single writer. `kill` is the existing SIGTERM path; it only *sends* the
+        // stop signal (via `run.stop()`) and returns immediately — it does not wait for
+        // the pump task to actually exit. Without waiting, an in-flight turn's last
+        // lines may not be flushed to the native transcript (#2) yet, and the line
+        // count read below would freeze the watermark too low. `wait_for_exit` is the
+        // engine's real "is this session still running" signal — it polls
+        // `state.running`, the same map `is_busy`/`kill` consult — bounded at 5s so a
+        // stuck process can't hang detach forever; a no-op when already idle.
         self.kill(id).await;
+        self.wait_for_exit(id).await;
 
-        // Freeze the watermark at the current native line count.
+        // Freeze the watermark at the current native line count — but never let it
+        // regress below what's already been imported (`s.native_watermark_lines`,
+        // read before the kill above). `read_lines` returns an empty vec when the
+        // transcript file is missing or unreadable (e.g. moved/deleted out from under
+        // us), and naively trusting that count would zero out an already-nonzero
+        // watermark; a later reopen would then re-translate the ENTIRE native history
+        // back into #1, duplicating every line already imported.
         let path = crate::engine::native_transcript::transcript_path(
             &self.0.cfg.claude_config_base,
             &cwd,
             &csid,
         );
-        let total = crate::engine::native_transcript::read_lines(&path).len() as i64;
+        let read_count = crate::engine::native_transcript::read_lines(&path).len() as i64;
+        let total = read_count.max(s.native_watermark_lines);
         self.0
             .store
             .set_watermark(id, total)
@@ -1257,8 +1280,23 @@ impl Engine {
         // into #1 and clear the flag BEFORE preparing the resume turn, so `--resume`
         // continues from the reconciled history and turn counts self-correct.
         if s.detached {
-            let _ = self.reconcile_from_native(id).await; // pull terminal turns into #1
-            let _ = self.0.store.set_detached(id, false).await; // agentic-dev reclaims ownership
+            // Only reclaim ownership (clear `detached`) when the import actually succeeded.
+            // Clearing it unconditionally — even on a failed reconcile — would silently and
+            // PERMANENTLY drop whatever terminal-added delta failed to import: the watermark
+            // stays wherever the failed call left it, but nothing will ever retry the pull
+            // because the next reopen no longer sees `detached == true`. Leaving the flag set
+            // on failure means the next reopen retries the same reconcile. Either way the turn
+            // itself still proceeds — this is best-effort bookkeeping around it, not a gate.
+            match self.reconcile_from_native(id).await {
+                Ok(_) => {
+                    let _ = self.0.store.set_detached(id, false).await; // agentic-dev reclaims ownership
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[engine] follow_up reclaim: reconcile_from_native failed for {id}, leaving detached=true for retry on next reopen: {e}"
+                    );
+                }
+            }
         }
 
         // Read the log once and reuse it for both the snapshot turn index and the `since` offset

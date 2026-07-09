@@ -17,6 +17,27 @@ pub fn transcript_path(config_base: &Path, cwd: &str, csid: &str) -> PathBuf {
     config_base.join("projects").join(slug_for_cwd(cwd)).join(format!("{csid}.jsonl"))
 }
 
+/// Validate a `claudeSessionId` supplied over the HTTP API before it is ever interpolated
+/// into a filesystem path (`transcript_path` above does `format!("{csid}.jsonl")` with no
+/// further sanitization). A csid must be a non-empty run of `[A-Za-z0-9._-]` with no path
+/// separator, no `..` traversal segment, and must not start with `.` (blocks dotfiles and
+/// the `..` / `.` special segments alike). Anything else — including an absolute path or a
+/// relative traversal like `../../../../etc/passwd` — is rejected.
+pub fn is_valid_csid(csid: &str) -> bool {
+    if csid.is_empty() {
+        return false;
+    }
+    if csid.starts_with('.') {
+        return false;
+    }
+    if csid.contains('/') || csid.contains('\\') || csid.contains("..") {
+        return false;
+    }
+    csid
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 #[derive(serde::Serialize, Debug)]
 pub struct Adoptable {
     #[serde(rename = "sessionId")]
@@ -139,6 +160,26 @@ pub fn translate_range(path: &Path, from_line: usize) -> (Vec<String>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_valid_csid_accepts_plain_ids_rejects_traversal_and_absolute_paths() {
+        // Plausible real csids: accepted.
+        assert!(is_valid_csid("csid-A"));
+        assert!(is_valid_csid("a1b2c3_d4.e5"));
+        assert!(is_valid_csid("00000000-0000-0000-0000-000000000000"));
+
+        // Rejected: empty, traversal, absolute, separators, leading dot.
+        assert!(!is_valid_csid(""));
+        assert!(!is_valid_csid("../../../../etc/passwd"));
+        assert!(!is_valid_csid("/etc/passwd"));
+        assert!(!is_valid_csid(".."));
+        assert!(!is_valid_csid("."));
+        assert!(!is_valid_csid(".hidden"));
+        assert!(!is_valid_csid("a/b"));
+        assert!(!is_valid_csid("a\\b"));
+        assert!(!is_valid_csid("a..b"));
+        assert!(!is_valid_csid("csid with spaces"));
+    }
 
     #[test]
     fn slug_matches_engine_rule() {
