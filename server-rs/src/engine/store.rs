@@ -893,6 +893,46 @@ impl Store {
         Ok(Group { id, name: name.to_string(), icon: icon.map(|s| s.to_string()), sort_order, created_at: now })
     }
 
+    /// Return the id of the group whose `name` matches; create it (with a
+    /// stable id for `"Claude Code Adopted"`, otherwise a fresh `grp-<uuid>`)
+    /// if absent. Idempotent and safe under concurrent inserters: we use
+    /// `INSERT OR IGNORE` and then re-`SELECT` by name so a racing caller
+    /// that already inserted still resolves to the winner's id. The
+    /// `sortOrder` is set to `1000` (same default as the rest of the engine
+    /// so the group renders in a predictable place in the UI).
+    pub async fn ensure_group(&self, name: &str) -> Result<String, StoreError> {
+        if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM groups WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            return Ok(id);
+        }
+        let id = if name == "Claude Code Adopted" {
+            "grp-adopted".to_string()
+        } else {
+            format!("grp-{}", uuid::Uuid::new_v4())
+        };
+        let now = now_ms();
+        sqlx::query(
+            "INSERT OR IGNORE INTO groups (id, name, icon, sortOrder, createdAt) VALUES (?,?,?,?,?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(Option::<String>::None)
+        .bind(1000i64)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        // Resolve the winner's id in case a concurrent caller already
+        // inserted a row for `name` between our SELECT and INSERT.
+        let winner = sqlx::query_scalar::<_, String>("SELECT id FROM groups WHERE name = ?")
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(winner)
+    }
+
     pub async fn update_group(&self, id: &str, name: Option<&str>, icon: Option<&str>) -> Result<Option<Group>, StoreError> {
         let existing = self.get_group(id).await?;
         let Some(_) = existing else { return Ok(None); };
@@ -1552,6 +1592,36 @@ mod tests {
         store.set_detached(id, false).await.unwrap();
         let s3 = store.get(id).await.unwrap().unwrap();
         assert_eq!(s3.detached, false);
+    }
+
+    /// `ensure_group("Claude Code Adopted")` must return the stable id
+    /// `grp-adopted` on the first AND every subsequent call (idempotent),
+    /// and the table must end up with exactly ONE row for that name even
+    /// when concurrent calls race the INSERT. Non-adopted names get a
+    /// fresh `grp-<uuid>` id.
+    #[tokio::test]
+    async fn ensure_group_is_idempotent() {
+        let dir = tmp();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        // Adopted name — stable id, idempotent.
+        let a = store.ensure_group("Claude Code Adopted").await.unwrap();
+        let b = store.ensure_group("Claude Code Adopted").await.unwrap();
+        assert_eq!(a, b, "two calls for the same name must return the same id");
+        assert_eq!(a, "grp-adopted",
+            "the 'Claude Code Adopted' group must use the stable id 'grp-adopted'");
+        assert_eq!(
+            store.list_groups().await.unwrap()
+                .iter().filter(|g| g.name == "Claude Code Adopted").count(),
+            1,
+            "only one 'Claude Code Adopted' row must exist after repeat calls"
+        );
+
+        // Non-adopted name — fresh uuid-prefixed id, also idempotent.
+        let c1 = store.ensure_group("Other Group").await.unwrap();
+        let c2 = store.ensure_group("Other Group").await.unwrap();
+        assert_eq!(c1, c2, "non-adopted name is also idempotent");
+        assert!(c1.starts_with("grp-") && c1 != "grp-adopted",
+            "non-adopted name must get a fresh grp-<uuid> id, got {c1}");
     }
 
     #[tokio::test]
