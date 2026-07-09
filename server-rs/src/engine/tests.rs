@@ -2204,6 +2204,36 @@ mod fork_session {
             "seed prompt must include transcript body: {}", forked.prompt);
     }
 
+    /// `@session:<id-prefix>` mentions expand against the store: the delivered text gains the
+    /// mentioned session's full id + transcript log path, while text without mentions passes
+    /// through unchanged. (The pure resolver is unit-tested in engine::mentions; this covers the
+    /// Engine wrapper's store.list + log_path wiring.)
+    #[tokio::test]
+    async fn expand_session_mentions_resolves_against_store() {
+        let src = tmp();
+        let e = make_engine(&src, EngineOverrides::default()).await;
+        let _a = e
+            .submit_session(vec![], vec![], "first".into(), HashMap::new(), SubmitMeta::default())
+            .await
+            .unwrap();
+        let b = e
+            .submit_session(vec![], vec![], "second".into(), HashMap::new(), SubmitMeta::default())
+            .await
+            .unwrap();
+
+        let text = format!("check @session:{} progress", &b[..8]);
+        let out = e.expand_session_mentions(&text).await;
+        assert!(out.starts_with(&text), "original text must be kept: {out}");
+        assert!(out.contains(&format!("session {b}")), "must resolve to the full id: {out}");
+        assert!(
+            out.contains(&format!("{b}.jsonl")),
+            "must hand claude the transcript log path: {out}"
+        );
+
+        // No mention → identity.
+        assert_eq!(e.expand_session_mentions("plain text").await, "plain text");
+    }
+
     /// Regression: the seed prompt (source transcript) must actually reach claude on the fork's
     /// FIRST follow-up turn. Before the fix, fork_session stored the seed in the new session's
     /// `prompt` column but the follow-up path enqueued only the user's message — and a fresh fork
@@ -2278,6 +2308,36 @@ mod fork_session {
         };
         assert!(pushed.context_prefix.is_none(),
             "non-fork follow-up must not carry a context_prefix");
+    }
+
+    /// `@session:` mention expansion is DELIVERY-time only: after a follow-up turn with a mention
+    /// runs, the persisted `agentic_prompt` marker (the UI user bubble) must still carry the raw
+    /// token and never the server-resolved block. Guards against a "cleanup" that folds the
+    /// expanded text into the log marker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mention_expansion_never_leaks_into_the_prompt_marker() {
+        let src = tmp();
+        let e = make_engine(&src, EngineOverrides::default()).await;
+        let target = e
+            .submit_session(vec![], vec![], "target".into(), HashMap::new(), SubmitMeta::default())
+            .await
+            .unwrap();
+        let asker = e
+            .submit_session(vec![], vec![], "asker".into(), HashMap::new(), SubmitMeta::default())
+            .await
+            .unwrap();
+        wait_status(&e, &asker, "done").await;
+
+        let text = format!("look at @session:{}", &target[..8]);
+        e.follow_up(&asker, &text, false, None, None, None).await.unwrap();
+        wait_status(&e, &asker, "done").await;
+
+        let log = e.0.store.read_log(&asker).join("\n");
+        assert!(log.contains(&text), "raw mention marker must be logged: {log}");
+        assert!(
+            !log.contains("resolved by the server"),
+            "expansion must never reach the log/UI bubble: {log}"
+        );
     }
 
     /// Regression: a freshly-forked session must be idle (`status == "done"`) so the user can

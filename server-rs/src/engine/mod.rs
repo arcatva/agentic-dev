@@ -50,9 +50,16 @@ const RETITLE_EVERY_TURNS: usize = 5;
 /// of the user's message so claude sees the forked-from conversation, while the logged/displayed
 /// user message stays `item.prompt` alone.
 pub(crate) fn compose_turn_text(item: &QueueItem) -> String {
+    compose_turn_text_with(item, &item.prompt)
+}
+
+/// [compose_turn_text] with the delivered prompt supplied by the caller — used by the spawn
+/// path to deliver a mention-expanded prompt while keeping the fork seed context (which is a
+/// transcript and may itself quote `@session:` tokens) out of the expansion pass.
+pub(crate) fn compose_turn_text_with(item: &QueueItem, prompt: &str) -> String {
     match item.context_prefix.as_deref() {
-        Some(ctx) if !ctx.is_empty() => format!("{ctx}\n\n---\n\n{}", item.prompt),
-        _ => item.prompt.clone(),
+        Some(ctx) if !ctx.is_empty() => format!("{ctx}\n\n---\n\n{prompt}"),
+        _ => prompt.to_string(),
     }
 }
 
@@ -852,6 +859,26 @@ impl Engine {
             || status == "running"
     }
 
+    /// Expand `@session:<id-prefix>` mentions in an outgoing prompt (see [mentions]) so the
+    /// receiving claude gets the mentioned session's identity + on-disk paths. Called on the
+    /// DELIVERED text only — logged prompt markers keep the raw token. Best-effort: on a store
+    /// error the text passes through unchanged (a mention must never fail a turn).
+    async fn expand_session_mentions(&self, text: &str) -> String {
+        if !text.contains("@session:") {
+            return text.to_string();
+        }
+        match self.0.store.list().await {
+            Ok(sessions) => {
+                let store = &self.0.store;
+                mentions::expand_session_mentions(text, &sessions, &|id| store.log_path(id))
+            }
+            Err(e) => {
+                tracing::warn!("[engine] @session mention expansion skipped — store.list failed: {e}");
+                text.to_string()
+            }
+        }
+    }
+
     /// Follow up on an existing session: inject a message if live, or re-queue if idle.
     pub async fn follow_up(
         &self,
@@ -948,8 +975,11 @@ impl Engine {
             self.maybe_spawn_retitle(id);
 
             // Write the user message — reset saw_result first (mirrors SpawnHandle::write).
+            // `@session:<id>` mentions are expanded on the DELIVERED text only — the prompt
+            // marker logged above stays the user's raw text, so the UI bubble is untouched.
+            let delivered = self.expand_session_mentions(prompt).await;
             saw_result.store(false, std::sync::atomic::Ordering::SeqCst);
-            run_handle.write(&encode_user_message(&compose_user_text(prompt)));
+            run_handle.write(&encode_user_message(&compose_user_text(&delivered)));
 
             return Ok(since);
         }
@@ -1911,8 +1941,13 @@ The new session is now active. Awaiting the user's next message.",
         // Write the first user message. For a fork's first turn this prepends the seed context
         // (the source transcript) ahead of the user's message; for every normal turn it is just
         // `item.prompt`. The log marker appended above stays `item.prompt` so the displayed user
-        // bubble is the user's text, not the prepended transcript.
-        handle.write(&encode_user_message(&compose_user_text(&compose_turn_text(&item))));
+        // bubble is the user's text, not the prepended transcript. `@session:<id>` mentions are
+        // expanded on the user's prompt only (never on the seed context — a transcript may quote
+        // mention tokens from earlier turns) and only on the delivered text.
+        let delivered = self.expand_session_mentions(&item.prompt).await;
+        handle.write(&encode_user_message(&compose_user_text(&compose_turn_text_with(
+            &item, &delivered,
+        ))));
 
         // Attach: spawn the pump task AND register the RunningTurn in state.running. This MUST
         // precede publishing status="running": kill()/watchdog-reap/discard/delete all look the
@@ -2656,6 +2691,7 @@ pub mod stream;
 pub mod transition;
 pub mod lifecycle;
 pub mod litellm;
+pub mod mentions;
 pub mod structured_diff;
 pub mod tailer;
 pub mod templates;
