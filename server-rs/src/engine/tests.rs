@@ -4038,7 +4038,10 @@ mod submit_titles_via_generator {
             Some(cwd_s.as_str()),
             "adopt-in-place: worktree_path is the native cwd"
         );
-        assert_eq!(s.status, "pending", "adopted row is pending until opened");
+        assert_eq!(
+            s.status, "done",
+            "adopted row is an idle/finished resumable session (accepts follow-up, not re-enqueued on restart)"
+        );
         assert_eq!(
             s.prompt, "first prompt",
             "prompt/title seeded from the first native user turn"
@@ -4491,5 +4494,236 @@ mod submit_titles_via_generator {
 
         // Clean up the now-queued/running turn so the test process doesn't leak a subprocess.
         e.kill(&id).await;
+    }
+
+    /// FIX 2 (DATA LOSS): adopt is in-place, so `worktree_path` is the user's REAL project cwd,
+    /// which lives OUTSIDE the managed `worktrees_root`. The delete path must NOT `remove_dir_all`
+    /// that directory — doing so would wipe the user's actual project. Adopt an in-place session
+    /// whose cwd is outside `worktrees_root`, delete it, and assert the cwd (and a file in it)
+    /// still exist on disk.
+    #[tokio::test]
+    async fn delete_does_not_remove_adopted_in_place_cwd_outside_worktrees_root() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        // Adopt-in-place: cwd is the user's real project dir, OUTSIDE worktrees_root.
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        std::fs::write(cwd.join("important.txt"), "user data").unwrap();
+        assert!(
+            !cwd.starts_with(&e.0.cfg.worktrees_root),
+            "sanity: adopted cwd must be outside worktrees_root"
+        );
+
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidDEL");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        let id = e.adopt_session("csidDEL", &cwd_s).await.unwrap();
+
+        // Delete the session — the out-of-root cwd removal must be SKIPPED.
+        e.delete_session(&id, false).await.unwrap();
+
+        assert!(cwd.exists(), "adopt-in-place cwd (user's real project dir) must NOT be deleted");
+        assert!(
+            cwd.join("important.txt").exists(),
+            "user's files under the adopted cwd must survive delete"
+        );
+        assert!(e.0.store.get(&id).await.unwrap().is_none(), "the session row itself is removed");
+    }
+
+    /// FIX 3 (atomic adopt): a PARTIAL unique index on `claudeSessionId` makes a concurrent
+    /// double-adopt of the same csid fail the second csid-setting UPDATE with a constraint error,
+    /// which adopt's existing rollback cleans up. Two concurrent `adopt_session` for the same csid
+    /// → exactly one Ok + one Err, and exactly one row carries the csid.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_double_adopt_same_csid_exactly_one_succeeds() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidRACE");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+
+        let (r1, r2) = tokio::join!(
+            e.adopt_session("csidRACE", &cwd_s),
+            e.adopt_session("csidRACE", &cwd_s),
+        );
+
+        let oks = (r1.is_ok() as usize) + (r2.is_ok() as usize);
+        assert_eq!(oks, 1, "exactly one concurrent adopt of the same csid may succeed: r1={r1:?} r2={r2:?}");
+
+        assert!(
+            e.0.store.session_by_csid("csidRACE").await.unwrap().is_some(),
+            "the winning row is findable by csid"
+        );
+        let rows = e.0.store.list().await.unwrap();
+        let with_csid = rows
+            .iter()
+            .filter(|s| s.claude_session_id.as_deref() == Some("csidRACE"))
+            .count();
+        assert_eq!(with_csid, 1, "exactly one row may carry the csid (partial unique index)");
+    }
+
+    /// FIX 4 (shell-escape): `detach_session`'s `resume_cmd` interpolates `cwd` into a shell
+    /// command; a cwd with a space (or metacharacters) would break/inject when pasted. It must be
+    /// single-quoted. Detach a session whose cwd contains a space and assert the path is quoted.
+    #[tokio::test]
+    async fn detach_shell_quotes_cwd_with_spaces() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("my project dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidSP");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        let id = e.adopt_session("csidSP", &cwd_s).await.unwrap();
+
+        let info = e.detach_session(&id).await.unwrap();
+        assert_eq!(
+            info.resume_cmd,
+            format!("cd '{cwd_s}' && claude --resume csidSP"),
+            "cwd with spaces must be single-quoted so the pasted command is safe"
+        );
+    }
+
+    /// FIX 5 (keep detached when transcript missing): `reconcile_from_native` returns Ok(0) when
+    /// the native transcript file is ABSENT. The reclaim hook must NOT treat that as "reclaimed" —
+    /// a transiently-missing file must be retried on the next reopen, so `detached` stays true.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn followup_reclaim_leaves_detached_true_when_transcript_missing() {
+        use crate::engine::native_transcript;
+        use crate::engine::store::SessionPatch;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidMISS");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        let id = e.adopt_session("csidMISS", &cwd_s).await.unwrap();
+        e.0.store
+            .update(&id, SessionPatch { status: Some("done".into()), ..Default::default() })
+            .await
+            .unwrap();
+        e.0.store.set_detached(&id, true).await.unwrap();
+
+        // Transcript goes missing (moved / not yet synced) before reopen.
+        std::fs::remove_file(&tp).unwrap();
+
+        let result = e.follow_up(&id, "reopen", false, None, None, None).await;
+        assert!(result.is_ok(), "the follow-up turn must still proceed, got {result:?}");
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(
+            s.detached,
+            "detached must stay true when the transcript file is absent, so the next reopen retries"
+        );
+
+        e.kill(&id).await;
+    }
+
+    /// FIX 6 (cursor before reclaim): the reclaim reconcile appends the terminal-added turns to #1
+    /// BEFORE `follow_up` returns; the returned stream cursor must PRECEDE those lines or the client
+    /// skips the reclaimed terminal turns. Assert `follow_up` returns the pre-reclaim log length.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn followup_reclaim_cursor_precedes_reconciled_lines() {
+        use crate::engine::native_transcript;
+        use crate::engine::store::SessionPatch;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidCUR");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        let id = e.adopt_session("csidCUR", &cwd_s).await.unwrap();
+        e.0.store
+            .update(&id, SessionPatch { status: Some("done".into()), ..Default::default() })
+            .await
+            .unwrap();
+        e.0.store.set_detached(&id, true).await.unwrap();
+        std::fs::OpenOptions::new().append(true).open(&tp).unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"back\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+
+        let log_before = e.0.store.read_log(&id);
+        let since = e.follow_up(&id, "reopen", false, None, None, None).await.unwrap();
+
+        assert_eq!(
+            since,
+            log_before.len() as i64,
+            "follow_up must return the PRE-reclaim log cursor so the client stream re-includes the reconciled terminal turns"
+        );
+        let log_after = e.0.store.read_log(&id);
+        assert!(
+            (log_after.len() as i64) > since,
+            "reclaim must have appended lines AFTER the returned cursor: since={since}, after={}",
+            log_after.len()
+        );
+
+        e.kill(&id).await;
+    }
+
+    /// FIX 7 (no watermark advance on repeated detach): a second detach (double-click/retry) while
+    /// the row is ALREADY detached must NOT recompute the watermark — terminal lines added since the
+    /// first handoff would otherwise be marked already-imported and permanently skipped. Detach
+    /// twice with a terminal line appended in between; the stored watermark must stay at the
+    /// first-detach value.
+    #[tokio::test]
+    async fn second_detach_does_not_advance_watermark() {
+        use crate::engine::native_transcript;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidDBL");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(&tp, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        let id = e.adopt_session("csidDBL", &cwd_s).await.unwrap();
+
+        // First detach freezes the watermark at the current native line count (1).
+        let _ = e.detach_session(&id).await.unwrap();
+        let first = e.0.store.get(&id).await.unwrap().unwrap().native_watermark_lines;
+        assert_eq!(first, 1, "sanity: first detach freezes the watermark at the native line count");
+
+        // A terminal turn is appended AFTER the first handoff.
+        std::fs::OpenOptions::new().append(true).open(&tp).unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"back\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+
+        // Second detach while ALREADY detached must not advance the watermark.
+        let info = e.detach_session(&id).await.unwrap();
+        assert!(
+            info.resume_cmd.contains("claude --resume csidDBL"),
+            "a repeat detach still returns the resume command"
+        );
+        let second = e.0.store.get(&id).await.unwrap().unwrap().native_watermark_lines;
+        assert_eq!(
+            second, first,
+            "a repeat detach must leave the first-detach watermark untouched (else the interim terminal line is skipped)"
+        );
     }
 }
