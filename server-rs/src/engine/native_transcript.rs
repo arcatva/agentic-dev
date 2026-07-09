@@ -97,6 +97,45 @@ pub fn scan_adoptable(config_base: &Path, known_csids: &HashSet<String>) -> Vec<
     out
 }
 
+/// Translate a slice of native #2 lines into ready-to-append #1 JSONL strings
+/// (no trailing newline). User lines with real authored text become
+/// `agentic_prompt` (with `at` = ms of the native timestamp); assistant lines
+/// become `assistant` (with the native message object verbatim), plus an extra
+/// `result` line on `stop_reason == "end_turn"` as the turn-boundary marker.
+pub fn translate_lines(native: &[serde_json::Value]) -> Vec<String> {
+    let mut out = vec![];
+    for line in native {
+        match line.get("type").and_then(|v| v.as_str()) {
+            Some("user") => {
+                if let Some(text) = user_prompt_text(line) {
+                    let at = line.get("timestamp").and_then(|v| v.as_str()).map(iso_to_ms).unwrap_or(0);
+                    out.push(serde_json::json!({"type":"agentic_prompt","text":text,"at":at}).to_string());
+                }
+            }
+            Some("assistant") => {
+                if let Some(msg) = line.get("message") {
+                    out.push(serde_json::json!({"type":"assistant","message":msg}).to_string());
+                    if msg.get("stop_reason").and_then(|v| v.as_str()) == Some("end_turn") {
+                        out.push(serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":""}).to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Translate native #2 lines `[from_line .. end)` into ready-to-append #1
+/// strings. Returns `(lines, new_total_line_count)` — `total` is the line count
+/// of the whole file at read time, used by the watermark bookkeeping.
+pub fn translate_range(path: &Path, from_line: usize) -> (Vec<String>, usize) {
+    let all = read_lines(path);
+    let total = all.len();
+    let slice = if from_line >= total { &[][..] } else { &all[from_line..] };
+    (translate_lines(slice), total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +166,28 @@ mod tests {
         assert_eq!(got[0].cwd, "/home/me/proj");
         assert_eq!(got[0].first_prompt, "hello");
         assert!(got[0].resumable);
+    }
+
+    #[test]
+    fn translate_maps_user_and_assistant() {
+        let native: Vec<serde_json::Value> = [
+            r#"{"type":"user","timestamp":"2026-07-09T00:00:00Z","message":{"role":"user","content":"do a thing"}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-x","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta noise"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"out"}]}}"#,
+        ].iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+
+        let out = translate_lines(&native);
+        let types: Vec<String> = out.iter()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["type"].as_str().unwrap().to_string())
+            .collect();
+        // user prompt -> agentic_prompt ; assistant -> assistant + result(end_turn) ; meta + tool_result-only user -> skipped
+        assert_eq!(types, vec!["agentic_prompt", "assistant", "result"]);
+
+        let first: serde_json::Value = serde_json::from_str(&out[0]).unwrap();
+        assert_eq!(first["text"], "do a thing");
+        // ms of 2026-07-09T00:00:00Z. (The plan's 1783641600000 is one day off — that
+        // is the epoch-ms of 2026-07-10T00:00:00Z. The correct value is below.)
+        assert_eq!(first["at"], 1783555200000i64);
     }
 }
