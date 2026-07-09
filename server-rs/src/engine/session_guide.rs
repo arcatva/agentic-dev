@@ -1,0 +1,215 @@
+//! Orientation CLAUDE.md for a multi-repo session, written to the session dir so Claude Code loads it
+//! as project context (the session dir itself has no project CLAUDE.md otherwise).
+
+use std::path::{Path, PathBuf};
+
+/// First meaningful line of a doc (heading text or first non-empty line), trimmed to ~100 chars.
+pub fn first_meaningful_line(text: &str) -> Option<String> {
+    for raw in text.split('\n') {
+        // Strip a leading run of '#' characters then surrounding whitespace.
+        let line = raw.trim_start_matches('#').trim();
+        if !line.is_empty() {
+            return Some(if line.chars().count() > 100 {
+                let head: String = line.chars().take(100).collect();
+                format!("{head}…")
+            } else {
+                line.to_string()
+            });
+        }
+    }
+    None
+}
+
+/// A one-line description of a repo, pulled from its CLAUDE.md (preferred) or README.md.
+pub fn summarize_repo(worktree_path: &Path) -> Option<String> {
+    for name in ["CLAUDE.md", "README.md"] {
+        if let Ok(s) = std::fs::read_to_string(worktree_path.join(name)) {
+            if let Some(line) = first_meaningful_line(&s) {
+                return Some(line);
+            }
+        }
+    }
+    None
+}
+
+/// Orientation memory body for a multi-repo session. `repos` = (name, optional one-line summary).
+pub fn build_session_guide(repos: &[(String, Option<String>)], skills: &[String]) -> String {
+    let mut lines = vec![
+        "# agentic-dev multi-repo session".to_string(),
+        String::new(),
+        "You are working in an agentic-dev session workspace. Each repository below is checked out as its".to_string(),
+        "own git worktree in a subdirectory of the current directory, all on branch `agentic/<session>`.".to_string(),
+        "`cd` into a repository to work on it — each has its own `CLAUDE.md` with project-specific guidance".to_string(),
+        "that loads when you work there. Changes are isolated to this session's worktrees.".to_string(),
+        String::new(),
+        "## Repositories".to_string(),
+    ];
+    for (name, summary) in repos {
+        match summary {
+            Some(s) => lines.push(format!("- `{name}/` — {s}")),
+            None => lines.push(format!("- `{name}/`")),
+        }
+    }
+    if !skills.is_empty() {
+        lines.push(String::new());
+        lines.push("## Skills loaded for this session".to_string());
+        lines.push(skills.join(", "));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// Write the orientation CLAUDE.md into the session dir. Callers gate on multi-repo. Best-effort.
+pub fn write_session_guide(session_dir: &Path, repo_worktrees: &[(String, PathBuf)], skills: &[String]) {
+    let repos: Vec<(String, Option<String>)> = repo_worktrees
+        .iter()
+        .map(|(repo, wt)| (repo.clone(), summarize_repo(wt)))
+        .collect();
+    let _ = std::fs::write(session_dir.join("CLAUDE.md"), build_session_guide(&repos, skills));
+}
+
+/// The model-routing rule, written into every session's CLAUDE.md (loaded as project memory) so the
+/// agent always routes fan-out through `delegate` — which picks the cheapest capable model across the
+/// registered providers + the native Claude tiers — instead of defaulting to the strongest model or an
+/// unrouted Workflow.
+pub const ROUTING_GUIDE: &str = "## Model routing — always route fan-out through `delegate`\n\
+\n\
+You have a `delegate` tool that routes each subtask to the **cheapest capable model** across the \
+registered providers **and** the native Claude tiers (opus/sonnet/haiku), running them in parallel as \
+separate workers.\n\
+\n\
+**Rule:** for ANY parallel work, subagent fan-out, or \"spawn N agents\" task, use `delegate` — it \
+cost-routes per subtask. **Do NOT set the `model` field on any task** — leave it UNSET so `delegate` \
+auto-routes each task to the cheapest capable model (your registered providers + the Claude tiers). \
+Setting `model` (e.g. \"sonnet\") PINS that task and BYPASSES routing entirely — never hand-pick a \
+model unless the user explicitly names one.\n\
+\n\
+**Do NOT use the `Workflow` tool to fan out parallel agents.** A Workflow's agents run in-process on \
+the MAIN model and CANNOT be cost-routed — nothing can intercept them. `delegate` is the routed \
+equivalent: it runs each task as a SEPARATE worker process routed to the cheapest capable model, and \
+it takes a `title` + per-task `phase`, so you get the SAME titled, phased workflow card. Even when the \
+user says \"create a Workflow\" or \"spawn N agents\" for parallel work, use `delegate` for the actual \
+fan-out. Reserve the `Workflow` tool ONLY for genuinely deterministic multi-stage scripting \
+(loops / conditionals / pipelines across rounds) that a single `delegate` batch can't express — and \
+those agents will run UNROUTED on the main model. Native `Agent`/`Task` subagents are likewise unrouted.\n\
+\n\
+When you call `delegate`, pass a short `title` naming the batch (it becomes the workflow card title) \
+and, for multi-stage fan-out, a `phase` label per task — they render as the run's title and phase \
+headers in the workflow tab, just like a native Workflow.\n\
+\n\
+**Keep each task's `prompt` compact.** Say what to investigate and give the repo path — then let the \
+worker read the files itself. Do NOT inline file contents or long absolute-path dumps, and prefer \
+forward slashes. A large, escape-heavy payload makes the model more likely to emit the `delegate` \
+call as malformed JSON, which is rejected and costs a wasted retry turn.";
+
+/// Write the session-dir `CLAUDE.md` from an ordered list of `sections` (e.g. the multi-repo
+/// orientation guide followed by the user's session-scoped custom guidance). Blank/whitespace-only
+/// sections are dropped; the rest are trimmed and joined with a Markdown horizontal-rule separator.
+/// When every section is empty NOTHING is written (so a single-repo session with no custom guidance
+/// leaves the session dir clean, exactly as before this field existed). Best-effort — a write error
+/// is swallowed so it can never abort session creation.
+pub fn write_session_claude_md(session_dir: &Path, sections: &[String]) {
+    let body = sections
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    if !body.is_empty() {
+        let _ = std::fs::write(session_dir.join("CLAUDE.md"), format!("{body}\n"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn tmp() -> PathBuf {
+        static C: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!("sg-{}-{}", std::process::id(), C.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn first_line_strips_heading_and_trims() {
+        assert_eq!(first_meaningful_line("## My Repo\n\nbody"), Some("My Repo".into()));
+        assert_eq!(first_meaningful_line("\n\n  hello  \nx"), Some("hello".into()));
+        assert_eq!(first_meaningful_line("\n  \n"), None);
+        let long = "#".to_string() + &"a".repeat(150);
+        assert!(first_meaningful_line(&long).unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn summarize_prefers_claude_md_over_readme() {
+        let d = tmp();
+        std::fs::write(d.join("README.md"), "# readme line").unwrap();
+        std::fs::write(d.join("CLAUDE.md"), "# claude line").unwrap();
+        assert_eq!(summarize_repo(&d), Some("claude line".into()));
+        let d2 = tmp();
+        std::fs::write(d2.join("README.md"), "# only readme").unwrap();
+        assert_eq!(summarize_repo(&d2), Some("only readme".into()));
+        assert_eq!(summarize_repo(&tmp()), None);
+    }
+
+    #[test]
+    fn guide_lists_repos_with_summaries_and_skills() {
+        let g = build_session_guide(
+            &[("api".into(), Some("the backend".into())), ("web".into(), None)],
+            &["rust".into(), "tdd".into()],
+        );
+        assert!(g.contains("# agentic-dev multi-repo session"));
+        assert!(g.contains("- `api/` — the backend"));
+        assert!(g.contains("- `web/`\n") || g.contains("- `web/`"));
+        assert!(g.contains("## Skills loaded for this session"));
+        assert!(g.contains("rust, tdd"));
+    }
+
+    #[test]
+    fn write_guide_creates_claude_md_in_session_dir() {
+        let sess = tmp();
+        let r1 = tmp(); std::fs::write(r1.join("CLAUDE.md"), "# repo one").unwrap();
+        write_session_guide(&sess, &[("one".into(), r1)], &[]);
+        let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("- `one/` — repo one"));
+    }
+
+    #[test]
+    fn write_claude_md_joins_sections_with_separator() {
+        let sess = tmp();
+        write_session_claude_md(&sess, &["# Guide\nbody".into(), "Run tests first.".into()]);
+        let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("# Guide\nbody"));
+        assert!(content.contains("Run tests first."));
+        assert!(content.contains("\n---\n"), "sections must be separated by a horizontal rule");
+        assert!(content.ends_with('\n'));
+    }
+
+    #[test]
+    fn write_claude_md_single_section_has_no_separator() {
+        let sess = tmp();
+        write_session_claude_md(&sess, &["Only custom guidance.".into()]);
+        let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
+        assert_eq!(content, "Only custom guidance.\n");
+        assert!(!content.contains("---"));
+    }
+
+    #[test]
+    fn write_claude_md_skips_blank_sections_and_writes_nothing_when_all_empty() {
+        // A blank section among real ones is dropped (no leading/trailing separator).
+        let sess = tmp();
+        write_session_claude_md(&sess, &["".into(), "  \n ".into(), "real".into()]);
+        assert_eq!(std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap(), "real\n");
+
+        // All-empty (the single-repo, no-custom-guidance case) writes no file at all.
+        let sess2 = tmp();
+        write_session_claude_md(&sess2, &["".into(), "   ".into()]);
+        assert!(!sess2.join("CLAUDE.md").exists(), "no CLAUDE.md should be written when every section is blank");
+
+        // Empty slice is a no-op too.
+        let sess3 = tmp();
+        write_session_claude_md(&sess3, &[]);
+        assert!(!sess3.join("CLAUDE.md").exists());
+    }
+}

@@ -1,0 +1,46 @@
+[package]
+name = "agentic-dev-server"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+# TLS serving. axum-server terminates TLS in-process (an operator-supplied PEM cert, or a
+# self-signed cert this server generates+persists itself via rcgen). We keep the `ring` crypto
+# provider to match the rest of the tree (reqwest already pulls rustls+ring), so `-no-provider`
+# avoids dragging in a second (aws-lc-rs) provider. rustls is a direct dep only so main can
+# install the process-default ring provider before building any ServerConfig. if-addrs enumerates
+# local interface IPs so the auto self-signed cert can list them as SANs.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+if-addrs = "0.15"
+tower-http = { version = "0.6", features = ["compression-gzip", "catch-panic", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+thiserror = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+indexmap = "2"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"
+# kill(2)/killpg for SdkHandle::stop — external/builtin kill commands are not portable for
+# negative pgids (procps/dash quirks); the syscall is. Unix-only crate (Linux/macOS deploys).
+libc = "0.2"
+async-trait = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.24"
+tempfile = "3"
+wiremock = "0.6"
