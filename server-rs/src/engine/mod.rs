@@ -2677,6 +2677,7 @@ The new session is now active. Awaiting the user's next message.",
 pub mod atomic_write;
 pub mod auto_resume;
 pub mod classify_error;
+pub mod components;
 pub mod delegate;
 pub mod global_settings;
 pub mod groups;
