@@ -26,6 +26,12 @@ pub struct SpawnOptions {
     pub hidden_mcp_servers: Vec<String>,
     /// Ad-hoc MCP server defs for this session only. Hidden names are removed before injection.
     pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
+    /// Plugin ids forced ON for this session. Resolved by resolve_enabled_plugins (forcedOn wins).
+    pub forced_on_plugins: Vec<String>,
+    /// Skill names forced ON for this session that the global baseline disables.
+    pub forced_on_skills: Vec<String>,
+    /// MCP server names forced ON (stored; no-op at spawn until global MCP disable exists).
+    pub forced_on_mcp_servers: Vec<String>,
     pub log_path: PathBuf,                  // the bridge appends stream-json here; the tailer reads it
     pub unit: String,                       // label (agentic-<id>)
     pub memory_max: Option<String>,
@@ -86,6 +92,9 @@ pub fn build_spec(opts: &SpawnOptions) -> RunSpec {
         hidden_mcp_servers: opts.hidden_mcp_servers.clone(),
         extra_mcp_servers: opts.extra_mcp_servers.clone(),
         permission_mode: opts.permission_mode.clone(),
+        forced_on_plugins: opts.forced_on_plugins.clone(),
+        forced_on_skills: opts.forced_on_skills.clone(),
+        forced_on_mcp_servers: opts.forced_on_mcp_servers.clone(),
     }
 }
 

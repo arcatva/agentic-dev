@@ -238,6 +238,9 @@ pub async fn templates_start(State(st): State<AppState>, body: axum::body::Bytes
         extra_mcp_servers: Vec::new(), // templates don't carry extra MCP servers (yet)
         claude_md: None, // templates don't carry session-scoped CLAUDE.md (yet)
         staged_uploads: Vec::new(), // templates don't carry pre-session attachments
+        forced_on_plugins: Vec::new(), // templates don't carry forced-on overrides (yet)
+        forced_on_skills: Vec::new(),
+        forced_on_mcp_servers: Vec::new(),
     };
     match st.engine.submit_session(tpl.repos, tpl.skills, prompt, std::collections::HashMap::new(), meta).await {
         Ok(id) => Json(json!({ "id": id })).into_response(),

@@ -50,8 +50,14 @@ pub fn list_plugins(claude_config_dir: &Path) -> Vec<PluginInfo> {
 pub fn resolve_enabled_plugins(
     claude_config_dir: &Path,
     hidden_plugins: &[String],
+    forced_on: &[String],
 ) -> std::collections::BTreeMap<String, bool> {
     let hidden: std::collections::BTreeSet<&str> = hidden_plugins
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let forced: std::collections::BTreeSet<&str> = forced_on
         .iter()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -65,13 +71,21 @@ pub fn resolve_enabled_plugins(
         if name.is_empty() {
             continue;
         }
-        // Per-session default = the global state; a session hide forces it off.
-        let enabled = crate::engine::global_settings::plugin_globally_enabled(&toggles, name)
-            && !hidden.contains(name);
+        // Precedence: forced-on > hidden > global inherit.
+        let enabled = if forced.contains(name) {
+            true
+        } else {
+            crate::engine::global_settings::plugin_globally_enabled(&toggles, name)
+                && !hidden.contains(name)
+        };
         map.insert(name.to_string(), enabled);
     }
-    for h in hidden {
+    for h in &hidden {
         map.entry(h.to_string()).or_insert(false);
+    }
+    // A forced-on id not in the registry is still emitted as true (user's intent is explicit).
+    for f in &forced {
+        map.entry(f.to_string()).or_insert(true);
     }
     map
 }
@@ -119,7 +133,7 @@ mod tests {
             }}"#,
         )
         .unwrap();
-        let map = resolve_enabled_plugins(&dir, &["github@official".into(), " ".into()]);
+        let map = resolve_enabled_plugins(&dir, &["github@official".into(), " ".into()], &[]);
         assert_eq!(map.len(), 3);
         assert_eq!(map.get("superpowers@official"), Some(&true));
         assert_eq!(map.get("stripe@official"), Some(&true));
@@ -137,7 +151,7 @@ mod tests {
             }}"#,
         )
         .unwrap();
-        let map = resolve_enabled_plugins(&dir, &[]);
+        let map = resolve_enabled_plugins(&dir, &[], &[]);
         assert_eq!(
             map,
             std::collections::BTreeMap::from([
@@ -157,7 +171,7 @@ mod tests {
             r#"{"version":2,"plugins":{"padded@official ":[{"scope":"user","version":"1.0.0"}]}}"#,
         )
         .unwrap();
-        let map = resolve_enabled_plugins(&dir, &["padded@official".into()]);
+        let map = resolve_enabled_plugins(&dir, &["padded@official".into()], &[]);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("padded@official"), Some(&false));
     }
@@ -170,7 +184,7 @@ mod tests {
             r#"{"version":2,"plugins":{"alpha@official":[{"scope":"user","version":"1.0.0"}]}}"#,
         )
         .unwrap();
-        let map = resolve_enabled_plugins(&dir, &["gone@official".into()]);
+        let map = resolve_enabled_plugins(&dir, &["gone@official".into()], &[]);
         assert_eq!(map.get("alpha@official"), Some(&true));
         assert_eq!(map.get("gone@official"), Some(&false));
     }
@@ -179,11 +193,11 @@ mod tests {
     fn resolve_degrades_to_blacklist_without_registry() {
         let dir = tmp();
         // No installed_plugins.json: hidden ids still emitted as false, nothing force-enabled.
-        let map = resolve_enabled_plugins(&dir, &["superpowers@official".into()]);
+        let map = resolve_enabled_plugins(&dir, &["superpowers@official".into()], &[]);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("superpowers@official"), Some(&false));
         // Nothing installed, nothing hidden → empty map → the runner sets no env at all.
-        assert!(resolve_enabled_plugins(&dir, &[]).is_empty());
+        assert!(resolve_enabled_plugins(&dir, &[], &[]).is_empty());
     }
 
     #[test]
@@ -210,8 +224,47 @@ mod tests {
         std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
 
         // Session hides nothing → gh@m must stay false (inherited), cf@m true.
-        let map = resolve_enabled_plugins(&dir, &[]);
+        let map = resolve_enabled_plugins(&dir, &[], &[]);
         assert_eq!(map.get("gh@m"), Some(&false));
         assert_eq!(map.get("cf@m"), Some(&true));
+    }
+
+    #[test]
+    fn forced_on_beats_global_off_plugin() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("plugins").join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{
+                "gh@m":[{"scope":"user"}],
+                "sp@m":[{"scope":"user"}]
+            }}"#,
+        ).unwrap();
+        // Global disables gh@m.
+        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+
+        // forced_on=[gh@m]: must emit true even though globally disabled.
+        let map = resolve_enabled_plugins(&dir, &[], &["gh@m".to_string()]);
+        assert_eq!(map.get("gh@m"), Some(&true), "forced-on must override global-off");
+        assert_eq!(map.get("sp@m"), Some(&true)); // not forced, not hidden → inherit global (on)
+    }
+
+    #[test]
+    fn forced_on_beats_hidden_plugin() {
+        let dir = tmp();
+        std::fs::write(
+            dir.join("plugins").join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{"gh@m":[{"scope":"user"}]}}"#,
+        ).unwrap();
+        // forced_on AND hidden for the same plugin: forced_on wins.
+        let map = resolve_enabled_plugins(&dir, &["gh@m".to_string()], &["gh@m".to_string()]);
+        assert_eq!(map.get("gh@m"), Some(&true), "forced-on must beat hidden");
+    }
+
+    #[test]
+    fn forced_on_uninstalled_plugin_emits_true() {
+        let dir = tmp();
+        // No registry file — forced-on for a not-installed plugin must still emit true.
+        let map = resolve_enabled_plugins(&dir, &[], &["new@m".to_string()]);
+        assert_eq!(map.get("new@m"), Some(&true));
     }
 }

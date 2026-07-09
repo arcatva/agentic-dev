@@ -268,6 +268,12 @@ pub struct SubmitMeta {
     pub hidden_mcp_servers: Vec<String>,
     /// Ad-hoc MCP servers to inject for this session only (not persisted globally).
     pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
+    /// Plugin ids to force ON for this session (overrides global-off). Disjoint from hidden_plugins.
+    pub forced_on_plugins: Vec<String>,
+    /// Skill names to force ON for this session (overrides global-off). Disjoint from hidden_skills.
+    pub forced_on_skills: Vec<String>,
+    /// MCP server names to force ON (stored; no-op at spawn until global MCP disable exists).
+    pub forced_on_mcp_servers: Vec<String>,
 }
 
 /// One file staged before a session exists (see [SubmitMeta::staged_uploads]). Lives at
@@ -1123,6 +1129,9 @@ impl Engine {
             hidden_plugins: meta.hidden_plugins,
             hidden_mcp_servers: meta.hidden_mcp_servers,
             extra_mcp_servers: meta.extra_mcp_servers,
+            forced_on_plugins: meta.forced_on_plugins,
+            forced_on_skills: meta.forced_on_skills,
+            forced_on_mcp_servers: meta.forced_on_mcp_servers,
             prompt: prompt.clone(),
             worktree_path: Some(session_dir.to_string_lossy().into_owned()),
             branch: Some(branch),
@@ -1681,6 +1690,9 @@ The new session is now active. Awaiting the user's next message.",
             hidden_plugins: src.hidden_plugins.clone(),
             hidden_mcp_servers: src.hidden_mcp_servers.clone(),
             extra_mcp_servers: src.extra_mcp_servers.clone(),
+            forced_on_plugins: src.forced_on_plugins.clone(),
+            forced_on_skills: src.forced_on_skills.clone(),
+            forced_on_mcp_servers: src.forced_on_mcp_servers.clone(),
             worktree_path: Some(session_dir.to_string_lossy().into_owned()),
             branch: Some(branch),
             model: src.model.clone(),
@@ -2326,21 +2338,32 @@ The new session is now active. Awaiting the user's next message.",
                 .map(str::to_string)
                 .or_else(|| s.permission_mode.clone()),
             mode: s.mode.clone(),
-            // Reseed from global: session inherits globally-off skills + applies its own hides.
+            // Reseed from global: session inherits globally-off skills + applies its own hides,
+            // minus any skills the session forces on (forced-on wins over global-off).
             hidden_skills: crate::engine::global_settings::resolve_session_hidden_skills(
                 &self.0.cfg.claude_config_base,
                 &s.hidden_skills,
+                &s.forced_on_skills,
             ),
-            // Resolve the session's hiddenPlugins blacklist × the installed-plugin registry into an
-            // EXPLICIT enable map at spawn time (re-read each turn, so mid-session installs are
-            // picked up). Selected (non-hidden) plugins are written as `true`, which force-enables
-            // them via the command-line settings layer even when disabled in ~/.claude settings —
-            // this is what makes the app's plugin toggle authoritative rather than hide-only.
+            // Globally-off skills the session forces on → bridge needs explicit "on" overrides.
+            forced_on_skills: crate::engine::global_settings::resolve_session_forced_on_skills(
+                &self.0.cfg.claude_config_base,
+                &s.forced_on_skills,
+            ),
+            // Resolve the session's hiddenPlugins blacklist × forced-on × the installed-plugin
+            // registry into an EXPLICIT enable map at spawn time (re-read each turn, so
+            // mid-session installs are picked up). Forced-on plugins emit `true` even when
+            // globally disabled; hidden plugins emit `false`.
             enabled_plugins: crate::engine::plugins::resolve_enabled_plugins(
                 &self.0.cfg.claude_config_base,
                 &s.hidden_plugins,
+                &s.forced_on_plugins,
             ),
+            forced_on_plugins: s.forced_on_plugins.clone(),
             hidden_mcp_servers: s.hidden_mcp_servers.clone(),
+            // forced_on_mcp_servers is stored and threaded but has no effect at spawn:
+            // MCP has no global-off yet; the field is accepted for API/UI symmetry.
+            forced_on_mcp_servers: s.forced_on_mcp_servers.clone(),
             extra_mcp_servers: s.extra_mcp_servers.clone(),
             log_path: self.0.store.log_path(&s.id),
             unit: format!("agentic-{}", s.id),

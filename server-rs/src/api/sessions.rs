@@ -216,6 +216,15 @@ pub struct CreateBody {
     /// Ad-hoc MCP server defs for this session only. Validated: name non-empty, exactly one transport.
     #[serde(rename = "extraMcpServers")]
     pub extra_mcp_servers: Option<Vec<crate::engine::store::McpServerDef>>,
+    /// Plugin ids to force ON for this session (overrides global-off). Must be disjoint from hiddenPlugins.
+    #[serde(rename = "forcedOnPlugins")]
+    pub forced_on_plugins: Option<Vec<String>>,
+    /// Skill names to force ON for this session (overrides global-off). Must be disjoint from hiddenSkills.
+    #[serde(rename = "forcedOnSkills")]
+    pub forced_on_skills: Option<Vec<String>>,
+    /// MCP server names to force ON (stored; no-op at spawn until global MCP disable exists).
+    #[serde(rename = "forcedOnMcpServers")]
+    pub forced_on_mcp_servers: Option<Vec<String>>,
 }
 
 /// Parse a JSON request body leniently: treat absent, empty, or unparseable bodies as the
@@ -228,6 +237,18 @@ pub(crate) fn parse_body_lenient<T: serde::de::DeserializeOwned + Default>(bytes
         return T::default();
     }
     serde_json::from_slice(bytes).unwrap_or_default()
+}
+
+/// Returns `Some(error_message)` if the same component id appears in both a hidden list
+/// and the corresponding forced-on list, which is invalid (contradictory overrides).
+fn validate_disjoint(hidden: &[String], forced_on: &[String], kind: &str) -> Option<String> {
+    let hidden_set: std::collections::HashSet<&str> = hidden.iter().map(|s| s.as_str()).collect();
+    for id in forced_on {
+        if hidden_set.contains(id.as_str()) {
+            return Some(format!("{kind}: \"{id}\" appears in both hidden and forcedOn lists — choose one"));
+        }
+    }
+    None
 }
 
 pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response {
@@ -264,17 +285,37 @@ pub async fn create_session(State(st): State<AppState>, body: Bytes) -> Response
             }
         }
     }
+    let hidden_plugins  = b.hidden_plugins.unwrap_or_default();
+    let hidden_skills   = b.hidden_skills.unwrap_or_default();
+    let hidden_mcp      = b.hidden_mcp_servers.unwrap_or_default();
+    let forced_on_plugins = b.forced_on_plugins.unwrap_or_default();
+    let forced_on_skills  = b.forced_on_skills.unwrap_or_default();
+    let forced_on_mcp     = b.forced_on_mcp_servers.unwrap_or_default();
+
+    if let Some(msg) = validate_disjoint(&hidden_plugins, &forced_on_plugins, "hiddenPlugins/forcedOnPlugins") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+    }
+    if let Some(msg) = validate_disjoint(&hidden_skills, &forced_on_skills, "hiddenSkills/forcedOnSkills") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+    }
+    if let Some(msg) = validate_disjoint(&hidden_mcp, &forced_on_mcp, "hiddenMcpServers/forcedOnMcpServers") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+    }
+
     let meta = SubmitMeta {
         model: b.model,
         effort: b.effort,
         mode: b.mode,
         permission_mode: b.permission_mode,
-        hidden_skills: b.hidden_skills.unwrap_or_default(),
-        hidden_plugins: b.hidden_plugins.unwrap_or_default(),
-        hidden_mcp_servers: b.hidden_mcp_servers.unwrap_or_default(),
+        hidden_skills,
+        hidden_plugins,
+        hidden_mcp_servers: hidden_mcp,
         extra_mcp_servers,
         claude_md: b.claude_md,
         staged_uploads: b.staged_uploads.unwrap_or_default(),
+        forced_on_plugins,
+        forced_on_skills,
+        forced_on_mcp_servers: forced_on_mcp,
     };
     match st.engine.submit_session(repos, skills, prompt, HashMap::new(), meta).await {
         Ok(id) => Json(json!({ "id": id })).into_response(),
@@ -1764,5 +1805,57 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
         let msg = body["error"].as_str().unwrap_or("");
         assert!(msg.contains("url must be non-empty"), "expected empty-url error, got: {msg}");
+    }
+
+    #[test]
+    fn validate_disjoint_catches_conflict() {
+        let err = validate_disjoint(
+            &["gh@m".to_string(), "sp@m".to_string()],
+            &["gh@m".to_string()],
+            "plugins",
+        );
+        assert!(err.is_some());
+        let msg = err.unwrap();
+        assert!(msg.contains("gh@m"), "error must name the conflicting id: {msg}");
+    }
+
+    #[test]
+    fn validate_disjoint_allows_non_overlapping_lists() {
+        let err = validate_disjoint(
+            &["gh@m".to_string()],
+            &["sp@m".to_string()],
+            "plugins",
+        );
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn validate_disjoint_empty_lists_ok() {
+        assert!(validate_disjoint(&[], &[], "skills").is_none());
+        assert!(validate_disjoint(&["a".to_string()], &[], "mcp").is_none());
+        assert!(validate_disjoint(&[], &["a".to_string()], "plugins").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_same_id_in_hidden_and_forced_on() {
+        let st = test_state().await;
+        // Plugin conflict
+        let (status, body) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","hiddenPlugins":["gh@m"],"forcedOnPlugins":["gh@m"]}"#))
+            .unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let msg = body["error"].as_str().unwrap_or("");
+        assert!(msg.contains("gh@m"), "error must name conflicting id: {msg}");
+        // Skill conflict
+        let (status2, body2) = oneshot_req(st.clone(), Request::post("/api/sessions")
+            .header("authorization", auth(&st))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"prompt":"test","hiddenSkills":["rke2-ops"],"forcedOnSkills":["rke2-ops"]}"#))
+            .unwrap()).await;
+        assert_eq!(status2, StatusCode::BAD_REQUEST, "body: {body2}");
+        let msg2 = body2["error"].as_str().unwrap_or("");
+        assert!(msg2.contains("rke2-ops"), "error must name conflicting id: {msg2}");
     }
 }

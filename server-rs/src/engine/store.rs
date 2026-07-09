@@ -138,6 +138,14 @@ pub struct Session {
     /// Serialized as JSON array to `extraMcpServers` DB column; forwarded to bridge as
     /// `SDK_BRIDGE_EXTRA_MCP` env (hidden names removed).
     #[serde(rename = "extraMcpServers", default)] pub extra_mcp_servers: Vec<McpServerDef>,
+    /// Plugin ids forced ON for this session (overrides a global-off). Precedence:
+    /// forcedOn > hidden > global inherit.
+    #[serde(rename = "forcedOnPlugins", default)] pub forced_on_plugins: Vec<String>,
+    /// Skill names forced ON for this session (overrides a global-off).
+    #[serde(rename = "forcedOnSkills", default)] pub forced_on_skills: Vec<String>,
+    /// MCP server names forced ON for this session. Stored for API/UI symmetry; no-op
+    /// at spawn until global MCP disable is implemented.
+    #[serde(rename = "forcedOnMcpServers", default)] pub forced_on_mcp_servers: Vec<String>,
 }
 
 /// Serde default for `Session::origin` — keeps the wire shape `"native"` for
@@ -202,6 +210,9 @@ pub struct CreateInput {
     pub origin: Option<String>,
     pub hidden_mcp_servers: Vec<String>,
     pub extra_mcp_servers: Vec<McpServerDef>,
+    pub forced_on_plugins: Vec<String>,
+    pub forced_on_skills: Vec<String>,
+    pub forced_on_mcp_servers: Vec<String>,
 }
 
 impl CreateInput {
@@ -487,6 +498,10 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     // NULL = no MCP servers hidden/added (rows written before the column existed keep the default).
     ("hiddenMcpServers", "TEXT"),
     ("extraMcpServers", "TEXT"),
+    // NULL = no forced-on overrides (rows written before the column existed keep the default).
+    ("forcedOnPlugins", "TEXT"),
+    ("forcedOnSkills", "TEXT"),
+    ("forcedOnMcpServers", "TEXT"),
 ];
 
 use crate::util::now_ms;
@@ -660,11 +675,14 @@ impl Store {
             native_watermark_lines: 0,
             hidden_mcp_servers: input.hidden_mcp_servers.clone(),
             extra_mcp_servers: input.extra_mcp_servers.clone(),
+            forced_on_plugins: input.forced_on_plugins.clone(),
+            forced_on_skills: input.forced_on_skills.clone(),
+            forced_on_mcp_servers: input.forced_on_mcp_servers.clone(),
         };
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         // Bind repo column as the raw string ("" not NULL for no-repo sessions).
-        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId,origin,hiddenMcpServers,extraMcpServers) \
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId,origin,hiddenMcpServers,extraMcpServers,forcedOnPlugins,forcedOnSkills,forcedOnMcpServers) \
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&s.id).bind(&s.repo).bind(serde_json::to_string(&s.repos)?).bind(serde_json::to_string(&s.skills)?).bind(serde_json::to_string(&s.hidden_skills)?).bind(serde_json::to_string(&s.hidden_plugins)?)
             .bind(&s.prompt).bind(&s.worktree_path).bind(&s.branch).bind(&s.claude_session_id).bind(&s.status)
             .bind(s.cost_usd).bind(s.exit_code).bind(&s.error).bind(&s.error_kind).bind(s.created_at)
@@ -674,6 +692,9 @@ impl Store {
             .bind(&input.group_id).bind(s.unread_event_id).bind(s.acked_event_id).bind(&s.origin)
             .bind(serde_json::to_string(&s.hidden_mcp_servers)?)
             .bind(serde_json::to_string(&s.extra_mcp_servers)?)
+            .bind(serde_json::to_string(&s.forced_on_plugins)?)
+            .bind(serde_json::to_string(&s.forced_on_skills)?)
+            .bind(serde_json::to_string(&s.forced_on_mcp_servers)?)
             .execute(&self.pool).await?;
         Ok(s)
     }
@@ -1138,6 +1159,9 @@ fn row_to_session(r: &SqliteRow) -> Session {
         extra_mcp_servers: r.try_get::<Option<String>, _>("extraMcpServers").ok().flatten()
             .and_then(|s| serde_json::from_str::<Vec<McpServerDef>>(&s).ok())
             .unwrap_or_default(),
+        forced_on_plugins: safe_json_vec(r.try_get("forcedOnPlugins").ok().flatten(), vec![]),
+        forced_on_skills: safe_json_vec(r.try_get("forcedOnSkills").ok().flatten(), vec![]),
+        forced_on_mcp_servers: safe_json_vec(r.try_get("forcedOnMcpServers").ok().flatten(), vec![]),
     }
 }
 
@@ -1780,6 +1804,46 @@ mod tests {
         let got = store.get("mcp1").await.unwrap().unwrap();
         assert_eq!(got.extra_mcp_servers, extra);
         assert_eq!(got.hidden_mcp_servers, hidden);
+    }
+
+    #[tokio::test]
+    async fn forced_on_fields_round_trip_and_old_rows_default_empty() {
+        let dir = tmp();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+
+        let plugins = vec!["superpowers@official".to_string()];
+        let skills  = vec!["rke2-ops".to_string()];
+        let mcp     = vec!["my-server".to_string()];
+
+        let created = store.create(CreateInput {
+            id: "s-forced".into(),
+            repos: vec!["r".into()],
+            prompt: "x".into(),
+            forced_on_plugins:     plugins.clone(),
+            forced_on_skills:      skills.clone(),
+            forced_on_mcp_servers: mcp.clone(),
+            ..Default::default()
+        }).await.unwrap();
+
+        assert_eq!(created.forced_on_plugins,     plugins);
+        assert_eq!(created.forced_on_skills,      skills);
+        assert_eq!(created.forced_on_mcp_servers, mcp);
+
+        let got = store.get("s-forced").await.unwrap().unwrap();
+        assert_eq!(got.forced_on_plugins,     plugins);
+        assert_eq!(got.forced_on_skills,      skills);
+        assert_eq!(got.forced_on_mcp_servers, mcp);
+
+        // A session without forced-on fields must default to empty (legacy compat).
+        let plain = store.create(CreateInput {
+            id: "s-plain".into(),
+            repos: vec!["r".into()],
+            prompt: "y".into(),
+            ..Default::default()
+        }).await.unwrap();
+        assert!(plain.forced_on_plugins.is_empty());
+        assert!(plain.forced_on_skills.is_empty());
+        assert!(plain.forced_on_mcp_servers.is_empty());
     }
 
     #[tokio::test]
