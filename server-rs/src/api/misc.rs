@@ -92,6 +92,40 @@ pub async fn plugins_route(State(st): State<AppState>) -> impl axum::response::I
     Json(crate::engine::plugins::list_plugins(&st.config.claude_config_base))
 }
 
+/// GET /api/global-settings — unified skill+plugin components with their global on/off state.
+pub async fn global_settings_route(State(st): State<AppState>) -> impl axum::response::IntoResponse {
+    Json(crate::engine::components::list_components(
+        &st.config.claude_config_base,
+        &st.config.skills_dir,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ToggleReq {
+    pub kind: String,
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// POST /api/global-settings/toggle — flip one component globally (writes settings.local.json).
+pub async fn global_settings_toggle_route(
+    State(st): State<AppState>,
+    Json(req): Json<ToggleReq>,
+) -> Response {
+    let base = &st.config.claude_config_base;
+    let res = match req.kind.as_str() {
+        "plugin" => crate::engine::global_settings::set_plugin_enabled(base, &req.id, req.enabled),
+        "skill" => crate::engine::global_settings::set_skill_enabled(base, &req.id, req.enabled),
+        other => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown kind: {other}")}))).into_response();
+        }
+    };
+    match res {
+        Ok(()) => Json(crate::engine::components::list_components(base, &st.config.skills_dir)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 // ── DB-backed groups CRUD (replaces the old file-based groups_get / groups_put) ──
 
 pub async fn groups_list(State(st): State<AppState>) -> Response {
