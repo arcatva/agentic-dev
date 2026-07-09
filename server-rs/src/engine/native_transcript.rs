@@ -190,4 +190,35 @@ mod tests {
         // is the epoch-ms of 2026-07-10T00:00:00Z. The correct value is below.)
         assert_eq!(first["at"], 1783555200000i64);
     }
+
+    #[test]
+    fn translate_range_slices_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("range.jsonl");
+        // 2 native lines: a real user prompt + an assistant end_turn (the watermark
+        // reconcile path depends on translate_range returning the right slice and
+        // a stable total even at the boundaries).
+        std::fs::write(&path,
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-09T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"id\":\"msg_01\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+        let native_total = read_lines(&path).len();
+        assert_eq!(native_total, 2);
+
+        // (a) from_line=0 -> whole file's translated lines, total = native line count.
+        let (all, total) = translate_range(&path, 0);
+        assert_eq!(total, native_total);
+        // 2 native lines => agentic_prompt + assistant + result(end_turn) = 3 lines.
+        assert_eq!(all.len(), 3);
+
+        // (b) from_line=total -> empty vec, total unchanged, no panic.
+        let (empty, total_eq) = translate_range(&path, total);
+        assert!(empty.is_empty(), "from_line==total should yield empty vec");
+        assert_eq!(total_eq, total, "total must be unchanged when slice is empty");
+
+        // (c) from_line=total+5 -> empty vec, no panic, total still unchanged.
+        let (empty2, total_far) = translate_range(&path, total + 5);
+        assert!(empty2.is_empty(), "from_line>total should yield empty vec");
+        assert_eq!(total_far, total, "total must be unchanged for out-of-range from_line");
+    }
 }
