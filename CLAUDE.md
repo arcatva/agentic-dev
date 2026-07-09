@@ -97,8 +97,11 @@ release on demand — not per-merge.
 
 ## Delivering a build artifact to the user
 The user is remote (no terminal): hand off any built binary/tarball via `./outbox/` (see the global
-outbox note). **Naming rule:**
-- **Default (ad-hoc build) → build timestamp** `<YYYYMMDD-HHMM>.<ext>` (e.g. `20260709-2248.tar.gz`)
-  so ad-hoc builds are distinguishable.
-- **When the user explicitly says "tag" or "release" → version number** `v<version>.<ext>`
-  (e.g. `v0.4.2.tar.gz`), matching the `server-rs/Cargo.toml` version / git tag — NOT the timestamp.
+outbox note). Releases build a SEPARATE tarball per platform (Linux + macOS), so the name must keep
+the platform or the artifacts overwrite each other in `./outbox/`. **Naming rule:**
+- **Default (ad-hoc build) → build timestamp** `<YYYYMMDD-HHMM>[-<platform>].<ext>`
+  (e.g. `20260709-2248-linux-x86_64.tar.gz`); include `<platform>` whenever you deliver more than one.
+- **When the user explicitly says "tag" or "release" → the packaged name** from `scripts/package.sh`,
+  `agentic-dev-<version>-<platform>.tar.gz` (e.g. `agentic-dev-0.4.2-linux-x86_64.tar.gz`) — version-
+  numbered (from `server-rs/Cargo.toml` / the git tag) AND platform-qualified. Do NOT flatten the
+  per-platform tarballs to a single `v<version>.<ext>`.
