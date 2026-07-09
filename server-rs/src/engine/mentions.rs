@@ -22,8 +22,10 @@ const TITLE_MAX_CHARS: usize = 120;
 
 /// Scan `text` for `@session:<prefix>` tokens and return the distinct prefixes in first-seen
 /// order. A token starts at an `@` that is NOT preceded by an alphanumeric char (so
-/// `mail@session:...`-style strings don't fire) and the prefix is 4–36 chars drawn from the
-/// uuid alphabet (ascii hex + `-`), longest match first.
+/// `mail@session:...`-style strings don't fire), the prefix is 4–36 chars drawn from the uuid
+/// alphabet (ascii hex + `-`), longest match first, and the char after the prefix must NOT be
+/// ascii-alphanumeric — `@session:abcdxyz` is a malformed token, not a mention of `abcd`, and
+/// must pass through untouched.
 fn scan_prefixes(text: &str) -> Vec<String> {
     const MARK: &str = "@session:";
     let bytes = text.as_bytes();
@@ -44,8 +46,13 @@ fn scan_prefixes(text: &str) -> Vec<String> {
         {
             end += 1;
         }
+        // End boundary: the prefix must not be immediately followed by more ascii-alphanumeric
+        // chars (a non-hex suffix like `xyz`, or hex continuing past the 36-char cap) — that is
+        // pasted/garbage text, not a picker token. (`.is_ascii_alphanumeric` on the raw byte is
+        // multi-byte-safe: every byte of a non-ASCII char is >= 0x80.)
+        let end_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
         let prefix = &text[start + MARK.len()..end];
-        if boundary_ok && prefix.len() >= 4 {
+        if boundary_ok && end_ok && prefix.len() >= 4 {
             let p = prefix.to_ascii_lowercase();
             if !out.contains(&p) {
                 out.push(p);
@@ -126,10 +133,21 @@ fn render_block(prefix: &str, s: &Session, log_path: &dyn Fn(&str) -> PathBuf) -
     if !s.repos.is_empty() {
         b.push_str(&format!("- repos: {}\n", s.repos.join(", ")));
     }
+    // `worktree_path` is the SESSION DIR; each repo's actual checkout is `<dir>/<repo>` (see
+    // worktree::create_session_worktrees). Point at the per-repo checkouts — git commands run at
+    // the session dir itself would land outside any repository.
     if let Some(wt) = s.worktree_path.as_deref() {
-        match s.branch.as_deref() {
-            Some(br) => b.push_str(&format!("- worktree: {wt} (branch {br})\n")),
-            None => b.push_str(&format!("- worktree: {wt}\n")),
+        let br = s
+            .branch
+            .as_deref()
+            .map(|b| format!(" (branch {b})"))
+            .unwrap_or_default();
+        if s.repos.is_empty() {
+            b.push_str(&format!("- session dir: {wt}{br}\n"));
+        } else {
+            for repo in &s.repos {
+                b.push_str(&format!("- worktree [{repo}]: {wt}/{repo}{br}\n"));
+            }
         }
     }
     b.push_str(&format!(
@@ -149,7 +167,8 @@ mod tests {
             prompt: prompt.to_string(),
             status: "running".to_string(),
             repos: vec!["agentic-dev".to_string()],
-            worktree_path: Some(format!("/tmp/worktrees/{id}/agentic-dev")),
+            // Mirrors production: worktree_path is the SESSION DIR, repos checked out under it.
+            worktree_path: Some(format!("/tmp/worktrees/{id}")),
             branch: Some(format!("agentic/{id}")),
             ..Default::default()
         }
@@ -171,6 +190,12 @@ mod tests {
         assert!(scan_prefixes("@session:abc").is_empty());
         assert!(scan_prefixes("mail@session:abcd1234").is_empty());
         assert!(scan_prefixes("no mentions here").is_empty());
+        // malformed tail: non-hex alnum suffix (or hex past the 36-char cap) → not a token;
+        // trailing punctuation / non-ASCII / end-of-text are fine
+        assert!(scan_prefixes("@session:abcdxyz").is_empty());
+        assert!(scan_prefixes(&format!("@session:{}f", "a".repeat(36))).is_empty());
+        assert_eq!(scan_prefixes("@session:abcd1234."), vec!["abcd1234"]);
+        assert_eq!(scan_prefixes("@session:abcd1234的菜单"), vec!["abcd1234"]);
         // duplicates collapse
         assert_eq!(
             scan_prefixes("@session:abcd1234 and @session:abcd1234"),
@@ -185,10 +210,22 @@ mod tests {
         assert!(out.starts_with("look at @session:abcd1234 please\n\n---\n"));
         assert!(out.contains("session abcd1234-0000-0000-0000-000000000000"));
         assert!(out.contains("\"fix the login bug\""));
-        assert!(out.contains("/tmp/worktrees/abcd1234-0000-0000-0000-000000000000/agentic-dev"));
+        // The per-repo CHECKOUT path (<session dir>/<repo>), not the bare session dir.
+        assert!(out.contains(
+            "- worktree [agentic-dev]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/agentic-dev"
+        ));
         assert!(out.contains("(branch agentic/abcd1234-0000-0000-0000-000000000000)"));
         assert!(out.contains("/tmp/logs/abcd1234-0000-0000-0000-000000000000.jsonl"));
         assert!(out.contains("do not write into another session's worktree"));
+    }
+
+    #[test]
+    fn multi_repo_session_gets_one_worktree_line_per_repo() {
+        let mut s = sess("abcd1234-0000-0000-0000-000000000000", "multi");
+        s.repos = vec!["alpha".to_string(), "beta".to_string()];
+        let out = expand_session_mentions("@session:abcd1234", &[s], &|id| lp(id));
+        assert!(out.contains("- worktree [alpha]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/alpha"));
+        assert!(out.contains("- worktree [beta]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/beta"));
     }
 
     #[test]
@@ -219,7 +256,8 @@ mod tests {
         s.branch = None;
         s.repos = vec![];
         let out = expand_session_mentions("@session:abcd1234", &[s], &|id| lp(id));
-        assert!(!out.contains("- worktree:"));
+        assert!(!out.contains("- worktree"));
+        assert!(!out.contains("- session dir"));
         assert!(!out.contains("- repos:"));
         assert!(out.contains("- transcript log"));
     }

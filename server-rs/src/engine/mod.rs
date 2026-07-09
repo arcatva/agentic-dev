@@ -1919,6 +1919,14 @@ The new session is now active. Awaiting the user's next message.",
         // this turn. The initial submit is turn 1, so it never triggers.
         self.maybe_spawn_retitle(id);
 
+        // Resolve `@session:<id>` mentions BEFORE spawning: expansion awaits Store::list(), and
+        // any await between spawn_claude and attach() widens the spawn→attach race window (a kill
+        // landing mid-await finds nothing in state.running and no-ops, leaving the just-spawned
+        // handle running). Mentions are expanded on the user's prompt only (never on the fork
+        // seed context — a transcript may quote mention tokens from earlier turns) and only on
+        // the delivered text — the log marker appended above stays `item.prompt`.
+        let delivered = self.expand_session_mentions(&item.prompt).await;
+
         // Spawn claude.
         let opts = self.spawn_opts(&s, &item);
         tracing::info!(
@@ -1940,11 +1948,8 @@ The new session is now active. Awaiting the user's next message.",
 
         // Write the first user message. For a fork's first turn this prepends the seed context
         // (the source transcript) ahead of the user's message; for every normal turn it is just
-        // `item.prompt`. The log marker appended above stays `item.prompt` so the displayed user
-        // bubble is the user's text, not the prepended transcript. `@session:<id>` mentions are
-        // expanded on the user's prompt only (never on the seed context — a transcript may quote
-        // mention tokens from earlier turns) and only on the delivered text.
-        let delivered = self.expand_session_mentions(&item.prompt).await;
+        // the (mention-expanded) prompt. The displayed user bubble stays the user's text, not the
+        // prepended transcript.
         handle.write(&encode_user_message(&compose_user_text(&compose_turn_text_with(
             &item, &delivered,
         ))));
