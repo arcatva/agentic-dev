@@ -894,12 +894,16 @@ impl Store {
     }
 
     /// Return the id of the group whose `name` matches; create it (with a
-    /// stable id for `"Claude Code Adopted"`, otherwise a fresh `grp-<uuid>`)
-    /// if absent. Idempotent and safe under concurrent inserters: we use
-    /// `INSERT OR IGNORE` and then re-`SELECT` by name so a racing caller
-    /// that already inserted still resolves to the winner's id. The
-    /// `sortOrder` is set to `1000` (same default as the rest of the engine
-    /// so the group renders in a predictable place in the UI).
+    /// stable id for `"Claude Code Adopted"`, or a deterministic
+    /// `grp-<hash>` derived from `name` for any other name) if absent.
+    /// Idempotent and safe under concurrent inserters: the generated id is
+    /// a pure function of `name`, so two racing callers compute the SAME id
+    /// and the loser's INSERT collides on the PRIMARY KEY, which is
+    /// swallowed by `INSERT OR IGNORE`. We then re-`SELECT` by name so a
+    /// caller that raced still resolves to the winner's id (a pre-existing
+    /// group of any id for `name` is also respected). The `sortOrder` is
+    /// set to `1000` (same default as the rest of the engine so the group
+    /// renders in a predictable place in the UI).
     pub async fn ensure_group(&self, name: &str) -> Result<String, StoreError> {
         if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM groups WHERE name = ?")
             .bind(name)
@@ -911,7 +915,14 @@ impl Store {
         let id = if name == "Claude Code Adopted" {
             "grp-adopted".to_string()
         } else {
-            format!("grp-{}", uuid::Uuid::new_v4())
+            // Deterministic id from the name (no new dep): two racing
+            // callers produce the same `grp-<hash>`, so their INSERT
+            // statements collide on PRIMARY KEY id and INSERT OR IGNORE
+            // resolves the race without creating duplicate rows.
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            Hash::hash(name, &mut h);
+            format!("grp-{:016x}", Hasher::finish(&h))
         };
         let now = now_ms();
         sqlx::query(
@@ -1621,7 +1632,31 @@ mod tests {
         let c2 = store.ensure_group("Other Group").await.unwrap();
         assert_eq!(c1, c2, "non-adopted name is also idempotent");
         assert!(c1.starts_with("grp-") && c1 != "grp-adopted",
-            "non-adopted name must get a fresh grp-<uuid> id, got {c1}");
+            "non-adopted name must get a deterministic grp-<hash> id, got {c1}");
+    }
+
+    /// Non-adopted names must get a stable id derived from the name (not a
+    /// fresh uuid each call), so two sequential calls return the SAME id and
+    /// `list_groups` shows exactly one row — this is what makes
+    /// concurrent inserters race-safe on PRIMARY KEY id instead of
+    /// accidentally producing duplicate `groups` rows.
+    #[tokio::test]
+    async fn ensure_group_same_name_is_stable_id() {
+        let dir = tmp();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let first = store.ensure_group("My Group").await.unwrap();
+        let second = store.ensure_group("My Group").await.unwrap();
+        assert_eq!(first, second,
+            "two sequential calls for the same non-adopted name must return the same id");
+        assert!(first.starts_with("grp-") && first != "grp-adopted",
+            "non-adopted name must get a deterministic grp-<hash> id, got {first}");
+        let rows: Vec<_> = store.list_groups().await.unwrap()
+            .into_iter().filter(|g| g.name == "My Group").collect();
+        assert_eq!(rows.len(), 1,
+            "exactly one row must exist for the non-adopted name, got {} ({:?})",
+            rows.len(), rows.iter().map(|g| &g.id).collect::<Vec<_>>());
+        assert_eq!(rows[0].id, first,
+            "the single surviving row must carry the deterministic id");
     }
 
     #[tokio::test]
