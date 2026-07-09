@@ -2433,6 +2433,29 @@ mod fork_session {
         let persisted = e.get(&forked.id).await.unwrap();
         assert_eq!(persisted.hidden_plugins, vec!["github@claude-plugins-official".to_string()]);
     }
+
+    /// Regression: `fork_session` must stamp the new row with `origin="fork"`. Before the fix,
+    /// the CreateInput built inside fork_session never set `origin`, so forks were persisted
+    /// with the column default `"native"` — silently indistinguishable from a normal submit.
+    /// The migration backfill (store.rs) upgrades any legacy `origin='native'` row that ALSO
+    /// has a `parentSessionId` to `"fork"`, but new writes must carry the marker from the start.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fork_session_stamps_origin_fork() {
+        let (e, src_id, _repo, _sha) = session_with_one_commit().await;
+        let forked: Session = e.fork_session(&src_id).await.unwrap();
+        assert_eq!(
+            forked.origin, "fork",
+            "fork_session must persist origin='fork' on the new row, got: {}",
+            forked.origin
+        );
+        // And re-reading from the store agrees — protects against a future refactor that
+        // returns the in-memory Session from the create call but forgets the INSERT.
+        let persisted = e.get(&forked.id).await.unwrap();
+        assert_eq!(persisted.origin, "fork");
+        // Sanity: the source row stays 'native' (fork must not mutate the source).
+        let src_again = e.get(&src_id).await.unwrap();
+        assert_eq!(src_again.origin, "native");
+    }
 }
 
 
@@ -3762,6 +3785,208 @@ mod submit_titles_via_generator {
         assert!(
             log.iter().any(|l| l.contains("\"assistant\"")),
             "log carries the imported assistant turn"
+        );
+    }
+
+    /// Regression: two concurrent reconcile_from_native calls for the SAME session id must
+    /// not duplicate the imported delta. Before the fix, the function read
+    /// `native_watermark_lines`, translated `[from..end)`, appended each line, then advanced
+    /// the watermark — all unsynchronised. Two callers racing on the same fresh watermark
+    /// would both see `from=0`, both translate the same delta, both append it, then both
+    /// stamp the watermark to the same final value — duplicate transcript lines.
+    ///
+    /// The fix serialises per-id via a `parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>`
+    /// lookup/insert + an inner async lock on the critical section. Two `tokio::join!` calls
+    /// against a 3-user-line transcript must together import exactly 3 agentic_prompt lines,
+    /// sum to 3 in their return values, and leave the watermark at exactly 3.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reconcile_concurrent_calls_same_session_no_duplicate_append() {
+        use crate::engine::native_transcript;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+        let id = "sess-recon-conc";
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        e.0.store
+            .create(CreateInput {
+                id: id.into(),
+                origin: Some("adopted".into()),
+                worktree_path: Some(cwd_s.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        e.0.store
+            .update(
+                id,
+                SessionPatch {
+                    claude_session_id: Some(Some("csidC".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 3 user-authored native lines.
+        let tp = native_transcript::transcript_path(
+            &e.0.cfg.claude_config_base,
+            &cwd_s,
+            "csidC",
+        );
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&tp).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-07-09T00:00:00Z","message":{{"role":"user","content":"u1"}}}}"#
+        ).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-07-09T00:00:01Z","message":{{"role":"user","content":"u2"}}}}"#
+        ).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-07-09T00:00:02Z","message":{{"role":"user","content":"u3"}}}}"#
+        ).unwrap();
+
+        // Two concurrent calls on the same session. They will serialise on the per-id lock;
+        // the first imports all 3 user prompts (3 agentic_prompt lines), the second sees
+        // an advanced watermark and imports nothing. Sum of return values MUST equal 3.
+        let (n1, n2) = tokio::join!(
+            e.reconcile_from_native(id),
+            e.reconcile_from_native(id),
+        );
+        let n1 = n1.unwrap();
+        let n2 = n2.unwrap();
+        assert_eq!(
+            n1 + n2,
+            3,
+            "two concurrent reconciles must together import exactly the 3 native user lines; got n1={n1}, n2={n2}",
+        );
+
+        // Rendered log carries exactly one set of 3 agentic_prompt lines — no duplicates.
+        let log = e.0.store.read_log(id);
+        let prompts: Vec<String> = log.iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|o| o["type"] == "agentic_prompt")
+            .map(|o| o["text"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            prompts,
+            vec!["u1".to_string(), "u2".to_string(), "u3".to_string()],
+            "rendered log must have exactly 3 agentic_prompt lines in order, no dupes; got {prompts:?}",
+        );
+
+        // Watermark advanced to the full native line count.
+        let s = e.get(id).await.unwrap();
+        assert_eq!(
+            s.native_watermark_lines, 3,
+            "watermark must reach the native line count (3 user lines)",
+        );
+    }
+
+    /// Regression: when reconcile_from_native imports a delta that includes a user-authored
+    /// turn, it must bump `last_user_message_at` to the ISO-3339 epoch ms of the newest
+    /// imported `agentic_prompt` — but NEVER rewind if a newer value is already recorded
+    /// (e.g. an out-of-band live turn ran ahead of the reconcile). Before the fix, a fresh
+    /// adopt's `last_user_message_at` stayed at `createdAt`, leaving the session looking
+    /// "old" against more recent activity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reconcile_bumps_last_user_message_at_to_imported_user_prompt() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+        let id = "sess-recon-luma";
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        e.0.store
+            .create(CreateInput {
+                id: id.into(),
+                origin: Some("adopted".into()),
+                worktree_path: Some(cwd_s.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        e.0.store
+            .update(
+                id,
+                SessionPatch {
+                    claude_session_id: Some(Some("csidL".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // A user turn at a known ISO timestamp. The native_transcript test asserts
+        // 2026-07-09T00:00:00Z == 1783555200000 ms; we assert the same here so a future
+        // parser change fails loudly in both tests.
+        let tp = native_transcript::transcript_path(
+            &e.0.cfg.claude_config_base,
+            &cwd_s,
+            "csidL",
+        );
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            r#"{"type":"user","timestamp":"2026-07-09T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+        )
+        .unwrap();
+
+        let expected_ms: i64 = native_transcript::iso_to_ms("2026-07-09T00:00:00Z");
+
+        // Force the baseline low so the imported prompt's `at` is GUARANTEED to bump it.
+        // (Without this, `Store::create` stamps `last_user_message_at = now_ms()` at
+        // creation time, which is naturally newer than any past native user turn and
+        // would never trigger the bump — masking the test of the recency-bump branch.)
+        e.0.store
+            .update(
+                id,
+                SessionPatch {
+                    last_user_message_at: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // First reconcile imports the user prompt and bumps last_user_message_at.
+        let n = e.reconcile_from_native(id).await.unwrap();
+        assert_eq!(n, 1);
+
+        let s = e.get(id).await.unwrap();
+        assert_eq!(
+            s.last_user_message_at, expected_ms,
+            "reconcile must bump last_user_message_at to the ISO-ts epoch-ms of the imported user prompt",
+        );
+
+        // A second no-op reconcile (no new native lines) must NOT rewind. We force a
+        // high-water baseline FIRST so the no-op would naively zero it back out: bump to a
+        // value higher than expected_ms, then reconcile again and assert no change.
+        e.0.store
+            .update(
+                id,
+                SessionPatch {
+                    last_user_message_at: Some(expected_ms + 10_000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let n2 = e.reconcile_from_native(id).await.unwrap();
+        assert_eq!(n2, 0, "second reconcile is a no-op with no delta appended");
+        let s2 = e.get(id).await.unwrap();
+        assert_eq!(
+            s2.last_user_message_at,
+            expected_ms + 10_000,
+            "no-op reconcile must never rewind last_user_message_at below the current value",
         );
     }
 

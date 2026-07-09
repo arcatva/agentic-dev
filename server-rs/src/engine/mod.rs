@@ -63,6 +63,25 @@ pub(crate) fn compose_turn_text_with(item: &QueueItem, prompt: &str) -> String {
     }
 }
 
+/// Scan a slice of freshly-appended #1 JSONL lines (the output of
+/// `native_transcript::translate_lines`) and return the maximum `at` (epoch ms) across
+/// every `agentic_prompt` line. Returns `None` when there are no user-authored lines
+/// (e.g. the delta is purely assistant turns) — used by `reconcile_from_native` to
+/// decide whether `last_user_message_at` should be bumped.
+fn max_agentic_prompt_at(lines: &[String]) -> Option<i64> {
+    let mut max_at: Option<i64> = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+        if v.get("type").and_then(|t| t.as_str()) != Some("agentic_prompt") {
+            continue;
+        }
+        if let Some(at) = v.get("at").and_then(|a| a.as_i64()) {
+            max_at = Some(max_at.map_or(at, |cur| cur.max(at)));
+        }
+    }
+    max_at
+}
+
 // ──────────────────────────────────────────────────────────────
 // Timing constants
 // ──────────────────────────────────────────────────────────────
@@ -198,6 +217,15 @@ pub struct EngineInner {
     pub(crate) transcript: Option<Arc<TranscriptCache>>,
     pub(crate) state: Mutex<EngineState>,
     watchdog: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Per-session async lock used by `reconcile_from_native` to serialise concurrent
+    /// calls for the same session id. Without it, two calls can both read the same
+    /// `native_watermark_lines`, both translate the same delta, and both append the
+    /// same lines to the rendered log — duplicate transcript. Keyed by session id; an
+    /// inner `Arc<Mutex<()>>` is inserted on first observation and reused thereafter.
+    /// Guarded by a fast synchronous `parking_lot::Mutex<HashMap<_, _>>` only for the
+    /// lookup/insert (NEVER held across `.await`).
+    pub(crate) reconcile_locks:
+        parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -383,6 +411,7 @@ impl Engine {
             transcript,
             state: Mutex::new(EngineState::default()),
             watchdog: Mutex::new(None),
+            reconcile_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
         });
         let engine = Engine(inner);
         // Start the watchdog (Task 6 body is already live).
@@ -622,18 +651,18 @@ impl Engine {
     /// (e.g. an adopted csid whose file was moved) — nothing to import, not an error.
     /// Engine stays axum-free: this is pure store + filesystem work.
     pub async fn reconcile_from_native(&self, id: &str) -> Result<usize, String> {
-        let s = self
-            .0
-            .store
-            .get(id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("no such session")?;
-        let csid = s
-            .claude_session_id
-            .clone()
-            .ok_or("session has no claudeSessionId")?;
-        let cwd = s.worktree_path.clone().unwrap_or_default();
+        // Cheap pre-checks OUTSIDE the per-session lock: the early-return paths
+        // (no session / no csid / file missing) do not contend with each other, so we
+        // only serialise the actually-mutating critical section. Doing the early
+        // returns first keeps the lock window minimal and avoids taking the lock on
+        // fail-fast paths.
+        let (csid, cwd) = match self.0.store.get(id).await.map_err(|e| e.to_string())? {
+            None => return Err("no such session".into()),
+            Some(s) => match s.claude_session_id.clone() {
+                None => return Err("session has no claudeSessionId".into()),
+                Some(c) => (c, s.worktree_path.clone().unwrap_or_default()),
+            },
+        };
         let path = crate::engine::native_transcript::transcript_path(
             &self.0.cfg.claude_config_base,
             &cwd,
@@ -642,6 +671,33 @@ impl Engine {
         if !path.is_file() {
             return Ok(0);
         }
+
+        // Per-session async lock. Get-or-insert the inner `Arc<Mutex<()>>` while
+        // holding the fast synchronous map mutex (cheap, non-blocking on the only
+        // contention surface), then drop the map mutex BEFORE awaiting the inner
+        // mutex — holding `parking_lot::Mutex` across an `.await` would block the
+        // executor thread and dead-lock under load.
+        let inner_lock: Arc<tokio::sync::Mutex<()>> = {
+            let mut map = self.0.reconcile_locks.lock();
+            map.entry(id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+
+        let _guard = inner_lock.lock().await;
+
+        // CRITICAL SECTION. Re-read the session here: the pre-lock `get` may be
+        // stale (a sibling task could have advanced the watermark between read
+        // and lock acquisition). Re-reading inside the guard ensures we translate
+        // only the lines that are STILL new.
+        let s = self
+            .0
+            .store
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no such session")?;
+
         let from = s.native_watermark_lines.max(0) as usize;
         let (lines, total) =
             crate::engine::native_transcript::translate_range(&path, from);
@@ -657,6 +713,30 @@ impl Engine {
             .set_watermark(id, total as i64)
             .await
             .map_err(|e| e.to_string())?;
+
+        // Recency bump (Fix C): when the imported delta contains user-authored text,
+        // advance `last_user_message_at` to the newest imported agentic_prompt's `at`
+        // (epoch ms), but never rewind a row that has already been touched by a newer
+        // turn (e.g. a subsequent prompt in a live turn wrote a higher timestamp out of
+        // band). `lines` carries the freshly-appended #1 JSONL — each `agentic_prompt`
+        // line has an `at` field set by `translate_lines` to the ISO-3339 epoch ms of
+        // the native user turn.
+        if let Some(max_at) = max_agentic_prompt_at(&lines) {
+            if max_at > s.last_user_message_at {
+                self.0
+                    .store
+                    .update(
+                        id,
+                        crate::engine::store::SessionPatch {
+                            last_user_message_at: Some(max_at),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
         Ok(lines.len())
     }
 
@@ -1530,6 +1610,9 @@ The new session is now active. Awaiting the user's next message.",
             base_shas: base_shas_db,
             base_sha: base_sha_first,
             parent_session_id: Some(src_id.into()),
+            // Fork provenance: this row is the child of `fork_session`, not a normal
+            // native submission. Mirrors `adopt_session`'s `origin: Some("adopted")`.
+            origin: Some("fork".into()),
             ..Default::default()
         };
 
