@@ -79,12 +79,18 @@ pub struct Provider {
 impl Provider {
     /// The effective API key: the literal if set, else read from `api_key_env`, else empty.
     pub fn resolved_key(&self) -> String {
+        self.resolved_key_with(|e| std::env::var(e).ok())
+    }
+
+    /// [resolved_key] with an injectable env lookup — tests pass a closure instead of mutating
+    /// the process environment (`env::set_var` races concurrent getenv in parallel tests: UB).
+    pub fn resolved_key_with(&self, lookup: impl Fn(&str) -> Option<String>) -> String {
         if !self.api_key.is_empty() {
             return self.api_key.clone();
         }
         self.api_key_env
             .as_ref()
-            .and_then(|e| std::env::var(e).ok())
+            .and_then(|e| lookup(e))
             .unwrap_or_default()
     }
 
@@ -467,8 +473,18 @@ pub fn env_overlay(p: &Provider) -> HashMap<String, String> {
 /// (axum runs handlers on a multi-threaded executor).
 static FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-/// The providers JSON file: `AGENTIC_PROVIDERS_FILE` if set, else `~/.agentic-dev/providers.json`.
+/// Test-only override for [providers_file_path]. A plain Rust static instead of `env::set_var`:
+/// setenv racing a concurrent getenv from ANY other test thread is undefined behaviour in glibc
+/// (the "process-global set_var race" flake noted on the HTTPS PR) — this override is data-race-free.
+/// Always `None` in production.
+pub static PROVIDERS_FILE_OVERRIDE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
+
+/// The providers JSON file: the test override if set, else `AGENTIC_PROVIDERS_FILE`, else
+/// `~/.agentic-dev/providers.json`.
 pub fn providers_file_path() -> PathBuf {
+    if let Some(p) = PROVIDERS_FILE_OVERRIDE.lock().clone() {
+        return p;
+    }
     if let Ok(p) = std::env::var("AGENTIC_PROVIDERS_FILE") {
         return PathBuf::from(p);
     }
@@ -709,15 +725,18 @@ mod tests {
             {"name":"sonnet","base_url":"https://an/anthropic","api_key_env":"X_PROVIDERS_TEST_KEY","model":"claude-sonnet-4-5","tier":"strong"}
         ]).to_string()).unwrap();
         // from_file takes the path directly — no global AGENTIC_PROVIDERS_FILE env (avoids
-        // cross-test coupling). X_PROVIDERS_TEST_KEY is read only by this test (api_key_env path).
-        std::env::set_var("X_PROVIDERS_TEST_KEY", "from-env");
+        // cross-test coupling). The api_key_env path is exercised through resolved_key_with an
+        // injected lookup instead of env::set_var — setenv racing any concurrent getenv on other
+        // test threads is UB (the flake the HTTPS PR called the "process-global set_var race").
         let r = ProviderRegistry::from_file(&f).expect("file loads");
         assert_eq!(r.providers.len(), 2);
         assert_eq!(r.find("kimi").unwrap().model, "kimi-k2");
-        assert_eq!(r.find("sonnet").unwrap().resolved_key(), "from-env");
+        let lookup = |k: &str| (k == "X_PROVIDERS_TEST_KEY").then(|| "from-env".to_string());
+        assert_eq!(r.find("sonnet").unwrap().resolved_key_with(lookup), "from-env");
+        // resolved_key() (the real-env variant) falls back to empty when the env var is absent.
+        assert_eq!(r.find("sonnet").unwrap().resolved_key(), "");
         // old file without a `capability` field → defaults to 0.5 (back-compat), `tier` ignored
         assert_eq!(r.find("sonnet").unwrap().capability, 0.5);
-        std::env::remove_var("X_PROVIDERS_TEST_KEY");
         std::fs::remove_dir_all(&dir).ok();
     }
 
