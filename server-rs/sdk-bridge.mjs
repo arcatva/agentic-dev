@@ -387,7 +387,7 @@ const q = query({
     ...(model ? { model } : {}),
     ...(resume ? { resume } : {}),
     ...(delegateServer || Object.keys(extraMcpServers).length
-      ? { mcpServers: { ...(delegateServer ? { agentic: delegateServer } : {}), ...extraMcpServers } }
+      ? { mcpServers: { ...extraMcpServers, ...(delegateServer ? { agentic: delegateServer } : {}) } }
       : {}),
     ...(workflowHook ? { hooks: { PreToolUse: [{ hooks: [workflowHook] }] } } : {}),
     ...(Object.keys(extraArgs).length ? { extraArgs } : {}),

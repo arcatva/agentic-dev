@@ -2879,6 +2879,86 @@ mod fork_session {
         );
     }
 
+    /// Fix 4 (coverage): hidden_mcp_servers and extra_mcp_servers must thread through
+    /// submit_session → store → spawn_opts and appear verbatim on SpawnOptions.
+    /// Removing the copy line at mod.rs ~713-714 (CreateInput build) or ~1841-1842
+    /// (spawn_opts build) causes this test to FAIL — verified by temporary deletion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_opts_threads_mcp_fields() {
+        use crate::engine::store::McpServerDef;
+        let src = tmp();
+        let e = make_engine(&src, EngineOverrides::default()).await;
+        let extra = vec![
+            McpServerDef {
+                name: "my-stdio".into(),
+                command: Some("npx".into()),
+                args: Some(vec!["my-server".into()]),
+                env: None,
+                transport: None,
+                url: None,
+                headers: None,
+            },
+            McpServerDef {
+                name: "my-http".into(),
+                command: None,
+                args: None,
+                env: None,
+                transport: Some("http".into()),
+                url: Some("https://example.com/mcp".into()),
+                headers: None,
+            },
+        ];
+        let hidden = vec!["disabled-mcp".to_string()];
+        let id = e
+            .submit_session(
+                vec![],
+                vec![],
+                "go".into(),
+                HashMap::new(),
+                SubmitMeta {
+                    model: None,
+                    effort: None,
+                    mode: None,
+                    permission_mode: None,
+                    hidden_skills: vec![],
+                    hidden_plugins: vec![],
+                    hidden_mcp_servers: hidden.clone(),
+                    extra_mcp_servers: extra.clone(),
+                    claude_md: None,
+                    staged_uploads: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        // Verify store persistence (mod.rs ~713-714 — CreateInput build seam).
+        assert_eq!(s.hidden_mcp_servers, hidden, "hidden_mcp_servers not persisted to store");
+        assert_eq!(s.extra_mcp_servers.len(), 2, "extra_mcp_servers not persisted to store");
+        assert_eq!(s.extra_mcp_servers[0].name, "my-stdio");
+        assert_eq!(s.extra_mcp_servers[1].name, "my-http");
+
+        let item = QueueItem {
+            id: id.clone(),
+            prompt: "go".into(),
+            env: HashMap::new(),
+            resume_session_id: None,
+            enqueued_at: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            context_prefix: None,
+        };
+        let opts = e.spawn_opts(&s, &item);
+        // Verify spawn_opts propagation (mod.rs ~1841-1842 — SpawnOptions build seam).
+        assert_eq!(opts.hidden_mcp_servers, hidden, "hidden_mcp_servers not in SpawnOptions");
+        assert_eq!(opts.extra_mcp_servers.len(), 2, "extra_mcp_servers not in SpawnOptions");
+        assert_eq!(opts.extra_mcp_servers[0].name, "my-stdio");
+        assert_eq!(opts.extra_mcp_servers[0].command, Some("npx".into()));
+        assert_eq!(opts.extra_mcp_servers[1].name, "my-http");
+        assert_eq!(opts.extra_mcp_servers[1].url, Some("https://example.com/mcp".into()));
+    }
+
     // ── cwd resolution: Claude CLI's --resume is cwd-scoped (project slug = pwd-derived).
     // A resume turn (session.claude_session_id is set) must spawn from the worktree ROOT so
     // the CLI's slug-search finds the existing transcript jsonl. A first turn (no resume)
