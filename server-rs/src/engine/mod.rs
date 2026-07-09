@@ -264,6 +264,10 @@ pub struct SubmitMeta {
     /// moves each into the new session's `uploads/` dir before the first prompt runs, so the agent
     /// can read the `[attached: uploads/<name>]` paths in that very first prompt. Empty = none.
     pub staged_uploads: Vec<StagedUpload>,
+    /// MCP server names to disable for this session (blacklist).
+    pub hidden_mcp_servers: Vec<String>,
+    /// Ad-hoc MCP servers to inject for this session only (not persisted globally).
+    pub extra_mcp_servers: Vec<crate::engine::store::McpServerDef>,
 }
 
 /// One file staged before a session exists (see [SubmitMeta::staged_uploads]). Lives at
@@ -1114,6 +1118,8 @@ impl Engine {
             skills: skills.clone(),
             hidden_skills: meta.hidden_skills,
             hidden_plugins: meta.hidden_plugins,
+            hidden_mcp_servers: meta.hidden_mcp_servers,
+            extra_mcp_servers: meta.extra_mcp_servers,
             prompt: prompt.clone(),
             worktree_path: Some(session_dir.to_string_lossy().into_owned()),
             branch: Some(branch),
@@ -1667,6 +1673,8 @@ The new session is now active. Awaiting the user's next message.",
             skills: src.skills.clone(),
             hidden_skills: src.hidden_skills.clone(),
             hidden_plugins: src.hidden_plugins.clone(),
+            hidden_mcp_servers: src.hidden_mcp_servers.clone(),
+            extra_mcp_servers: src.extra_mcp_servers.clone(),
             worktree_path: Some(session_dir.to_string_lossy().into_owned()),
             branch: Some(branch),
             model: src.model.clone(),

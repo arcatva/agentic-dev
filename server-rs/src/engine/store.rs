@@ -131,6 +131,13 @@ pub struct Session {
     /// session's rendered log (#1). Updated by adopt (full import) and reconcile
     /// (delta import). Column `nativeWatermarkLines` (INTEGER DEFAULT 0).
     #[serde(rename = "nativeWatermarkLines", default)] pub native_watermark_lines: i64,
+    /// MCP server names to hide for this session (blacklist). Bridge writes them to
+    /// `settings.disabledMcpjsonServers` and skips injecting any matching `extra_mcp_servers`.
+    #[serde(rename = "hiddenMcpServers", default)] pub hidden_mcp_servers: Vec<String>,
+    /// Extra MCP servers to inject for this session only (not persisted globally).
+    /// Serialized as JSON array to `extraMcpServers` DB column; forwarded to bridge as
+    /// `SDK_BRIDGE_EXTRA_MCP` env (hidden names removed).
+    #[serde(rename = "extraMcpServers", default)] pub extra_mcp_servers: Vec<McpServerDef>,
 }
 
 /// Serde default for `Session::origin` — keeps the wire shape `"native"` for
@@ -193,6 +200,8 @@ pub struct CreateInput {
     /// from an external `claude` transcript). `None` writes the column
     /// default `"native"`. Column `origin` (TEXT DEFAULT 'native').
     pub origin: Option<String>,
+    pub hidden_mcp_servers: Vec<String>,
+    pub extra_mcp_servers: Vec<McpServerDef>,
 }
 
 impl CreateInput {
@@ -475,6 +484,9 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("origin", "TEXT DEFAULT 'native'"),
     ("detached", "INTEGER DEFAULT 0"),
     ("nativeWatermarkLines", "INTEGER DEFAULT 0"),
+    // NULL = no MCP servers hidden/added (rows written before the column existed keep the default).
+    ("hiddenMcpServers", "TEXT"),
+    ("extraMcpServers", "TEXT"),
 ];
 
 use crate::util::now_ms;
@@ -646,11 +658,13 @@ impl Store {
             origin: input.origin.clone().unwrap_or_else(|| "native".into()),
             detached: false,
             native_watermark_lines: 0,
+            hidden_mcp_servers: input.hidden_mcp_servers.clone(),
+            extra_mcp_servers: input.extra_mcp_servers.clone(),
         };
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         // Bind repo column as the raw string ("" not NULL for no-repo sessions).
-        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId,origin) \
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO sessions (id,repo,repos,skills,hiddenSkills,hiddenPlugins,prompt,worktreePath,branch,claudeSessionId,status,costUsd,exitCode,error,errorKind,createdAt,startedAt,endedAt,lastUserMessageAt,baseSha,baseShas,worktreeState,model,effort,mode,permissionMode,titlePinned,parentSessionId,seq,groupId,unreadEventId,ackedEventId,origin,hiddenMcpServers,extraMcpServers) \
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&s.id).bind(&s.repo).bind(serde_json::to_string(&s.repos)?).bind(serde_json::to_string(&s.skills)?).bind(serde_json::to_string(&s.hidden_skills)?).bind(serde_json::to_string(&s.hidden_plugins)?)
             .bind(&s.prompt).bind(&s.worktree_path).bind(&s.branch).bind(&s.claude_session_id).bind(&s.status)
             .bind(s.cost_usd).bind(s.exit_code).bind(&s.error).bind(&s.error_kind).bind(s.created_at)
@@ -658,6 +672,8 @@ impl Store {
             .bind(serde_json::to_string(&s.base_shas)?).bind(&s.worktree_state)
             .bind(&s.model).bind(&s.effort).bind(&s.mode).bind(&input.permission_mode).bind(s.title_pinned).bind(&input.parent_session_id).bind(seq)
             .bind(&input.group_id).bind(s.unread_event_id).bind(s.acked_event_id).bind(&s.origin)
+            .bind(serde_json::to_string(&s.hidden_mcp_servers)?)
+            .bind(serde_json::to_string(&s.extra_mcp_servers)?)
             .execute(&self.pool).await?;
         Ok(s)
     }
@@ -1118,6 +1134,10 @@ fn row_to_session(r: &SqliteRow) -> Session {
             .ok()
             .flatten()
             .unwrap_or(0),
+        hidden_mcp_servers: safe_json_vec(r.try_get("hiddenMcpServers").ok().flatten(), vec![]),
+        extra_mcp_servers: r.try_get::<Option<String>, _>("extraMcpServers").ok().flatten()
+            .and_then(|s| serde_json::from_str::<Vec<McpServerDef>>(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -1728,5 +1748,59 @@ mod tests {
         let kids = store.list_children("parent").await.unwrap();
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].id, "child");
+    }
+
+    #[tokio::test]
+    async fn roundtrip_mcp_session_fields() {
+        let dir = tmp();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let extra = vec![
+            McpServerDef {
+                name: "my-mcp".into(),
+                command: Some("npx".into()),
+                args: Some(vec!["my-server".into()]),
+                ..Default::default()
+            },
+            McpServerDef {
+                name: "web-mcp".into(),
+                url: Some("https://example.com/mcp".into()),
+                transport: Some("http".into()),
+                ..Default::default()
+            },
+        ];
+        let hidden = vec!["unwanted-mcp".into()];
+        store.create(CreateInput {
+            id: "mcp1".into(),
+            prompt: "test mcp fields".into(),
+            extra_mcp_servers: extra.clone(),
+            hidden_mcp_servers: hidden.clone(),
+            ..Default::default()
+        }).await.unwrap();
+
+        let got = store.get("mcp1").await.unwrap().unwrap();
+        assert_eq!(got.extra_mcp_servers, extra);
+        assert_eq!(got.hidden_mcp_servers, hidden);
+    }
+
+    #[tokio::test]
+    async fn old_session_without_mcp_columns_defaults_to_empty() {
+        let dir = tmp();
+        let path = dir.join("db.sqlite");
+        {
+            use sqlx::sqlite::SqlitePoolOptions;
+            let pool = SqlitePoolOptions::new()
+                .connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+            sqlx::query(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
+                 createdAt INTEGER, seq INTEGER)"
+            ).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO sessions (id,status,prompt,createdAt,seq) VALUES ('old2','done','p',12345,0)")
+                .execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+        let store = Store::open(path, dir.join("logs")).await.unwrap();
+        let s = store.get("old2").await.unwrap().unwrap();
+        assert!(s.hidden_mcp_servers.is_empty());
+        assert!(s.extra_mcp_servers.is_empty());
     }
 }
