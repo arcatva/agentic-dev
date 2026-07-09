@@ -3900,4 +3900,62 @@ mod submit_titles_via_generator {
             "the half-created row must be rolled back so the csid can be re-adopted"
         );
     }
+
+    // ── Task 7: detach_session + reconcile on reopen ──────────
+    //
+    // Detach hands an adopted session off to a terminal `claude`: hard-stop the
+    // live streaming process (single-writer), freeze the watermark at the current
+    // native line count, mark `detached`, and hand back a `--resume` command.
+    // A later terminal turn is then pulled in by `reconcile_from_native` on reopen.
+    #[tokio::test]
+    async fn detach_sets_flag_watermark_and_resume_cmd() {
+        use crate::engine::native_transcript;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await; // claude_config_base = work/claude-config
+
+        // Adopt an external session running in `cwd` with one native user turn (#2).
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidD");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        let id = e.adopt_session("csidD", &cwd_s).await.unwrap();
+
+        // Detach: returns the csid + a `--resume` command, freezes the watermark,
+        // and flips the `detached` flag.
+        let info = e.detach_session(&id).await.unwrap();
+        assert_eq!(info.claude_session_id, "csidD");
+        assert_eq!(info.cwd, cwd_s, "cwd echoes the adopted worktree path");
+        assert!(
+            info.resume_cmd.contains("claude --resume csidD"),
+            "resume_cmd carries the terminal `--resume` invocation"
+        );
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(s.detached, "detach sets the single-writer guard flag");
+        assert_eq!(
+            s.native_watermark_lines, 1,
+            "watermark frozen at the native line count present at detach"
+        );
+
+        // The terminal adds a turn while agentic-dev is detached.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tp)
+            .unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"back\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+
+        // Reconcile on reopen pulls exactly the terminal turn: assistant + result = 2.
+        let n = e.reconcile_from_native(&id).await.unwrap();
+        assert_eq!(n, 2, "delta reconcile pulls the terminal assistant + result");
+        e.0.store.set_detached(&id, false).await.unwrap();
+    }
 }

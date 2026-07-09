@@ -203,6 +203,14 @@ pub struct EngineInner {
 #[derive(Clone)]
 pub struct Engine(pub Arc<EngineInner>);
 
+/// Result of `Engine::detach_session`: the terminal `claude --resume` command to
+/// hand off an adopted session, plus the pieces it's built from.
+pub struct DetachInfo {
+    pub cwd: String,
+    pub claude_session_id: String,
+    pub resume_cmd: String,
+}
+
 // ──────────────────────────────────────────────────────────────
 // SubmitMeta
 // ──────────────────────────────────────────────────────────────
@@ -728,6 +736,59 @@ impl Engine {
         Ok(id)
     }
 
+    /// Hand an adopted session off to a terminal `claude --resume`: hard-stop the
+    /// live streaming process so the terminal is the single writer, freeze the
+    /// watermark at the current native line count (`#2` will only grow from the
+    /// terminal after this point), mark the row `detached`, and return the
+    /// `--resume` command to run. On reopen, `follow_up` sees `detached` and pulls
+    /// the terminal-added delta back into `#1` via `reconcile_from_native`.
+    ///
+    /// Engine stays axum-free: pure store + filesystem work.
+    pub async fn detach_session(&self, id: &str) -> Result<DetachInfo, String> {
+        let s = self
+            .0
+            .store
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no such session")?;
+        let csid = s
+            .claude_session_id
+            .clone()
+            .ok_or("session has no claudeSessionId")?;
+        let cwd = s.worktree_path.clone().unwrap_or_default();
+
+        // Best-effort hard-stop the live streaming process so the terminal becomes
+        // the single writer. `kill` is the existing SIGTERM path; it's a no-op /
+        // idle-safe when the session isn't running, so ignore the outcome.
+        self.kill(id).await;
+
+        // Freeze the watermark at the current native line count.
+        let path = crate::engine::native_transcript::transcript_path(
+            &self.0.cfg.claude_config_base,
+            &cwd,
+            &csid,
+        );
+        let total = crate::engine::native_transcript::read_lines(&path).len() as i64;
+        self.0
+            .store
+            .set_watermark(id, total)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.0
+            .store
+            .set_detached(id, true)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let resume_cmd = format!("cd {} && claude --resume {}", cwd, csid);
+        Ok(DetachInfo {
+            cwd,
+            claude_session_id: csid,
+            resume_cmd,
+        })
+    }
+
     // ── Close ────────────────────────────────────────────────
 
     /// Shut the engine down. `kill_running = true` stops every in-flight claude run;
@@ -1165,6 +1226,15 @@ impl Engine {
         // Not live: check if busy in a non-injectable state.
         if self.is_busy(id, &s.status) {
             return Err(EngineError::Busy);
+        }
+
+        // Reclaim-on-reopen: if this session was detached to a terminal `claude`, the
+        // terminal may have appended turns to #2 while we were stopped. Pull that delta
+        // into #1 and clear the flag BEFORE preparing the resume turn, so `--resume`
+        // continues from the reconciled history and turn counts self-correct.
+        if s.detached {
+            let _ = self.reconcile_from_native(id).await; // pull terminal turns into #1
+            let _ = self.0.store.set_detached(id, false).await; // agentic-dev reclaims ownership
         }
 
         // Read the log once and reuse it for both the snapshot turn index and the `since` offset
