@@ -11,6 +11,26 @@ pub struct ComponentInfo {
     pub global_enabled: bool,
 }
 
+/// Read user-scope MCP servers from `<config_base>/../.claude.json` → `mcpServers`.
+/// Returns one `ComponentInfo{kind:"mcp"}` per named server. Missing file → empty vec.
+pub fn list_user_mcp_servers(config_base: &Path) -> Vec<ComponentInfo> {
+    let claude_json = config_base.parent().unwrap_or(config_base).join(".claude.json");
+    let Ok(text) = std::fs::read_to_string(&claude_json) else { return vec![]; };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![]; };
+    let Some(obj) = val.get("mcpServers").and_then(|v| v.as_object()) else { return vec![]; };
+    obj.keys()
+        .filter(|name| !name.is_empty())
+        .map(|name| ComponentInfo {
+            kind: "mcp".into(),
+            id: name.clone(),
+            name: name.clone(),
+            description: String::new(),
+            source: "user".into(),
+            global_enabled: true,
+        })
+        .collect()
+}
+
 pub fn list_components(config_base: &Path, skills_dir: &Path) -> Vec<ComponentInfo> {
     let toggles = crate::engine::global_settings::read_global_toggles(config_base);
     let mut out = Vec::new();
@@ -40,7 +60,9 @@ pub fn list_components(config_base: &Path, skills_dir: &Path) -> Vec<ComponentIn
         });
     }
 
-    // MCP: no user/project mcpServers today (all come from plugins). Stub: nothing to add.
+    for c in list_user_mcp_servers(config_base) {
+        out.push(c);
+    }
 
     out.sort_by(|a, b| (a.kind.as_str(), a.id.as_str()).cmp(&(b.kind.as_str(), b.id.as_str())));
     out
@@ -58,6 +80,52 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn lists_user_mcp_servers_from_claude_json() {
+        let base = tmp();
+        // Use base/.claude as config_base → list_user_mcp_servers reads base/.claude/../.claude.json = base/.claude.json
+        let config_base = base.join(".claude");
+        std::fs::create_dir_all(&config_base).unwrap();
+        std::fs::write(base.join(".claude.json"),
+            r#"{"mcpServers":{"my-server":{"command":"npx","args":["my-mcp"]},"web-server":{"type":"http","url":"https://example.com/mcp"}}}"#
+        ).unwrap();
+
+        let out = list_user_mcp_servers(&config_base);
+        assert_eq!(out.len(), 2);
+        let s1 = out.iter().find(|c| c.id == "my-server").unwrap();
+        assert_eq!(s1.kind, "mcp");
+        assert_eq!(s1.source, "user");
+        assert!(s1.global_enabled);
+        let s2 = out.iter().find(|c| c.id == "web-server").unwrap();
+        assert_eq!(s2.kind, "mcp");
+    }
+
+    #[test]
+    fn list_user_mcp_servers_missing_file_returns_empty() {
+        let base = tmp();
+        let config_base = base.join(".claude");
+        std::fs::create_dir_all(&config_base).unwrap();
+        // No .claude.json file written
+        let out = list_user_mcp_servers(&config_base);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn list_components_includes_mcp_servers() {
+        let base = tmp();
+        let config_base = base.join(".claude");
+        std::fs::create_dir_all(&config_base).unwrap();
+        let skills = base.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(base.join(".claude.json"),
+            r#"{"mcpServers":{"test-mcp":{"command":"node","args":["server.js"]}}}"#
+        ).unwrap();
+        let out = list_components(&config_base, &skills);
+        let mcp = out.iter().find(|c| c.kind == "mcp" && c.id == "test-mcp").unwrap();
+        assert_eq!(mcp.source, "user");
+        assert!(mcp.global_enabled);
     }
 
     #[test]
