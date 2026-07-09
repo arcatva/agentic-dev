@@ -3840,4 +3840,64 @@ mod submit_titles_via_generator {
             "adopting an already-adopted csid is an error"
         );
     }
+
+    /// If a post-create step fails (here: `reconcile_from_native`'s history import),
+    /// the half-created row must be rolled back — otherwise its `claudeSessionId`
+    /// permanently locks the csid against re-adoption via the `session_by_csid` guard.
+    ///
+    /// Trigger: `reconcile_from_native` calls `store.append_log`, which opens
+    /// `<log_dir>/<id>.jsonl` with `OpenOptions::create(true)`. Stripping the write bit
+    /// from `log_dir` (known up front from `EngineConfig::log_dir`, unlike the
+    /// randomly-generated session id) makes that open fail with a real permission-denied
+    /// IO error — a realistic failure a step after the row + csid are already persisted,
+    /// without needing to mock the store.
+    #[tokio::test]
+    async fn adopt_rolls_back_on_reconcile_failure() {
+        use crate::engine::native_transcript;
+        use std::os::unix::fs::PermissionsExt;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+
+        // Native transcript with at least one line, so reconcile_from_native reaches
+        // append_log (an empty transcript would short-circuit at `translate_range`
+        // returning nothing to append, never touching the log file).
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidY");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first prompt\"}}\n",
+        )
+        .unwrap();
+
+        let log_dir = e.0.cfg.log_dir.clone();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let orig_perms = std::fs::metadata(&log_dir).unwrap().permissions();
+        // r-x only: append_log's OpenOptions::create can't create a new file in a
+        // directory it can't write to, so the append fails with a permission error.
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = e.adopt_session("csidY", &cwd_s).await;
+
+        // Restore permissions immediately so tempdir cleanup (and any assertions below)
+        // don't themselves trip over the locked-down directory.
+        std::fs::set_permissions(&log_dir, orig_perms).unwrap();
+
+        assert!(
+            result.is_err(),
+            "adopt_session must surface the reconcile failure, not silently succeed"
+        );
+        assert!(
+            e.0.store
+                .session_by_csid("csidY")
+                .await
+                .unwrap()
+                .is_none(),
+            "the half-created row must be rolled back so the csid can be re-adopted"
+        );
+    }
 }
