@@ -1816,7 +1816,11 @@ The new session is now active. Awaiting the user's next message.",
                 .map(str::to_string)
                 .or_else(|| s.permission_mode.clone()),
             mode: s.mode.clone(),
-            hidden_skills: s.hidden_skills.clone(),
+            // Reseed from global: session inherits globally-off skills + applies its own hides.
+            hidden_skills: crate::engine::global_settings::resolve_session_hidden_skills(
+                &self.0.cfg.claude_config_base,
+                &s.hidden_skills,
+            ),
             // Resolve the session's hiddenPlugins blacklist × the installed-plugin registry into an
             // EXPLICIT enable map at spawn time (re-read each turn, so mid-session installs are
             // picked up). Selected (non-hidden) plugins are written as `true`, which force-enables

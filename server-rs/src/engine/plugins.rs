@@ -40,6 +40,10 @@ pub fn list_plugins(claude_config_dir: &Path) -> Vec<PluginInfo> {
 /// plugin (verified live: `claude -p --settings '{"enabledPlugins":{"<id>":true}}'` lists the
 /// plugin's skills while `claude plugin list` reports it disabled).
 ///
+/// As of S4 the per-session default is seeded from the global toggle state
+/// (`settings.local.json`/`settings.json`) rather than unconditional `true`, so a
+/// globally-disabled plugin stays disabled inside sessions unless the session re-enables it.
+///
 /// Hidden ids that are no longer installed are still emitted as `false` (harmless, preserves the
 /// user's disable intent if the registry read raced an uninstall). If the registry is missing or
 /// corrupt the map degrades to exactly the old blacklist (hidden ids → `false`).
@@ -52,6 +56,7 @@ pub fn resolve_enabled_plugins(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
+    let toggles = crate::engine::global_settings::read_global_toggles(claude_config_dir);
     let mut map = std::collections::BTreeMap::new();
     for p in list_plugins(claude_config_dir) {
         // Trim registry names too: a padded registry key must compare equal to its trimmed hidden
@@ -60,7 +65,9 @@ pub fn resolve_enabled_plugins(
         if name.is_empty() {
             continue;
         }
-        let enabled = !hidden.contains(name);
+        // Per-session default = the global state; a session hide forces it off.
+        let enabled = crate::engine::global_settings::plugin_globally_enabled(&toggles, name)
+            && !hidden.contains(name);
         map.insert(name.to_string(), enabled);
     }
     for h in hidden {
@@ -190,5 +197,21 @@ mod tests {
         // Valid JSON, wrong shape.
         std::fs::write(dir.join("plugins").join("installed_plugins.json"), r#"{"plugins": []}"#).unwrap();
         assert!(list_plugins(&dir).is_empty());
+    }
+
+    #[test]
+    fn session_inherits_global_disable_when_not_hidden() {
+        let dir = tmp(); // tmp() already creates <dir>/plugins/
+        std::fs::write(
+            dir.join("plugins").join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{"gh@m":[{"scope":"user"}],"cf@m":[{"scope":"user"}]}}"#,
+        ).unwrap();
+        // Global disables gh@m via settings.local.json.
+        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+
+        // Session hides nothing → gh@m must stay false (inherited), cf@m true.
+        let map = resolve_enabled_plugins(&dir, &[]);
+        assert_eq!(map.get("gh@m"), Some(&false));
+        assert_eq!(map.get("cf@m"), Some(&true));
     }
 }
