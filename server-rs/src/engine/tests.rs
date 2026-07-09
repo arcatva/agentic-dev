@@ -3841,6 +3841,43 @@ mod submit_titles_via_generator {
         );
     }
 
+    /// SECURITY (path traversal): `claudeSessionId` arrives raw from the HTTP body and is
+    /// interpolated into `native_transcript::transcript_path` -> `format!("{csid}.jsonl")`.
+    /// A relative traversal (`../../../../etc/passwd`) or an absolute path must be rejected
+    /// at the top of `adopt_session`, before any filesystem access or row creation — and must
+    /// leave no trace (no row keyed by that "csid" via `session_by_csid`).
+    #[tokio::test]
+    async fn adopt_rejects_path_traversal_and_absolute_csid() {
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+
+        let traversal = "../../../../etc/passwd";
+        let result = e.adopt_session(traversal, &cwd_s).await;
+        assert!(
+            result.is_err(),
+            "adopt_session must reject a path-traversal claudeSessionId"
+        );
+        assert!(
+            e.0.store.session_by_csid(traversal).await.unwrap().is_none(),
+            "no session row must be created for a rejected traversal csid"
+        );
+
+        let absolute = "/etc/passwd";
+        let result2 = e.adopt_session(absolute, &cwd_s).await;
+        assert!(
+            result2.is_err(),
+            "adopt_session must reject an absolute-path claudeSessionId"
+        );
+        assert!(
+            e.0.store.session_by_csid(absolute).await.unwrap().is_none(),
+            "no session row must be created for a rejected absolute-path csid"
+        );
+    }
+
     /// `config_base()` is a thin clone of the configured claude config dir — the base the
     /// API layer passes to `scan_adoptable`. Backs the `GET /api/adoptable` handler.
     #[tokio::test]
@@ -3991,5 +4028,243 @@ mod submit_titles_via_generator {
         let n = e.reconcile_from_native(&id).await.unwrap();
         assert_eq!(n, 2, "delta reconcile pulls the terminal assistant + result");
         e.0.store.set_detached(&id, false).await.unwrap();
+    }
+
+    /// `read_lines` returns an empty vec when the native transcript file is missing or
+    /// unreadable. Detach must not trust that empty count at face value — naively setting
+    /// the watermark to 0 would make a later reopen re-translate the ENTIRE native history
+    /// back into #1, duplicating every line already imported at adopt time. The frozen
+    /// watermark must never regress below what was already imported.
+    #[tokio::test]
+    async fn detach_never_lowers_watermark_when_transcript_file_missing() {
+        use crate::engine::native_transcript;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidM");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\"}}\n",
+        )
+        .unwrap();
+
+        let id = e.adopt_session("csidM", &cwd_s).await.unwrap();
+        let before = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(
+            before.native_watermark_lines > 0,
+            "sanity: adopt seeded a nonzero watermark, got {}",
+            before.native_watermark_lines
+        );
+
+        // Simulate the transcript file going missing (moved/deleted) before detach.
+        std::fs::remove_file(&tp).unwrap();
+
+        let _ = e.detach_session(&id).await.unwrap();
+        let after = e.0.store.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            after.native_watermark_lines, before.native_watermark_lines,
+            "watermark must not regress to 0 when the transcript file is missing at detach"
+        );
+    }
+
+    /// `kill()` only *sends* SIGTERM (`run.stop()`) and returns immediately — it does not
+    /// wait for the pump task to actually exit. `detach_session` must await the engine's
+    /// real "not running" signal (`wait_for_exit`, which polls `state.running` — the same
+    /// map `is_busy`/`kill` consult) BEFORE reading the native line count, or an in-flight
+    /// turn's last transcript lines might not be flushed yet, freezing the watermark too
+    /// low. Drives a genuinely RUNNING streaming session into detach and asserts that, by
+    /// the time `detach_session` returns, the pump task has already exited — proving the
+    /// wait actually happened rather than detach racing ahead of the fire-and-forget kill.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn detach_awaits_process_exit_before_reading_watermark() {
+        let src = tmp();
+        std::fs::create_dir_all(&src).unwrap();
+        let e = make_engine(&src, EngineOverrides {
+            bridge_path: Some(fixture("fake-sdk-bridge-stream.sh")),
+            ..Default::default()
+        }).await;
+        let results = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let id = e.submit_session(vec![], vec![], "first turn".into(), HashMap::new(), SubmitMeta::default()).await.unwrap();
+        let r = results.clone();
+        let _unsub = e.subscribe(&id, Box::new(move |ev| {
+            if matches!(ev, ClaudeEvent::Result { .. }) {
+                r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+        wait_until(|| results.load(std::sync::atomic::Ordering::SeqCst) >= 1).await;
+
+        // Sanity: the streaming process is genuinely registered as running before detach.
+        assert!(
+            e.0.state.lock().running.contains_key(&id),
+            "sanity: session must be running before detach"
+        );
+
+        let info = e.detach_session(&id).await.unwrap();
+        assert_eq!(info.claude_session_id, "fake-stream-1");
+
+        // No regression: detach must still succeed and set the flag on a session that was
+        // genuinely running (not just idle) at the moment of detach.
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(s.detached, "detach sets the single-writer guard flag even on a running session");
+
+        // By the time detach_session returns, the pump task must already be gone — proving
+        // detach awaited real process exit rather than racing ahead of `kill`'s fire-and-forget
+        // SIGTERM (before the fix, this could still observe the session as "running").
+        assert!(
+            !e.0.state.lock().running.contains_key(&id),
+            "detach_session must not return while the killed session is still in the running map"
+        );
+    }
+
+    // ── Fix 4: reclaim-on-reopen must not clear `detached` on reconcile failure ──
+    //
+    // The reclaim hook in `follow_up` used to clear `detached` unconditionally, even when
+    // `reconcile_from_native` failed — permanently losing whatever terminal-added delta
+    // failed to import (nothing would ever retry it, since the next reopen no longer sees
+    // `detached == true`). It must clear the flag ONLY on a successful reconcile; on
+    // failure it should log a warning and leave `detached == true` so the next reopen
+    // retries. The turn itself must still proceed either way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn followup_reclaim_leaves_detached_true_when_reconcile_fails() {
+        use crate::engine::native_transcript;
+        use crate::engine::store::SessionPatch;
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidF");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        // Adopt (imports the one native line, so the log file already exists on disk).
+        let id = e.adopt_session("csidF", &cwd_s).await.unwrap();
+
+        // Simulate: the row already had a real completed turn (so follow_up's `is_busy` gate
+        // — which treats a fresh "pending" row as busy — doesn't reject the follow-up), then
+        // got detached, then the terminal appended a turn while detached.
+        e.0.store
+            .update(&id, SessionPatch { status: Some("done".into()), ..Default::default() })
+            .await
+            .unwrap();
+        e.0.store.set_detached(&id, true).await.unwrap();
+        std::fs::OpenOptions::new().append(true).open(&tp).unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"back\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+
+        // Force reconcile_from_native to fail: it calls store.append_log, which opens the
+        // session's EXISTING log file with OpenOptions::append(true) — strip the write bit
+        // from the log file itself (directory perms don't gate writes to an existing file;
+        // only creating/renaming/unlinking entries needs directory write access) so that
+        // open fails with a real permission-denied IO error.
+        let log_path = e.0.store.log_path(&id);
+        assert!(log_path.is_file(), "sanity: adopt must have already created the log file");
+        let orig_perms = std::fs::metadata(&log_path).unwrap().permissions();
+        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let result = e.follow_up(&id, "reopen after terminal turn", false, None, None, None).await;
+
+        // Restore permissions immediately so cleanup and later assertions aren't themselves
+        // tripped up by the locked-down file.
+        std::fs::set_permissions(&log_path, orig_perms).unwrap();
+
+        assert!(
+            result.is_ok(),
+            "the follow-up turn itself must still proceed even though reconcile failed, got {result:?}"
+        );
+
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(
+            s.detached,
+            "detached must stay true when reconcile_from_native failed, so the next reopen retries"
+        );
+
+        // Clean up the now-queued/running turn so the test process doesn't leak a subprocess.
+        e.kill(&id).await;
+    }
+
+    /// FIX 5 — the reclaim-on-reopen hook has no test through the REAL `follow_up` path.
+    /// This drives a genuine detached, adopted session through `follow_up` (the same entry
+    /// point the API's `POST /api/sessions/:id/follow-up` route calls) and asserts BOTH
+    /// halves of the reclaim contract: the terminal-added native lines get reconciled into
+    /// #1 (the rendered log grows with the reconciled content) AND `detached` is cleared —
+    /// using the crate's real engine + fake-sdk-bridge harness the same way the other
+    /// follow_up/turn tests do (see `streaming_one_process_goes_idle_then_followup_injects_over_stdin`
+    /// above). Also doubles as the happy-path mirror of the reconcile-failure test above,
+    /// guarding against a fix that's overly conservative (e.g. never clearing `detached`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn followup_reclaim_reconciles_native_delta_and_clears_detached() {
+        use crate::engine::native_transcript;
+        use crate::engine::store::SessionPatch;
+        use std::io::Write;
+
+        let work = tmp();
+        let e = engine_from(&work).await;
+
+        let cwd = work.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let tp = native_transcript::transcript_path(&e.0.cfg.claude_config_base, &cwd_s, "csidG");
+        std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tp,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        // Adopt, then simulate: a real completed turn (so `is_busy` doesn't reject the
+        // follow-up on a fresh "pending" row) → detach → the terminal appends a turn while
+        // agentic-dev is detached, exactly the "handed off, terminal-added, then reopened"
+        // scenario the reclaim hook exists for.
+        let id = e.adopt_session("csidG", &cwd_s).await.unwrap();
+        e.0.store
+            .update(&id, SessionPatch { status: Some("done".into()), ..Default::default() })
+            .await
+            .unwrap();
+        e.0.store.set_detached(&id, true).await.unwrap();
+        std::fs::OpenOptions::new().append(true).open(&tp).unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"back\"}],\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+
+        let log_before = e.0.store.read_log(&id);
+
+        // Drive the real reopen through follow_up (not a direct reconcile_from_native call).
+        let result = e.follow_up(&id, "reopen after terminal turn", false, None, None, None).await;
+        assert!(result.is_ok(), "follow-up must succeed, got {result:?}");
+
+        // Half 1: the terminal-added native lines were reconciled into #1 — the log grew
+        // and now carries the reconciled assistant turn (end_turn → assistant + result).
+        let log_after = e.0.store.read_log(&id);
+        assert!(
+            log_after.len() >= log_before.len() + 2,
+            "reconcile must append the terminal assistant+result lines to #1: before={}, after={}",
+            log_before.len(),
+            log_after.len()
+        );
+        assert!(
+            log_after.iter().any(|l| l.contains("\"back\"")),
+            "reconciled log must carry the terminal-added assistant text, got: {log_after:?}"
+        );
+
+        // Half 2: detached was cleared — agentic-dev reclaimed ownership.
+        let s = e.0.store.get(&id).await.unwrap().unwrap();
+        assert!(!s.detached, "detached must clear once reconcile_from_native succeeds");
+
+        // Clean up the now-queued/running turn so the test process doesn't leak a subprocess.
+        e.kill(&id).await;
     }
 }
