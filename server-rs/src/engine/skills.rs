@@ -4,7 +4,10 @@ use std::path::Path;
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct SkillInfo { pub name: String, pub description: String }
 
-/// Create `<skills_dir>/<name>/SKILL.md` with YAML frontmatter.
+/// Create `<skills_dir>/<name>/SKILL.md` with YAML frontmatter and the skill's
+/// INSTRUCTIONS as the markdown body. An empty `instructions` writes frontmatter
+/// only — but note that such a skill is an empty shell: the body is what the agent
+/// actually loads and follows, the description only decides WHEN to load it.
 /// Returns `AlreadyExists` if the directory already exists.
 ///
 /// Defense-in-depth: asserts `name` is a single normal path component
@@ -13,7 +16,7 @@ pub struct SkillInfo { pub name: String, pub description: String }
 /// were bypassed.  (Note: checking the parent of the joined path does
 /// NOT work for `..` — `Path::parent` strips the `..` component, so the
 /// comparison would always pass.  Component-level inspection avoids that.)
-pub fn add_skill(skills_dir: &Path, name: &str, description: &str) -> io::Result<()> {
+pub fn add_skill(skills_dir: &Path, name: &str, description: &str, instructions: &str) -> io::Result<()> {
     // Belt-and-suspenders traversal guard: verify that `name` is a single,
     // normal path component — no `..`, no `.`, no separators, no absolute
     // path.  We check the components of the *name* itself (before joining)
@@ -41,7 +44,13 @@ pub fn add_skill(skills_dir: &Path, name: &str, description: &str) -> io::Result
             format!("skill '{name}' already exists")));
     }
     std::fs::create_dir_all(&skill_dir)?;
-    let content = format!("---\nname: {name}\ndescription: {description}\n---\n");
+    let mut content = format!("---\nname: {name}\ndescription: {description}\n---\n");
+    let body = instructions.trim();
+    if !body.is_empty() {
+        content.push('\n');
+        content.push_str(body);
+        content.push('\n');
+    }
     std::fs::write(skill_dir.join("SKILL.md"), content)?;
     Ok(())
 }
@@ -129,7 +138,7 @@ mod tests {
     #[test]
     fn add_skill_creates_dir_and_skill_md() {
         let dir = tmp();
-        add_skill(&dir, "my-skill", "does things").unwrap();
+        add_skill(&dir, "my-skill", "does things", "").unwrap();
         let md = dir.join("my-skill").join("SKILL.md");
         assert!(md.exists());
         let text = std::fs::read_to_string(&md).unwrap();
@@ -137,17 +146,31 @@ mod tests {
     }
 
     #[test]
+    fn add_skill_writes_instructions_as_body() {
+        let dir = tmp();
+        add_skill(&dir, "real-skill", "does things", "## Steps\n1. do the thing\n").unwrap();
+        let text = std::fs::read_to_string(dir.join("real-skill").join("SKILL.md")).unwrap();
+        assert_eq!(
+            text,
+            "---\nname: real-skill\ndescription: does things\n---\n\n## Steps\n1. do the thing\n",
+        );
+        // And list_skills still parses the frontmatter with a body present.
+        let listed = list_skills(&dir);
+        assert!(listed.iter().any(|s| s.name == "real-skill" && s.description == "does things"));
+    }
+
+    #[test]
     fn add_skill_errors_if_already_exists() {
         let dir = tmp();
-        add_skill(&dir, "dup", "d").unwrap();
-        let err = add_skill(&dir, "dup", "d2").unwrap_err();
+        add_skill(&dir, "dup", "d", "").unwrap();
+        let err = add_skill(&dir, "dup", "d2", "").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
     #[test]
     fn delete_skill_removes_dir_and_returns_true() {
         let dir = tmp();
-        add_skill(&dir, "to-remove", "desc").unwrap();
+        add_skill(&dir, "to-remove", "desc", "").unwrap();
         assert!(delete_skill(&dir, "to-remove").unwrap());
         assert!(!dir.join("to-remove").exists());
     }
@@ -163,7 +186,7 @@ mod tests {
         let dir = tmp();
         // ".." resolves to the parent of skills_dir — must be refused BEFORE any directory
         // or file is created; in particular, <skills_dir>/../SKILL.md must NOT appear.
-        let err = add_skill(&dir, "..", "should be refused").unwrap_err();
+        let err = add_skill(&dir, "..", "should be refused", "").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied,
             "traversal must be refused with PermissionDenied, got: {err}");
         // Verify nothing was created above the skills dir.

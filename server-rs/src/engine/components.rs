@@ -11,24 +11,37 @@ pub struct ComponentInfo {
     pub global_enabled: bool,
 }
 
-/// Read user-scope MCP servers from `<config_base>/../.claude.json` → `mcpServers`.
-/// Returns one `ComponentInfo{kind:"mcp"}` per named server. Missing file → empty vec.
+/// Read user-scope MCP servers from `<config_base>/../.claude.json`: `mcpServers` (enabled)
+/// plus our parking key `mcpServersDisabled` (globally disabled — see
+/// [crate::engine::user_config::MCP_DISABLED_KEY]). Returns one `ComponentInfo{kind:"mcp"}`
+/// per named server with `global_enabled` reflecting which side it lives on.
+/// Missing file → empty vec. A name present on both sides reports as enabled.
 pub fn list_user_mcp_servers(config_base: &Path) -> Vec<ComponentInfo> {
     let claude_json = config_base.parent().unwrap_or(config_base).join(".claude.json");
     let Ok(text) = std::fs::read_to_string(&claude_json) else { return vec![]; };
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![]; };
-    let Some(obj) = val.get("mcpServers").and_then(|v| v.as_object()) else { return vec![]; };
-    obj.keys()
-        .filter(|name| !name.is_empty())
-        .map(|name| ComponentInfo {
-            kind: "mcp".into(),
-            id: name.clone(),
-            name: name.clone(),
-            description: String::new(),
-            source: "user".into(),
-            global_enabled: true,
-        })
-        .collect()
+    let mut out: Vec<ComponentInfo> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, enabled) in [
+        ("mcpServers", true),
+        (crate::engine::user_config::MCP_DISABLED_KEY, false),
+    ] {
+        let Some(obj) = val.get(key).and_then(|v| v.as_object()) else { continue };
+        for name in obj.keys().filter(|name| !name.is_empty()) {
+            if !seen.insert(name.clone()) {
+                continue; // enabled side wins for a (shouldn't-happen) duplicate
+            }
+            out.push(ComponentInfo {
+                kind: "mcp".into(),
+                id: name.clone(),
+                name: name.clone(),
+                description: String::new(),
+                source: "user".into(),
+                global_enabled: enabled,
+            });
+        }
+    }
+    out
 }
 
 pub fn list_components(config_base: &Path, skills_dir: &Path) -> Vec<ComponentInfo> {
@@ -100,6 +113,20 @@ mod tests {
         assert!(s1.global_enabled);
         let s2 = out.iter().find(|c| c.id == "web-server").unwrap();
         assert_eq!(s2.kind, "mcp");
+    }
+
+    #[test]
+    fn parked_servers_list_as_globally_disabled() {
+        let base = tmp();
+        let config_base = base.join(".claude");
+        std::fs::create_dir_all(&config_base).unwrap();
+        std::fs::write(base.join(".claude.json"),
+            r#"{"mcpServers":{"on-srv":{"command":"a"}},"mcpServersDisabled":{"off-srv":{"command":"b"}}}"#
+        ).unwrap();
+        let out = list_user_mcp_servers(&config_base);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().find(|c| c.id == "on-srv").unwrap().global_enabled);
+        assert!(!out.iter().find(|c| c.id == "off-srv").unwrap().global_enabled);
     }
 
     #[test]

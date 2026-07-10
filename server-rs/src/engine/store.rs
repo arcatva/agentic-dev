@@ -143,8 +143,10 @@ pub struct Session {
     #[serde(rename = "forcedOnPlugins", default)] pub forced_on_plugins: Vec<String>,
     /// Skill names forced ON for this session (overrides a global-off).
     #[serde(rename = "forcedOnSkills", default)] pub forced_on_skills: Vec<String>,
-    /// MCP server names forced ON for this session. Stored for API/UI symmetry; no-op
-    /// at spawn until global MCP disable is implemented.
+    /// MCP server names forced ON for this session (overrides a global-off). A globally
+    /// DISABLED server (parked in .claude.json's mcpServersDisabled) named here gets its
+    /// definition injected back via the extra-defs channel at spawn. Precedence:
+    /// forcedOn > hidden > global inherit (same as plugins/skills).
     #[serde(rename = "forcedOnMcpServers", default)] pub forced_on_mcp_servers: Vec<String>,
 }
 

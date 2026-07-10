@@ -2385,11 +2385,32 @@ The new session is now active. Awaiting the user's next message.",
                 &s.forced_on_plugins,
             ),
             forced_on_plugins: s.forced_on_plugins.clone(),
-            hidden_mcp_servers: s.hidden_mcp_servers.clone(),
-            // forced_on_mcp_servers is stored and threaded but has no effect at spawn:
-            // MCP has no global-off yet; the field is accepted for API/UI symmetry.
+            // Forced-on wins over hidden for MCP too (same precedence as skills/plugins) —
+            // sdk_runner drops hidden names from the extra-defs injection, so a name in both
+            // lists must leave the hidden set or the forced-on injection would be filtered out.
+            hidden_mcp_servers: s
+                .hidden_mcp_servers
+                .iter()
+                .filter(|h| !s.forced_on_mcp_servers.contains(h))
+                .cloned()
+                .collect(),
             forced_on_mcp_servers: s.forced_on_mcp_servers.clone(),
-            extra_mcp_servers: s.extra_mcp_servers.clone(),
+            // Forced-on MCP servers that are globally DISABLED (parked in .claude.json under
+            // mcpServersDisabled) are invisible to the session's normal config loading, so they
+            // are injected back through the extra-defs channel (SDK_BRIDGE_EXTRA_MCP → the SDK
+            // mcpServers option). Session-defined extras keep priority on a name clash.
+            extra_mcp_servers: {
+                let mut extras = s.extra_mcp_servers.clone();
+                for def in crate::engine::user_config::parked_mcp_defs(
+                    &self.0.cfg.claude_config_base,
+                    &s.forced_on_mcp_servers,
+                ) {
+                    if !extras.iter().any(|e| e.name == def.name) {
+                        extras.push(def);
+                    }
+                }
+                extras
+            },
             log_path: self.0.store.log_path(&s.id),
             unit: format!("agentic-{}", s.id),
             memory_max: self.0.cfg.memory_max.clone(),
