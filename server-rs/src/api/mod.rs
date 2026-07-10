@@ -561,6 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_settings_toggle_unknown_kind_is_400() {
+        // "mcp" is a VALID kind now (global MCP toggle) — use a genuinely unknown kind.
         let st = test_state().await;
         let token = issue_token("s3cret", 3600, now_secs());
         let resp = app(st.clone())
@@ -569,11 +570,29 @@ mod tests {
                 .uri("/api/global-settings/toggle")
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"kind":"mcp","id":"x","enabled":false}"#)).unwrap())
+                .body(Body::from(r#"{"kind":"widget","id":"x","enabled":false}"#)).unwrap())
             .await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let v = body_json(resp).await;
         assert!(v["error"].as_str().unwrap().contains("unknown kind"));
+    }
+
+    #[tokio::test]
+    async fn global_settings_toggle_unknown_mcp_id_is_400() {
+        // mcp is a valid kind, but an id not present in .claude.json must 400 on the known-check.
+        let st = test_state().await;
+        let token = issue_token("s3cret", 3600, now_secs());
+        let resp = app(st.clone())
+            .oneshot(Request::builder()
+                .method("POST")
+                .uri("/api/global-settings/toggle")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"mcp","id":"no-such-server","enabled":false}"#)).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(v["error"].as_str().unwrap().contains("unknown mcp id"));
     }
 
     #[tokio::test]

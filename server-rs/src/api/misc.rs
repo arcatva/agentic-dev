@@ -118,7 +118,7 @@ pub async fn global_settings_toggle_route(
     // Globally-disabled components are still enumerated by list_components, so toggling them back
     // on must succeed — we only reject ids that are not installed at all.
     match req.kind.as_str() {
-        "plugin" | "skill" => {
+        "plugin" | "skill" | "mcp" => {
             let components = crate::engine::components::list_components(base, &st.config.skills_dir);
             let known = components.iter().any(|c| c.kind == req.kind && c.id == req.id);
             if !known {
@@ -133,11 +133,23 @@ pub async fn global_settings_toggle_route(
     let res = match req.kind.as_str() {
         "plugin" => crate::engine::global_settings::set_plugin_enabled(base, &req.id, req.enabled),
         "skill" => crate::engine::global_settings::set_skill_enabled(base, &req.id, req.enabled),
+        // MCP: move the definition between mcpServers and the disabled parking key in
+        // .claude.json. list_components enumerates both sides, so the id is known-valid
+        // here; a concurrent external edit could still make it vanish → surface as an error.
+        "mcp" => crate::engine::user_config::set_mcp_server_enabled(base, &req.id, req.enabled).and_then(|found| {
+            if found { Ok(()) } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("unknown mcp id: {}", req.id)))
+            }
+        }),
         // Unreachable: the match above already validated kind.
         _ => unreachable!(),
     };
     match res {
         Ok(()) => Json(crate::engine::components::list_components(base, &st.config.skills_dir)).into_response(),
+        // NotFound = the id vanished between the known-check and the mutate (external edit
+        // race) — same logical class as the pre-check's "unknown id", so same 400, not a 500.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
+            (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -502,7 +514,14 @@ pub async fn mcp_delete_route(
 }
 
 #[derive(serde::Deserialize)]
-pub struct AddSkillBody { pub name: String, pub description: String }
+pub struct AddSkillBody {
+    pub name: String,
+    pub description: String,
+    /// The skill's markdown body — the actual instructions the agent loads. Optional for
+    /// back-compat; without it the created skill is an empty shell (frontmatter only).
+    #[serde(default)]
+    pub instructions: String,
+}
 
 pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let b: AddSkillBody = match serde_json::from_slice(&body) {
@@ -514,7 +533,7 @@ pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Byte
     }
     let skills = st.config.skills_dir.clone();
     let base = st.config.claude_config_base.clone();
-    match crate::engine::skills::add_skill(&skills, &b.name, &b.description) {
+    match crate::engine::skills::add_skill(&skills, &b.name, &b.description, &b.instructions) {
         Ok(()) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists =>
             (StatusCode::BAD_REQUEST, Json(json!({"error": format!("skill '{}' already exists", b.name)}))).into_response(),
