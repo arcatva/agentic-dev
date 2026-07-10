@@ -2,6 +2,12 @@ use std::io;
 use std::path::Path;
 use crate::engine::store::McpServerDef;
 
+// TOCTOU note: WRITE_LOCK serializes concurrent writes *within this process only*.
+// It does NOT guard against an external `claude` session (or any other process)
+// rewriting ~/.claude.json concurrently — a small lost-update race exists there.
+// This is an accepted trade-off for a single-user local tool, the same trade-off
+// made by `settings.local.json`.  If multi-process safety becomes necessary, an
+// advisory file lock (e.g. via the `fs2` crate) would be the appropriate fix.
 static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const MAX_BACKUPS: usize = 20;
 const CLAUDE_JSON: &str = ".claude.json";
@@ -54,19 +60,18 @@ fn backup_claude_json(config_base: &Path, path: &Path) -> io::Result<()> {
 
 /// Serialize a McpServerDef into the JSON object stored under mcpServers[name].
 /// stdio: {command, args?, env?}; http: {type, url, headers?}. Null fields omitted.
+///
+/// Discriminator: presence of `command` → stdio shape; presence of `url` (without
+/// command) → http shape.  This mirrors the logic in sdk-bridge.mjs, which checks
+/// `command` to decide the transport, not the `type` field.
+///
+/// A previous version branched on `transport.is_some()`, which caused a valid stdio
+/// server carrying `transport = Some("stdio")` (e.g. from a typed API request) to
+/// take the http branch, silently dropping `command`/`args`/`env`.
 fn serialize_def(def: &McpServerDef) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
-    // http/sse transport: type + url are the discriminating fields
-    if let Some(ref t) = def.transport {
-        m.insert("type".into(), serde_json::Value::String(t.clone()));
-        if let Some(ref u) = def.url {
-            m.insert("url".into(), serde_json::Value::String(u.clone()));
-        }
-        if let Some(ref h) = def.headers {
-            m.insert("headers".into(), serde_json::to_value(h).unwrap_or_default());
-        }
-    } else {
-        // stdio transport
+    if def.command.is_some() {
+        // stdio transport: command drives the shape; type/url/headers are not written.
         if let Some(ref c) = def.command {
             m.insert("command".into(), serde_json::Value::String(c.clone()));
         }
@@ -75,6 +80,16 @@ fn serialize_def(def: &McpServerDef) -> serde_json::Map<String, serde_json::Valu
         }
         if let Some(ref e) = def.env {
             m.insert("env".into(), serde_json::to_value(e).unwrap_or_default());
+        }
+    } else {
+        // http/sse transport: type defaults to "http" if transport not specified.
+        let type_val = def.transport.clone().unwrap_or_else(|| "http".into());
+        m.insert("type".into(), serde_json::Value::String(type_val));
+        if let Some(ref u) = def.url {
+            m.insert("url".into(), serde_json::Value::String(u.clone()));
+        }
+        if let Some(ref h) = def.headers {
+            m.insert("headers".into(), serde_json::to_value(h).unwrap_or_default());
         }
     }
     m
@@ -267,6 +282,36 @@ mod tests {
         ).unwrap();
         // mcpServers key removed when empty
         assert!(v.get("mcpServers").is_none());
+    }
+
+    #[test]
+    fn stdio_server_with_explicit_transport_field_retains_command() {
+        // Regression: when a caller sets transport=Some("stdio") AND command=Some("npx"),
+        // the old discriminator (transport.is_some()) wrongly took the http branch and
+        // dropped command/args/env entirely.  The new discriminator (command.is_some())
+        // must keep command in the output and must NOT emit a "type" field.
+        let base = tmp();
+        let cb = setup(&base);
+        let def = McpServerDef {
+            name: "stdio-explicit".into(),
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()]),
+            env: None,
+            transport: Some("stdio".into()), // explicit transport field — must NOT flip to http branch
+            url: None,
+            headers: None,
+        };
+        add_mcp_server(&cb, &def).unwrap();
+        let text = std::fs::read_to_string(base.join(".claude.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // command and args must be present
+        assert_eq!(v["mcpServers"]["stdio-explicit"]["command"], "npx",
+            "command must survive even when transport=Some(\"stdio\") is set");
+        assert_eq!(v["mcpServers"]["stdio-explicit"]["args"][0], "-y");
+        // type/url/headers must NOT appear for stdio
+        assert!(v["mcpServers"]["stdio-explicit"].get("type").is_none(),
+            "type must not appear for a stdio server");
+        assert!(v["mcpServers"]["stdio-explicit"].get("url").is_none());
     }
 
     #[test]

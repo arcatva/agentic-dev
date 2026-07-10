@@ -109,3 +109,34 @@ Plugin commands use `std::process::Command::new("claude").args([...])` — a vec
   1. `curl -X POST /api/plugins -H "Authorization: Bearer $TOKEN" -d '{"id":"gh@official"}' ...` — should call `claude plugin install gh@official` and return the updated component list.
   2. `curl -X DELETE /api/plugins/gh@official ...` — should call `claude plugin uninstall gh@official -y`.
   3. Confirm timeout kills: test with a slow plugin install and a deliberately short timeout.
+
+## Fix wave — adversarial review hardening (2026-07-10)
+
+Applied four fixes from the adversarial review of the component-CRUD backend.
+
+### Fix 1 (HIGH — argument injection): leading-dash + dot-only rejection (`api/validation.rs`)
+
+- `valid_plugin_id`: now rejects any `s` that starts with `-` (e.g. `-y`, `--help`, `-x`).
+- `valid_component_name`: now rejects leading `-` (e.g. `-foo`, `--flag`) and all-dots names (`.`, `..`, `...`).
+- New tests: `valid_plugin_id_rejects_leading_dash`, `valid_component_name_rejects_leading_dash_and_dot_only`.
+
+### Fix 2 (Important — skill add traversal defense-in-depth): `engine/skills.rs add_skill`
+
+- Before creating any directory, `add_skill` now asserts that `name` is a **single normal `Path` component** (rejects `..`, `.`, `/abs`, `a/b`, etc.) using `Path::components()`.
+- Note: checking `Path::parent()` on the joined path does NOT guard against `..` — `parent()` strips the `..` component and returns `skills_dir`, making the comparison always pass. The component-level check avoids that trap.
+- New test: `add_skill_rejects_path_traversal` — calls `add_skill(dir, "..", ...)`, asserts `PermissionDenied`, and asserts `<skills_dir>/../SKILL.md` was NOT created.
+
+### Fix 3 (Medium — MCP stdio data loss): discriminator changed to `command` presence (`engine/user_config.rs serialize_def`)
+
+- Old code branched on `def.transport.is_some()` → a stdio server with `transport = Some("stdio")` wrongly took the http branch, dropping `command`/`args`/`env`.
+- New code: `if def.command.is_some()` → stdio shape `{command, args?, env?}`; else → http shape `{type: transport||"http", url, headers?}`. Matches `sdk-bridge.mjs` logic.
+- New test: `stdio_server_with_explicit_transport_field_retains_command` — `McpServerDef { command: Some("npx"), transport: Some("stdio"), ... }` must serialize with `command` present and `type` absent.
+
+### Fix 4 (Medium — document TOCTOU): comment in `engine/user_config.rs`
+
+- Added a 6-line comment above `WRITE_LOCK` noting the process-local mutex does not guard against concurrent external `claude` sessions rewriting `~/.claude.json`, and that this is an accepted trade-off for a single-user local tool.
+
+### Suite result
+
+`cargo test`: **578 passed; 0 failed** (5 new tests added across validation, skills, user_config).
+`cargo build`: clean (pre-existing `dead_code` warning unrelated to these changes).
