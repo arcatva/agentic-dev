@@ -1894,13 +1894,7 @@ The new session is now active. Awaiting the user's next message.",
     /// canonicalized (e.g. already gone) it falls back to raw-prefix comparison against both the
     /// canonicalized and raw root, so a genuinely-managed dir is never mis-skipped.
     fn within_worktrees_root(&self, path: &std::path::Path) -> bool {
-        let root_raw = self.0.cfg.worktrees_root.clone();
-        let root_canon = std::fs::canonicalize(&root_raw).unwrap_or_else(|_| root_raw.clone());
-        let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        path_canon.starts_with(&root_canon)
-            || path_canon.starts_with(&root_raw)
-            || path.starts_with(&root_canon)
-            || path.starts_with(&root_raw)
+        crate::engine::native_transcript::path_within(path, &self.0.cfg.worktrees_root)
     }
 
     /// Discard the worktree for a done/idle session.

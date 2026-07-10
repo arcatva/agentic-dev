@@ -89,9 +89,28 @@ pub(crate) fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// True when `path` lives under `root`, resilient to symlinks / non-canonical forms: canonicalizes
+/// both sides where possible (a path that can't be canonicalized — e.g. already deleted — falls back
+/// to raw), then checks containment against both the canonical and raw root. Shared by the adopt
+/// scan (to exclude agentic-dev's own worktree sessions) and the delete/discard data-loss guard.
+pub(crate) fn path_within(path: &Path, root: &Path) -> bool {
+    let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path_canon.starts_with(&root_canon)
+        || path_canon.starts_with(root)
+        || path.starts_with(&root_canon)
+        || path.starts_with(root)
+}
+
 /// Walk `<config_base>/projects/*/*.jsonl`, skip any `session_id` already in `known_csids`,
-/// return newest-first.
-pub fn scan_adoptable(config_base: &Path, known_csids: &HashSet<String>) -> Vec<Adoptable> {
+/// skip any transcript whose `cwd` is under `exclude_root` (those are agentic-dev's OWN spawned
+/// worktree sessions — the main turn plus every retry/workflow/subagent transcript — not external
+/// Claude Code CLI sessions the user wants to adopt), and return newest-first.
+pub fn scan_adoptable(
+    config_base: &Path,
+    known_csids: &HashSet<String>,
+    exclude_root: &Path,
+) -> Vec<Adoptable> {
     let root = config_base.join("projects");
     let mut out = vec![];
     let Ok(projects) = std::fs::read_dir(&root) else { return out; };
@@ -105,6 +124,14 @@ pub fn scan_adoptable(config_base: &Path, known_csids: &HashSet<String>) -> Vec<
             let lines = read_lines(&p);
             if lines.is_empty() { continue; }
             let cwd = lines.iter().find_map(|l| l.get("cwd").and_then(|v| v.as_str())).unwrap_or("").to_string();
+            // Skip agentic-dev's own spawned sessions: they all run in a worktree under
+            // `exclude_root` (worktrees_root), so their transcripts — the main turn, retries, and
+            // every workflow/subagent transcript — would otherwise flood the adopt list with rows
+            // whose "prompt" is the orientation text we inject. Only sessions the user ran with
+            // `claude` OUTSIDE the worktrees root are genuinely adoptable.
+            if !cwd.is_empty() && path_within(Path::new(&cwd), exclude_root) {
+                continue;
+            }
             let first_prompt = lines.iter().find_map(|l| user_prompt_text(l)).unwrap_or_default();
             let resumable = super::resume_gate::transcript_is_resumable(&p);
             let mtime_ms = f.metadata().ok()
@@ -203,10 +230,16 @@ mod tests {
         // already adopted -> must be skipped
         std::fs::write(projects.join("csid-known.jsonl"),
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n").unwrap();
+        // agentic-dev's OWN spawned session: cwd under worktrees_root -> must be skipped even
+        // though it's a fresh, unknown csid with a real prompt.
+        let wt = tmp.path().join("projects").join("-w-agentic-worktrees-abc-repo");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("csid-own.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/w/agentic-worktrees/abc/repo\",\"message\":{\"role\":\"user\",\"content\":\"internal\"}}\n").unwrap();
 
         let known: std::collections::HashSet<String> = ["csid-known".to_string()].into_iter().collect();
-        let got = scan_adoptable(tmp.path(), &known);
-        assert_eq!(got.len(), 1);
+        let got = scan_adoptable(tmp.path(), &known, std::path::Path::new("/w/agentic-worktrees"));
+        assert_eq!(got.len(), 1, "only the external session survives (known + own-worktree excluded)");
         assert_eq!(got[0].session_id, "csid-A");
         assert_eq!(got[0].cwd, "/home/me/proj");
         assert_eq!(got[0].first_prompt, "hello");

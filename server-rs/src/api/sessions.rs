@@ -504,10 +504,16 @@ pub struct AdoptBody {
 
 /// `GET /api/adoptable` — native Claude transcripts not yet tracked by a session, newest
 /// first. Excludes csids already linked to a stored session (so an adopted session never
-/// re-appears as adoptable). Always 200 with a JSON array.
+/// re-appears as adoptable) AND any transcript whose cwd is under `worktrees_root` (those are
+/// agentic-dev's own spawned sessions, not external Claude Code CLI sessions). Always 200 with
+/// a JSON array.
 pub async fn list_adoptable(State(st): State<AppState>) -> Response {
     let known = st.engine.known_claude_session_ids().await;
-    let items = crate::engine::native_transcript::scan_adoptable(&st.engine.config_base(), &known);
+    let items = crate::engine::native_transcript::scan_adoptable(
+        &st.engine.config_base(),
+        &known,
+        &st.config.worktrees_root,
+    );
     Json(items).into_response()
 }
 
