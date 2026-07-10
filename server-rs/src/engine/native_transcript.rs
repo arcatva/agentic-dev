@@ -62,8 +62,70 @@ pub(crate) fn iso_to_ms(ts: &str) -> i64 {
     super::auto_resume::rfc3339_to_epoch_ms(ts).unwrap_or(0)
 }
 
+/// Local Claude Code UI slash-commands whose transcript is a command artifact, not a conversation.
+/// A command NOT in this list (e.g. a prompt-backed `/code-review` or a custom skill) is treated as
+/// a real prompt and kept — this list is deliberately conservative (unknown = keep, not drop).
+const LOCAL_UI_COMMANDS: &[&str] = &[
+    "model", "clear", "exit", "quit", "help", "login", "logout", "status", "cost", "config",
+    "doctor", "mcp", "terminal-setup", "vim", "release-notes", "upgrade", "privacy-settings",
+    "permissions", "ide", "bug",
+];
+
+/// True when `text` is a Claude Code LOCAL UI command artifact: the `<local-command-caveat>`
+/// preamble, or a `<command-name>/NAME</command-name>` where NAME is a known local UI command.
+fn is_local_ui_command(text: &str) -> bool {
+    if text.starts_with("<local-command-caveat>") {
+        return true;
+    }
+    if let Some(rest) = text.strip_prefix("<command-name>") {
+        if let Some(end) = rest.find("</command-name>") {
+            let name = rest[..end].trim().trim_start_matches('/');
+            return LOCAL_UI_COMMANDS.contains(&name);
+        }
+    }
+    false
+}
+
+/// True when the transcript has at least one GENUINE user turn — a non-meta `user` message with
+/// real user-authored content: text that isn't a local UI command, OR a non-text block (image,
+/// document, …). Excludes meta/sidechain/compact lines, tool-result-only messages, empty messages,
+/// and local UI slash-commands. Used to decide whether a transcript is worth showing in the adopt
+/// picker: a multimodal image-only session counts; a `/model`-only or aborted session does not.
+pub(crate) fn has_real_user_input(lines: &[serde_json::Value]) -> bool {
+    lines.iter().any(|l| {
+        if l.get("type").and_then(|v| v.as_str()) != Some("user") {
+            return false;
+        }
+        for flag in ["isMeta", "isSidechain", "isCompactSummary"] {
+            if l.get(flag).and_then(|v| v.as_bool()) == Some(true) {
+                return false;
+            }
+        }
+        let Some(content) = l.pointer("/message/content") else {
+            return false;
+        };
+        match content {
+            serde_json::Value::String(s) => {
+                let t = s.trim();
+                !t.is_empty() && !is_local_ui_command(t)
+            }
+            serde_json::Value::Array(a) => a.iter().any(|b| match b.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    let t = b.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    !t.is_empty() && !is_local_ui_command(t)
+                }
+                // Tool output is not user input; a missing type is malformed; anything else
+                // (image, document, …) is genuine user-authored content.
+                Some("tool_result") | None => false,
+                Some(_) => true,
+            }),
+            _ => false,
+        }
+    })
+}
+
 /// Extract plain user text from a native `user` line's `message.content`.
-/// Returns `None` for tool-result-only / meta / sidechain / slash-command-wrapper / non-user lines.
+/// Returns `None` for tool-result-only / meta / sidechain / local-UI-command / non-user lines.
 pub fn user_prompt_text(line: &serde_json::Value) -> Option<String> {
     if line.get("type").and_then(|v| v.as_str()) != Some("user") { return None; }
     for flag in ["isMeta", "isSidechain", "isCompactSummary"] {
@@ -80,12 +142,10 @@ pub fn user_prompt_text(line: &serde_json::Value) -> Option<String> {
     };
     let trimmed = text.trim();
     if trimmed.is_empty() { return None; }
-    // Claude Code slash-command transcripts (/model, /exit, /clear, …) log the command as a user
-    // message wrapped in these markers — an artifact, not a real prompt to adopt or render.
-    if trimmed.starts_with("<local-command-caveat>")
-        || trimmed.starts_with("<command-name>")
-        || trimmed.starts_with("<command-message>")
-    {
+    // Suppress only LOCAL UI slash-commands (/model, /exit, /clear, …) — their transcript is a
+    // command artifact, not a prompt. A prompt-backed command (/code-review, a custom skill) is a
+    // real conversation and is kept (see `is_local_ui_command`).
+    if is_local_ui_command(trimmed) {
         return None;
     }
     Some(text)
@@ -142,12 +202,13 @@ pub fn scan_adoptable(
             if !cwd.is_empty() && path_within(Path::new(&cwd), exclude_root) {
                 continue;
             }
-            let first_prompt = lines.iter().find_map(|l| user_prompt_text(l)).unwrap_or_default();
-            // No real user-authored prompt (aborted/empty session, or a transcript made up only of
-            // slash-command artifacts / tool results): nothing conversational to adopt.
-            if first_prompt.trim().is_empty() {
+            // Skip transcripts with no genuine user turn: aborted/empty sessions and pure local
+            // UI-command runs (/model, /exit, …). A multimodal (image-only) session still counts,
+            // even though its text preview below is empty.
+            if !has_real_user_input(&lines) {
                 continue;
             }
+            let first_prompt = lines.iter().find_map(|l| user_prompt_text(l)).unwrap_or_default();
             let resumable = super::resume_gate::transcript_is_resumable(&p);
             let mtime_ms = f.metadata().ok()
                 .and_then(|m| m.modified().ok())
@@ -277,12 +338,23 @@ mod tests {
         // No user-authored text at all (assistant-only) -> skipped.
         std::fs::write(projects.join("empty.jsonl"),
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n").unwrap();
+        // Multimodal: first user message is an image block with no text -> KEPT (real user
+        // content, just not text). Regression guard for the "drops multimodal sessions" edge.
+        std::fs::write(projects.join("img.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{}}]}}\n").unwrap();
+        // Prompt-backed command (/code-review is NOT a local UI command) -> KEPT.
+        std::fs::write(projects.join("pbcmd.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/code-review</command-name>\\n<command-message>review</command-message>\"}}\n").unwrap();
 
         let known = std::collections::HashSet::new();
         let got = scan_adoptable(tmp.path(), &known, std::path::Path::new("/nonexistent-wt-root"));
-        assert_eq!(got.len(), 1, "only the real external session survives (command + empty skipped)");
-        assert_eq!(got[0].session_id, "real");
-        assert_eq!(got[0].first_prompt, "why is my disk not showing");
+        let ids: std::collections::HashSet<&str> = got.iter().map(|a| a.session_id.as_str()).collect();
+        assert!(ids.contains("real"), "real text session kept");
+        assert!(ids.contains("img"), "multimodal image-only session kept");
+        assert!(ids.contains("pbcmd"), "prompt-backed /code-review session kept");
+        assert!(!ids.contains("cmd"), "local UI /model command skipped");
+        assert!(!ids.contains("empty"), "assistant-only/empty skipped");
+        assert_eq!(got.len(), 3);
     }
 
     #[test]
