@@ -50,6 +50,8 @@ pub struct GithubRef {
 pub struct PlannedFile {
     pub repo_path: String,
     pub rel_path: String,
+    /// Tree mode 100755 — helper scripts must stay runnable after install.
+    pub executable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,11 +64,13 @@ fn valid_gh_segment(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Parse a user-supplied skill source into a [GithubRef]. Accepted forms:
+/// Parse a user-supplied skill source into candidate [GithubRef]s. Accepted forms:
 /// - `https://github.com/{owner}/{repo}` (repo root, default branch)
 /// - `https://github.com/{owner}/{repo}/tree/{branch}/{path...}`
 /// - shorthand `{owner}/{repo}[/{path...}]` (default branch)
-pub fn parse_github_source(src: &str) -> Result<GithubRef, String> {
+/// URL forms return MULTIPLE candidates when the branch/path split is ambiguous (branch
+/// names may contain '/'); other forms return exactly one.
+pub fn parse_github_source(src: &str) -> Result<Vec<GithubRef>, String> {
     let src = src.trim().trim_end_matches('/');
     if src.is_empty() {
         return Err("source is required".into());
@@ -88,24 +92,35 @@ pub fn parse_github_source(src: &str) -> Result<GithubRef, String> {
         return Err("source must be owner/repo[/path] or a github.com URL".into());
     }
     let (owner, repo) = (parts[0].to_string(), parts[1].to_string());
-    let (branch, path_parts): (String, &[&str]) = match parts.get(2) {
-        None => ("HEAD".into(), &[]),
+    let make = |branch: String, path_parts: &[&str]| -> Result<GithubRef, String> {
+        let path = path_parts.join("/");
+        if !path.is_empty() && !safe_rel_path(path.trim_matches('/')) {
+            return Err("path contains unsupported characters".into());
+        }
+        Ok(GithubRef { owner: owner.clone(), repo: repo.clone(), branch, path: path.trim_matches('/').to_string() })
+    };
+    match parts.get(2) {
+        None => Ok(vec![make("HEAD".into(), &[])?]),
         // URL form: /tree/{branch}/{path...} (also tolerate /blob/… pointing at a dir).
+        // A branch NAME may itself contain '/' (e.g. feature/foo) and the URL gives no
+        // delimiter — return every split candidate, longest-branch first; the caller resolves
+        // each against GitHub until one exists. Longest-first so `feature/foo` wins over a
+        // coincidental `feature` branch with a `foo/...` path.
         Some(&"tree") | Some(&"blob") if from_url => {
-            let Some(branch) = parts.get(3).filter(|b| valid_gh_segment(b)) else {
+            let segs: &[&str] = parts.get(3..).unwrap_or(&[]);
+            if segs.is_empty() || !segs.iter().all(|s| valid_gh_segment(s)) {
                 return Err("URL is missing the branch after /tree/".into());
-            };
-            (branch.to_string(), parts.get(4..).unwrap_or(&[]))
+            }
+            let mut out = Vec::with_capacity(segs.len());
+            for split in (1..=segs.len()).rev() {
+                out.push(make(segs[..split].join("/"), &segs[split..])?);
+            }
+            Ok(out)
         }
         // Shorthand: everything after owner/repo is the path, default branch.
-        Some(_) if !from_url => ("HEAD".into(), &parts[2..]),
-        Some(_) => return Err("unsupported github.com URL — use the /tree/<branch>/<path> form".into()),
-    };
-    let path = path_parts.join("/");
-    if !path.is_empty() && !safe_rel_path(path.trim_matches('/')) {
-        return Err("path contains unsupported characters".into());
+        Some(_) if !from_url => Ok(vec![make("HEAD".into(), &parts[2..])?]),
+        Some(_) => Err("unsupported github.com URL — use the /tree/<branch>/<path> form".into()),
     }
-    Ok(GithubRef { owner, repo, branch, path: path.trim_matches('/').to_string() })
 }
 
 /// Is every component of `rel` a plain, safe path segment? Beyond traversal characters this
@@ -167,7 +182,11 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
         if rel == "SKILL.md" {
             has_skill_md = true;
         }
-        files.push(PlannedFile { repo_path: p.to_string(), rel_path: rel.to_string() });
+        files.push(PlannedFile {
+            repo_path: p.to_string(),
+            rel_path: rel.to_string(),
+            executable: e.get("mode").and_then(|m| m.as_str()) == Some("100755"),
+        });
     }
     if !has_skill_md {
         return Err(format!(
@@ -202,10 +221,48 @@ fn valid_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Ensure a downloaded SKILL.md's frontmatter `name:` matches the DIRECTORY name it installs
+/// under. `list_skills` uses the frontmatter value as the component id while delete/toggle
+/// resolve `<skills_dir>/<name>` — a mismatching (or invalid) frontmatter name would create a
+/// component the API can list but never manage. A missing name line is fine (listing falls
+/// back to the directory name); a differing one is REWRITTEN to the directory name.
+fn normalize_skill_md(bytes: &[u8], dir_name: &str) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return bytes.to_vec() };
+    let Some(fm) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) else {
+        return bytes.to_vec();
+    };
+    let fm_len = fm.0.len();
+    let mut changed = false;
+    let mut out_fm = String::with_capacity(fm_len);
+    let mut name_seen = false;
+    for line in fm.0.lines() {
+        if let Some(v) = line.strip_prefix("name:") {
+            // Mirror list_skills: only the FIRST name line counts.
+            if !name_seen {
+                name_seen = true;
+                if v.trim() != dir_name {
+                    out_fm.push_str(&format!("name: {dir_name}"));
+                    out_fm.push('\n');
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        out_fm.push_str(line);
+        out_fm.push('\n');
+    }
+    if !changed {
+        return bytes.to_vec();
+    }
+    let body = &text[4 + fm_len..]; // everything from "\n---" onwards
+    format!("---\n{out_fm}{}", body.strip_prefix('\n').unwrap_or(body)).into_bytes()
+}
+
 /// Write downloaded skill files under `<skills_dir>/<name>/…`, atomically: everything goes
 /// into a temp sibling dir first, then one rename publishes the skill. Refuses if the skill
 /// already exists. Pure filesystem — no network.
-pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8>)]) -> io::Result<()> {
+/// `files` = (skill-relative path, bytes, executable).
+pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8>, bool)]) -> io::Result<()> {
     if !valid_name(name) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("invalid skill name '{name}'")));
     }
@@ -223,7 +280,7 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
         std::fs::remove_dir_all(&tmp)?;
     }
     let result = (|| -> io::Result<()> {
-        for (rel, bytes) in files {
+        for (rel, bytes, executable) in files {
             if !safe_rel_path(rel) {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("unsafe path '{rel}'")));
             }
@@ -231,7 +288,22 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&dest, bytes)?;
+            // The SKILL.md frontmatter name must match the install directory or the skill
+            // becomes unmanageable through the API (listed by frontmatter name, deleted by dir).
+            if rel == "SKILL.md" {
+                std::fs::write(&dest, normalize_skill_md(bytes, name))?;
+            } else {
+                std::fs::write(&dest, bytes)?;
+            }
+            // Preserve helper-script executability (tree mode 100755) — a skill's scripts
+            // would otherwise fail with permission errors when the agent runs them.
+            #[cfg(unix)]
+            if *executable {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+            #[cfg(not(unix))]
+            let _ = executable;
         }
         std::fs::rename(&tmp, &target)
     })();
@@ -329,11 +401,24 @@ async fn resolve_commit_sha(client: &reqwest::Client, gh: &GithubRef) -> Result<
 
 /// Install a skill from a user-supplied source. Returns the installed skill's name.
 pub async fn install_from_source(skills_dir: &Path, source: &str) -> Result<String, String> {
-    let mut gh = parse_github_source(source)?;
+    let candidates = parse_github_source(source)?;
     let client = http_client()?;
-    // Pin the whole install to one commit: tree scan and raw downloads must see the same
-    // snapshot (see [resolve_commit_sha]).
-    gh.branch = resolve_commit_sha(&client, &gh).await?;
+    // Resolve the first branch/path candidate whose ref actually exists (URL branch names may
+    // contain '/'), then pin the whole install to that resolved commit: tree scan and raw
+    // downloads must see the same snapshot (see [resolve_commit_sha]).
+    let mut gh = None;
+    let mut last_err = String::new();
+    for mut cand in candidates {
+        match resolve_commit_sha(&client, &cand).await {
+            Ok(sha) => {
+                cand.branch = sha;
+                gh = Some(cand);
+                break;
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    let Some(gh) = gh else { return Err(last_err) };
     let tree = fetch_tree(&client, &gh).await?;
     let plan = plan_from_tree(&tree, &gh)?;
     // Refuse early (before any downloads) if the name is taken.
@@ -343,7 +428,7 @@ pub async fn install_from_source(skills_dir: &Path, source: &str) -> Result<Stri
     let mut files = Vec::with_capacity(plan.files.len());
     for f in &plan.files {
         let bytes = fetch_raw(&client, &raw_url(&gh, &f.repo_path), MAX_FILE_BYTES).await?;
-        files.push((f.rel_path.clone(), bytes));
+        files.push((f.rel_path.clone(), bytes, f.executable));
     }
     write_skill_files(skills_dir, &plan.name, &files).map_err(|e| e.to_string())?;
     Ok(plan.name)
@@ -420,21 +505,30 @@ mod tests {
     fn parses_shorthand_and_urls() {
         assert_eq!(
             parse_github_source("anthropics/skills/document-skills/xlsx").unwrap(),
-            GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "HEAD".into(), path: "document-skills/xlsx".into() },
+            vec![GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "HEAD".into(), path: "document-skills/xlsx".into() }],
         );
+        // URL: ambiguous branch/path splits, longest branch candidate first.
         assert_eq!(
             parse_github_source("https://github.com/anthropics/skills/tree/main/artifacts-builder").unwrap(),
-            GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "main".into(), path: "artifacts-builder".into() },
+            vec![
+                GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "main/artifacts-builder".into(), path: "".into() },
+                GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "main".into(), path: "artifacts-builder".into() },
+            ],
         );
+        // Slashed branch (feature/foo): the right split is among the candidates.
+        let cands = parse_github_source("https://github.com/o/r/tree/feature/foo/my-skill").unwrap();
+        assert!(cands.contains(&GithubRef { owner: "o".into(), repo: "r".into(), branch: "feature/foo".into(), path: "my-skill".into() }));
+        assert!(cands.contains(&GithubRef { owner: "o".into(), repo: "r".into(), branch: "feature".into(), path: "foo/my-skill".into() }));
         assert_eq!(
             parse_github_source("https://github.com/owner/repo").unwrap(),
-            GithubRef { owner: "owner".into(), repo: "repo".into(), branch: "HEAD".into(), path: "".into() },
+            vec![GithubRef { owner: "owner".into(), repo: "repo".into(), branch: "HEAD".into(), path: "".into() }],
         );
         assert!(parse_github_source("").is_err());
         assert!(parse_github_source("https://gitlab.com/x/y").is_err());
         assert!(parse_github_source("owner").is_err());
         assert!(parse_github_source("owner/repo/../etc").is_err());
         assert!(parse_github_source("bad owner/repo").is_err());
+        assert!(parse_github_source("owner/repo/pa?th").is_err());
     }
 
     fn tree_json(entries: &[(&str, &str, u64, &str)]) -> serde_json::Value {
@@ -483,8 +577,8 @@ mod tests {
     fn write_skill_files_roundtrip_and_guards() {
         let dir = tmp();
         let files = vec![
-            ("SKILL.md".to_string(), b"---\nname: x\n---\nbody".to_vec()),
-            ("refs/a.md".to_string(), b"ref".to_vec()),
+            ("SKILL.md".to_string(), b"---\nname: x\n---\nbody".to_vec(), false),
+            ("refs/a.md".to_string(), b"ref".to_vec(), false),
         ];
         write_skill_files(&dir, "x", &files).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("x/refs/a.md")).unwrap(), "ref");
@@ -493,11 +587,46 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         // Traversal in the name and in a rel path → refused.
         assert!(write_skill_files(&dir, "..", &files).is_err());
-        let bad = vec![("../escape.md".to_string(), b"x".to_vec())];
+        let bad = vec![("../escape.md".to_string(), b"x".to_vec(), false)];
         let err = write_skill_files(&dir, "y", &bad).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(!dir.join("y").exists(), "failed install must not leave a skill dir");
         assert!(!dir.parent().unwrap().join("escape.md").exists());
+    }
+
+    #[test]
+    fn write_rewrites_mismatching_frontmatter_name_and_sets_exec_bit() {
+        let dir = tmp();
+        let files = vec![
+            // Frontmatter name differs from the install dir — must be rewritten, or the
+            // component lists under a name the delete/toggle routes can't resolve.
+            ("SKILL.md".to_string(), b"---\nname: other-name\ndescription: d\n---\nbody\n".to_vec(), false),
+            ("scripts/run.sh".to_string(), b"#!/bin/sh\n".to_vec(), true),
+        ];
+        write_skill_files(&dir, "my-skill", &files).unwrap();
+        let md = std::fs::read_to_string(dir.join("my-skill/SKILL.md")).unwrap();
+        assert!(md.contains("name: my-skill"), "frontmatter name must be rewritten: {md}");
+        assert!(md.contains("description: d"), "other frontmatter lines must survive");
+        assert!(md.contains("body"), "body must survive");
+        // list_skills resolves the component under the DIRECTORY name.
+        let listed = crate::engine::skills::list_skills(&dir);
+        assert!(listed.iter().any(|s| s.name == "my-skill"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("my-skill/scripts/run.sh")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "helper script must stay executable");
+        }
+    }
+
+    #[test]
+    fn normalize_skill_md_keeps_matching_or_missing_names_verbatim() {
+        let matching = b"---\nname: x\n---\nbody".to_vec();
+        assert_eq!(normalize_skill_md(&matching, "x"), matching);
+        let no_name = b"---\ndescription: d\n---\nbody".to_vec();
+        assert_eq!(normalize_skill_md(&no_name, "x"), no_name);
+        let no_fm = b"just markdown".to_vec();
+        assert_eq!(normalize_skill_md(&no_fm, "x"), no_fm);
     }
 
     #[test]
