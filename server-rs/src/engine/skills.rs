@@ -1,7 +1,45 @@
+use std::io;
 use std::path::Path;
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct SkillInfo { pub name: String, pub description: String }
+
+/// Create `<skills_dir>/<name>/SKILL.md` with YAML frontmatter.
+/// Returns `AlreadyExists` if the directory already exists.
+pub fn add_skill(skills_dir: &Path, name: &str, description: &str) -> io::Result<()> {
+    let skill_dir = skills_dir.join(name);
+    if skill_dir.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists,
+            format!("skill '{name}' already exists")));
+    }
+    std::fs::create_dir_all(&skill_dir)?;
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n");
+    std::fs::write(skill_dir.join("SKILL.md"), content)?;
+    Ok(())
+}
+
+/// Remove `<skills_dir>/<name>` recursively.
+/// Returns `false` if absent, `true` on success.
+/// Defense-in-depth: canonicalizes both paths and asserts the target is a direct
+/// child of `skills_dir` before calling `remove_dir_all` — blocks path-traversal
+/// attacks even if the name validator in the API layer were bypassed.
+pub fn delete_skill(skills_dir: &Path, name: &str) -> io::Result<bool> {
+    let target = skills_dir.join(name);
+    if !target.exists() { return Ok(false); }
+
+    let canon_skills = skills_dir.canonicalize()?;
+    let canon_target = target.canonicalize()?;
+    let canon_parent = canon_target.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::PermissionDenied, "target has no parent")
+    })?;
+    if canon_parent != canon_skills {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            format!("refusing to delete '{}': not a direct child of skills_dir",
+                canon_target.display())));
+    }
+    std::fs::remove_dir_all(&canon_target)?;
+    Ok(true)
+}
 
 pub fn list_skills(skills_dir: &Path) -> Vec<SkillInfo> {
     let Ok(entries) = std::fs::read_dir(skills_dir) else { return vec![]; };
@@ -58,5 +96,53 @@ mod tests {
         assert_eq!(out[0].description, "first");
         assert_eq!(out[1].name, "zed");
         assert!(list_skills(&dir.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn add_skill_creates_dir_and_skill_md() {
+        let dir = tmp();
+        add_skill(&dir, "my-skill", "does things").unwrap();
+        let md = dir.join("my-skill").join("SKILL.md");
+        assert!(md.exists());
+        let text = std::fs::read_to_string(&md).unwrap();
+        assert_eq!(text, "---\nname: my-skill\ndescription: does things\n---\n");
+    }
+
+    #[test]
+    fn add_skill_errors_if_already_exists() {
+        let dir = tmp();
+        add_skill(&dir, "dup", "d").unwrap();
+        let err = add_skill(&dir, "dup", "d2").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn delete_skill_removes_dir_and_returns_true() {
+        let dir = tmp();
+        add_skill(&dir, "to-remove", "desc").unwrap();
+        assert!(delete_skill(&dir, "to-remove").unwrap());
+        assert!(!dir.join("to-remove").exists());
+    }
+
+    #[test]
+    fn delete_skill_absent_returns_false() {
+        let dir = tmp();
+        assert!(!delete_skill(&dir, "no-such").unwrap());
+    }
+
+    #[test]
+    fn delete_skill_rejects_path_traversal() {
+        let dir = tmp();
+        // Create a directory OUTSIDE skills_dir to try to delete via traversal.
+        let outside = dir.parent().unwrap().join(format!("outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        // The name "../outside-<pid>" would resolve to outside dir — must be refused.
+        let name = format!("../outside-{}", std::process::id());
+        let err = delete_skill(&dir, &name).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied,
+            "traversal must be refused with PermissionDenied, got: {err}");
+        // The outside dir must still exist (not deleted).
+        assert!(outside.exists());
+        std::fs::remove_dir_all(&outside).ok();
     }
 }
