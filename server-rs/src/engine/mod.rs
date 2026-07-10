@@ -3279,6 +3279,7 @@ pub mod runner;
 pub mod sdk_runner;
 pub mod search;
 pub mod session_guide;
+pub mod skill_install;
 pub mod skills;
 pub mod spawner;
 pub mod status;

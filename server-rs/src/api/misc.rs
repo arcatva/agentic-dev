@@ -541,6 +541,38 @@ pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Byte
     }
 }
 
+/// GET /api/skills/catalog — the curated external skill store (anthropics/skills), cached.
+pub async fn skills_catalog_route() -> Response {
+    match crate::engine::skill_install::fetch_catalog().await {
+        Ok(skills) => Json(json!({ "skills": skills })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InstallSkillBody { pub source: String }
+
+/// POST /api/skills/install — download a skill (SKILL.md + companion files) from a GitHub
+/// source (`owner/repo[/path]` or a github.com URL) into the skills dir.
+pub async fn skills_install_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+    let b: InstallSkillBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+    };
+    // Parse errors are the caller's fault (400) BEFORE any network is touched.
+    if let Err(e) = crate::engine::skill_install::parse_github_source(&b.source) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    let skills = st.config.skills_dir.clone();
+    let base = st.config.claude_config_base.clone();
+    match crate::engine::skill_install::install_from_source(&skills, &b.source).await {
+        Ok(_name) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        // Everything else mixes remote and local causes; BAD_GATEWAY for remote-ish messages
+        // would be guesswork — a 400 with the human-readable reason serves the app either way.
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 pub async fn skills_delete_route(
     State(st): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
