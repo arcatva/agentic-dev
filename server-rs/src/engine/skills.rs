@@ -6,7 +6,35 @@ pub struct SkillInfo { pub name: String, pub description: String }
 
 /// Create `<skills_dir>/<name>/SKILL.md` with YAML frontmatter.
 /// Returns `AlreadyExists` if the directory already exists.
+///
+/// Defense-in-depth: asserts `name` is a single normal path component
+/// (rejects `..`, `.`, `/abs`, `a/b`, etc.) before creating anything.
+/// This blocks traversal attacks even if the API-layer name validator
+/// were bypassed.  (Note: checking the parent of the joined path does
+/// NOT work for `..` — `Path::parent` strips the `..` component, so the
+/// comparison would always pass.  Component-level inspection avoids that.)
 pub fn add_skill(skills_dir: &Path, name: &str, description: &str) -> io::Result<()> {
+    // Belt-and-suspenders traversal guard: verify that `name` is a single,
+    // normal path component — no `..`, no `.`, no separators, no absolute
+    // path.  We check the components of the *name* itself (before joining)
+    // so that tricks like "..", "../x", "/abs", or "a/b" are all rejected,
+    // regardless of whether the resulting path happens to exist.
+    //
+    // Note: checking the lexical parent of `skills_dir.join("..")` does NOT
+    // work because Path::parent strips the ".." component and returns
+    // `skills_dir` itself, so the comparison always passes for "..".
+    {
+        use std::path::Component;
+        let mut components = std::path::Path::new(name).components();
+        let single = components.next();
+        let is_single_normal = matches!(single, Some(Component::Normal(_)))
+            && components.next().is_none();
+        if !is_single_normal {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                format!("refusing to create skill '{name}': name must be a single path component")));
+        }
+    }
+
     let skill_dir = skills_dir.join(name);
     if skill_dir.exists() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists,
@@ -128,6 +156,20 @@ mod tests {
     fn delete_skill_absent_returns_false() {
         let dir = tmp();
         assert!(!delete_skill(&dir, "no-such").unwrap());
+    }
+
+    #[test]
+    fn add_skill_rejects_path_traversal() {
+        let dir = tmp();
+        // ".." resolves to the parent of skills_dir — must be refused BEFORE any directory
+        // or file is created; in particular, <skills_dir>/../SKILL.md must NOT appear.
+        let err = add_skill(&dir, "..", "should be refused").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied,
+            "traversal must be refused with PermissionDenied, got: {err}");
+        // Verify nothing was created above the skills dir.
+        let outside_skill_md = dir.parent().unwrap().join("SKILL.md");
+        assert!(!outside_skill_md.exists(),
+            "SKILL.md must NOT have been created outside skills_dir");
     }
 
     #[test]
