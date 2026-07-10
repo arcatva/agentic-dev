@@ -538,11 +538,39 @@ impl Engine {
             };
             if outbox_dir.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
+                    let files: Vec<std::fs::DirEntry> =
+                        entries.flatten().filter(|e| e.path().is_file()).collect();
+                    // The in-memory `logged_outbox` set dies with the process. On the FIRST touch of a
+                    // session after a restart (or after the entry was purged), seed it from the markers
+                    // already persisted in the log — otherwise every existing outbox file would be
+                    // "new" again and get a duplicate `agentic_file` marker appended at the log TAIL,
+                    // piling stale file cards at the bottom of the reopened transcript. Read the log
+                    // OUTSIDE the state lock (it can be large); the later extend is idempotent, so a
+                    // racing touch seeding the same session twice is harmless. Cost note: the read is
+                    // once per session per process life, and ONLY for sessions that actually have
+                    // outbox files. An EMPTY outbox skips everything — including creating the
+                    // logged_outbox entry — so a later first touch that actually sees files still seeds.
+                    if !files.is_empty() {
+                    let needs_seed = !self.0.state.lock().logged_outbox.contains_key(&s.id);
+                    let seeded: Option<HashSet<String>> = if needs_seed {
+                        Some(
+                            self.0.store.read_log(&s.id).iter()
+                                .filter(|l| l.contains("\"type\":\"agentic_file\""))
+                                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                                .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("agentic_file"))
+                                .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
                     let mut state_guard = self.0.state.lock();
                     let logged = state_guard.logged_outbox.entry(s.id.clone()).or_default();
-                    for entry in entries.flatten() {
+                    if let Some(seed) = seeded {
+                        logged.extend(seed);
+                    }
+                    for entry in files {
                         let path = entry.path();
-                        if !path.is_file() { continue; }
                         let rel = path.strip_prefix(&outbox_dir).unwrap_or(&path);
                         let rel_str = format!("outbox/{}", rel.display());
                         if !logged.insert(rel_str.clone()) { continue; }
@@ -556,6 +584,7 @@ impl Engine {
                             "at": at,
                         }).to_string();
                         self.0.store.append_log_blocking(&s.id, &marker);
+                    }
                     }
                 }
             }
