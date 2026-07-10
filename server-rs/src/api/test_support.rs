@@ -32,6 +32,10 @@ pub async fn test_state() -> AppState {
     c.templates_path = dir.join("templates.json");
     c.device_token_path = dir.join("device.json");
     c.skills_dir = dir.join("skills");
+    // Redirect claude_config_base so MCP/settings writes go to the temp dir,
+    // not the real ~/.claude. .claude.json is placed at dir/.claude.json (parent of dir/claude).
+    c.claude_config_base = dir.join("claude");
+    let _ = std::fs::create_dir_all(&c.claude_config_base);
     let store = Arc::new(crate::engine::store::Store::open(c.db_path.clone(), c.log_dir.clone()).await.unwrap());
     let transcript = Arc::new(crate::engine::transcript::TranscriptCache::new(64 * 1024 * 1024));
     let engine_cfg = crate::engine::EngineConfig {

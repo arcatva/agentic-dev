@@ -1,5 +1,6 @@
 mod login;
 pub(crate) mod misc;
+pub(crate) mod validation;
 mod sessions;
 pub mod stream;
 #[cfg(test)]
@@ -76,8 +77,12 @@ pub fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/outbox", get(sessions::outbox_route))
         .route("/api/usage", get(misc::usage_route))
         .route("/api/repos", get(misc::repos_route))
-        .route("/api/skills", get(misc::skills_route))
-        .route("/api/plugins", get(misc::plugins_route))
+        .route("/api/skills", get(misc::skills_route).post(misc::skills_add_route))
+        .route("/api/skills/{name}", delete(misc::skills_delete_route))
+        .route("/api/plugins", get(misc::plugins_route).post(misc::plugins_add_route))
+        .route("/api/plugins/{id}", delete(misc::plugins_delete_route))
+        .route("/api/mcp-servers", post(misc::mcp_add_route))
+        .route("/api/mcp-servers/{name}", delete(misc::mcp_delete_route))
         .route("/api/global-settings", get(misc::global_settings_route))
         .route("/api/global-settings/toggle", post(misc::global_settings_toggle_route))
         .route("/api/groups", get(misc::groups_list).post(misc::groups_create))

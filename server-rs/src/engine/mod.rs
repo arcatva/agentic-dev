@@ -3275,6 +3275,8 @@ pub mod title_client;
 pub mod transcript;
 pub mod transcript_filter;
 pub mod usage;
+pub mod user_config;
+pub mod plugin_cli;
 pub mod workflows;
 pub mod worktree;
 

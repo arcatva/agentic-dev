@@ -467,6 +467,121 @@ pub async fn models_get(axum::extract::Query(q): axum::extract::Query<ModelsQuer
     Json(json!({ "models": entries })).into_response()
 }
 
+// ── Component CRUD — add/delete MCP servers, skills, plugins ──
+
+pub async fn mcp_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+    let def: crate::engine::store::McpServerDef = match serde_json::from_slice(&body) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+    };
+    if !crate::api::validation::valid_component_name(&def.name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid or reserved MCP name: {:?}", def.name)}))).into_response();
+    }
+    let base = st.config.claude_config_base.clone();
+    let skills = st.config.skills_dir.clone();
+    match crate::engine::user_config::add_mcp_server(&base, &def) {
+        Ok(()) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn mcp_delete_route(
+    State(st): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !crate::api::validation::valid_component_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid MCP name: {name:?}")}))).into_response();
+    }
+    let base = st.config.claude_config_base.clone();
+    let skills = st.config.skills_dir.clone();
+    match crate::engine::user_config::delete_mcp_server(&base, &name) {
+        Ok(true) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("MCP server '{name}' not found")}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AddSkillBody { pub name: String, pub description: String }
+
+pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+    let b: AddSkillBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+    };
+    if !crate::api::validation::valid_component_name(&b.name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill name: {:?}", b.name)}))).into_response();
+    }
+    let skills = st.config.skills_dir.clone();
+    let base = st.config.claude_config_base.clone();
+    match crate::engine::skills::add_skill(&skills, &b.name, &b.description) {
+        Ok(()) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists =>
+            (StatusCode::BAD_REQUEST, Json(json!({"error": format!("skill '{}' already exists", b.name)}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn skills_delete_route(
+    State(st): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !crate::api::validation::valid_component_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill name: {name:?}")}))).into_response();
+    }
+    let skills = st.config.skills_dir.clone();
+    let base = st.config.claude_config_base.clone();
+    match crate::engine::skills::delete_skill(&skills, &name) {
+        Ok(true) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("skill '{name}' not found")}))).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied =>
+            (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill path: {e}")}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AddPluginBody { pub id: String }
+
+pub async fn plugins_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+    let b: AddPluginBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+    };
+    if !crate::api::validation::valid_plugin_id(&b.id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid plugin id: {:?}", b.id)}))).into_response();
+    }
+    let base = st.config.claude_config_base.clone();
+    let skills = st.config.skills_dir.clone();
+    let id = b.id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::engine::plugin_cli::install_plugin(&base, &id)
+    }).await.map_err(|e| format!("task error: {e}")).and_then(|r| r);
+    match result {
+        Ok(_stdout) => Json(crate::engine::components::list_components(&st.config.claude_config_base, &skills)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn plugins_delete_route(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !crate::api::validation::valid_plugin_id(&id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid plugin id: {id:?}")}))).into_response();
+    }
+    let base = st.config.claude_config_base.clone();
+    let skills = st.config.skills_dir.clone();
+    let id2 = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::engine::plugin_cli::uninstall_plugin(&base, &id2)
+    }).await.map_err(|e| format!("task error: {e}")).and_then(|r| r);
+    match result {
+        Ok(_stdout) => Json(crate::engine::components::list_components(&st.config.claude_config_base, &skills)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,5 +882,114 @@ mod tests {
             .body(Body::from(r#"{"name":"no-such"}"#)).unwrap()).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert!(b["error"].as_str().unwrap().contains("no-such"));
+    }
+
+    // ── Component CRUD tests ──
+
+    #[tokio::test]
+    async fn mcp_add_rejects_bad_name() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        let (s, b) = oneshot_req(st, Request::post("/api/mcp-servers")
+            .header("authorization", tok)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"../evil","command":"x"}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(b["error"].as_str().unwrap().contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn mcp_add_rejects_reserved_agentic_name() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        let (s, b) = oneshot_req(st, Request::post("/api/mcp-servers")
+            .header("authorization", tok)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"agentic","command":"x"}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let err = b["error"].as_str().unwrap();
+        assert!(err.to_lowercase().contains("reserved") || err.contains("invalid"),
+            "error should mention reserved or invalid: {err}");
+    }
+
+    #[tokio::test]
+    async fn mcp_add_and_delete_round_trip() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        // Add
+        let (s, _) = oneshot_req(st.clone(), Request::post("/api/mcp-servers")
+            .header("authorization", tok.clone())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"test-mcp","command":"node","args":["s.js"]}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::OK);
+        // Verify in list
+        let (s2, arr) = oneshot_req(st.clone(), Request::get("/api/global-settings")
+            .header("authorization", tok.clone()).body(Body::empty()).unwrap()).await;
+        assert_eq!(s2, StatusCode::OK);
+        assert!(arr.as_array().unwrap().iter().any(|c| c["kind"] == "mcp" && c["id"] == "test-mcp"),
+            "mcp must appear after add: {arr}");
+        // Delete
+        let (s3, _) = oneshot_req(st.clone(), Request::delete("/api/mcp-servers/test-mcp")
+            .header("authorization", tok.clone()).body(Body::empty()).unwrap()).await;
+        assert_eq!(s3, StatusCode::OK);
+        // Verify gone
+        let (_, arr2) = oneshot_req(st.clone(), Request::get("/api/global-settings")
+            .header("authorization", tok).body(Body::empty()).unwrap()).await;
+        assert!(!arr2.as_array().unwrap().iter().any(|c| c["id"] == "test-mcp"),
+            "mcp must be gone after delete: {arr2}");
+    }
+
+    #[tokio::test]
+    async fn mcp_delete_absent_is_404() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        let (s, b) = oneshot_req(st, Request::delete("/api/mcp-servers/no-such")
+            .header("authorization", tok).body(Body::empty()).unwrap()).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        assert!(b["error"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn skills_add_rejects_bad_name() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        let (s, b) = oneshot_req(st, Request::post("/api/skills")
+            .header("authorization", tok)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"a/b","description":"d"}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(b["error"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn skills_add_and_delete_round_trip() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        // Ensure skills_dir exists (test_state sets it to temp/skills)
+        std::fs::create_dir_all(&st.config.skills_dir).unwrap();
+        // Add
+        let (s, arr) = oneshot_req(st.clone(), Request::post("/api/skills")
+            .header("authorization", tok.clone())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"my-skill","description":"does stuff"}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(arr.as_array().unwrap().iter().any(|c| c["kind"] == "skill" && c["id"] == "my-skill"),
+            "skill must appear in component list: {arr}");
+        // Delete
+        let (s2, _) = oneshot_req(st.clone(), Request::delete("/api/skills/my-skill")
+            .header("authorization", tok).body(Body::empty()).unwrap()).await;
+        assert_eq!(s2, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn plugins_add_rejects_bad_id() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        let (s, b) = oneshot_req(st, Request::post("/api/plugins")
+            .header("authorization", tok)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"a b"}"#)).unwrap()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(b["error"].as_str().is_some());
     }
 }
