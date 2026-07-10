@@ -39,6 +39,10 @@ pub struct SpawnOptions {
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
     pub permission_mode: Option<String>,    // SDK permissionMode
+    /// Tier-1 harness rules appended to Claude Code's system prompt (via `--append-system-prompt`).
+    /// Set ONLY on the main session turn (see `EngineInner::spawn_opts`); worker spawns leave it
+    /// `None` so a delegate worker never carries the orchestrator-only routing / fan-out rules.
+    pub append_system_prompt: Option<String>,
 }
 
 pub const POLL_MS: u64 = 120;
@@ -95,6 +99,7 @@ pub fn build_spec(opts: &SpawnOptions) -> RunSpec {
         forced_on_plugins: opts.forced_on_plugins.clone(),
         forced_on_skills: opts.forced_on_skills.clone(),
         forced_on_mcp_servers: opts.forced_on_mcp_servers.clone(),
+        append_system_prompt: opts.append_system_prompt.clone(),
     }
 }
 

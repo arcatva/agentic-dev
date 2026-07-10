@@ -212,6 +212,10 @@ impl Runner for SdkRunner {
         if let Some(md) = spec.mode.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_MODE", md); }
         if let Some(e) = spec.effort.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_EFFORT", e); }
         if let Some(p) = spec.permission_mode.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_PERMISSION_MODE", p); }
+        // Tier-1 harness rules (routing + fan-out discipline) → appended to Claude Code's system prompt
+        // in the bridge. Set only on main session turns; worker specs leave this None, so a delegate
+        // worker never carries the orchestrator-only rules.
+        if let Some(sp) = spec.append_system_prompt.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_APPEND_SYSTEM_PROMPT", sp); }
         let hidden_skills: Vec<&str> = spec
             .hidden_skills
             .iter()
@@ -473,6 +477,7 @@ mod tests {
             env,
             log_path: log.clone(),
             model: Some("opus".into()),
+            append_system_prompt: Some("HARNESS_MARKER".into()),
             ..Default::default()
         };
         let h = runner.start(spec);
@@ -494,6 +499,7 @@ mod tests {
         assert!(logged.contains("\"subtype\":\"init\"") && logged.contains("\"subtype\":\"success\""), "bridge wrote the turn to the log: {logged}");
         assert!(recorded.contains("SDK_BRIDGE_LOG="), "log env wired: {recorded}");
         assert!(recorded.contains("SDK_BRIDGE_MODEL=opus"), "model wired: {recorded}");
+        assert!(recorded.contains("SDK_BRIDGE_APPEND_SYSTEM_PROMPT=HARNESS_MARKER"), "append-system-prompt wired: {recorded}");
         assert!(recorded.contains("STDIN:") && recorded.contains("\"content\":\"hi\""), "the user turn reached the bridge over stdin: {recorded}");
         h.stop();
         // Generous deadline: on loaded CI runners the process-group kill + reaper-thread update

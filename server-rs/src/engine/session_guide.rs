@@ -68,39 +68,45 @@ pub fn write_session_guide(session_dir: &Path, repo_worktrees: &[(String, PathBu
     let _ = std::fs::write(session_dir.join("CLAUDE.md"), build_session_guide(&repos, skills));
 }
 
-/// The model-routing rule, written into every session's CLAUDE.md (loaded as project memory) so the
-/// agent always routes fan-out through `delegate` — which picks the cheapest capable model across the
-/// registered providers + the native Claude tiers — instead of defaulting to the strongest model or an
-/// unrouted Workflow.
-pub const ROUTING_GUIDE: &str = "## Model routing — always route fan-out through `delegate`\n\
-\n\
-You have a `delegate` tool that routes each subtask to the **cheapest capable model** across the \
-registered providers **and** the native Claude tiers (opus/sonnet/haiku), running them in parallel as \
-separate workers.\n\
-\n\
-**Rule:** for ANY parallel work, subagent fan-out, or \"spawn N agents\" task, use `delegate` — it \
-cost-routes per subtask. **Do NOT set the `model` field on any task** — leave it UNSET so `delegate` \
-auto-routes each task to the cheapest capable model (your registered providers + the Claude tiers). \
-Setting `model` (e.g. \"sonnet\") PINS that task and BYPASSES routing entirely — never hand-pick a \
-model unless the user explicitly names one.\n\
-\n\
-**Do NOT use the `Workflow` tool to fan out parallel agents.** A Workflow's agents run in-process on \
-the MAIN model and CANNOT be cost-routed — nothing can intercept them. `delegate` is the routed \
-equivalent: it runs each task as a SEPARATE worker process routed to the cheapest capable model, and \
-it takes a `title` + per-task `phase`, so you get the SAME titled, phased workflow card. Even when the \
-user says \"create a Workflow\" or \"spawn N agents\" for parallel work, use `delegate` for the actual \
-fan-out. Reserve the `Workflow` tool ONLY for genuinely deterministic multi-stage scripting \
-(loops / conditionals / pipelines across rounds) that a single `delegate` batch can't express — and \
-those agents will run UNROUTED on the main model. Native `Agent`/`Task` subagents are likewise unrouted.\n\
-\n\
-When you call `delegate`, pass a short `title` naming the batch (it becomes the workflow card title) \
-and, for multi-stage fan-out, a `phase` label per task — they render as the run's title and phase \
-headers in the workflow tab, just like a native Workflow.\n\
-\n\
-**Keep each task's `prompt` compact.** Say what to investigate and give the repo path — then let the \
-worker read the files itself. Do NOT inline file contents or long absolute-path dumps, and prefer \
-forward slashes. A large, escape-heavy payload makes the model more likely to emit the `delegate` \
-call as malformed JSON, which is rejected and costs a wasted retry turn.";
+/// Tier-1 "harness operating rules" — the model-routing rule. Injected into the MAIN session as an
+/// APPENDED system prompt (never a replace), NOT written into the session CLAUDE.md. Orchestrator-only:
+/// workers are denied `delegate`/`Workflow`/`Task`/`Agent` (they never fan out) and the router/title
+/// one-shots never reach the main query, so none of them should carry these rules; and a repo's own
+/// CLAUDE.md must not be able to override "use delegate", which is why this is a system prompt, not
+/// project memory. Split from the old combined guide: this const is *which model* (routing);
+/// [`FANOUT_GUIDE`] is *how to structure a fan-out*. [`harness_rules`] concatenates the two and the
+/// caller sets the result on the main spawn's `SpawnOptions.append_system_prompt`.
+pub const ROUTING_GUIDE: &str = r#"## Model routing — always route fan-out through `delegate`
+
+You have a `delegate` tool that routes each subtask to the **cheapest capable model** across the registered providers **and** the native Claude tiers (opus/sonnet/haiku), running them in parallel as separate workers.
+
+**Rule:** for ANY parallel work, subagent fan-out, or "spawn N agents" task, use `delegate` — it cost-routes per subtask. **Do NOT set the `model` field on any task** — leave it UNSET so `delegate` auto-routes each task to the cheapest capable model (your registered providers + the Claude tiers). Setting `model` (e.g. "sonnet") PINS that task and BYPASSES routing entirely — never hand-pick a model unless the user explicitly names one.
+
+**Do NOT use the `Workflow` tool to fan out parallel agents.** A Workflow's agents run in-process on the MAIN model and CANNOT be cost-routed — nothing can intercept them. `delegate` is the routed equivalent: it runs each task as a SEPARATE worker process routed to the cheapest capable model. Even when the user says "create a Workflow" or "spawn N agents" for parallel work, use `delegate` for the actual fan-out. Reserve the `Workflow` tool ONLY for genuinely deterministic multi-stage scripting (loops / conditionals / pipelines across rounds) that a single `delegate` batch can't express — and those agents will run UNROUTED on the main model. Native `Agent`/`Task` subagents are likewise unrouted."#;
+
+/// Tier-1 fan-out mechanics + discipline (see [`ROUTING_GUIDE`] for the tier contract — same
+/// injection, same audience). Split out of the old routing guide so "which model" (routing) and "how
+/// to structure a fan-out" (this) are separate single-responsibility sections.
+pub const FANOUT_GUIDE: &str = r#"## Fan-out discipline — how to structure a `delegate` batch
+
+When you fan out with `delegate`:
+
+**Pass a `title` and per-task `phase`.** The `title` names the batch (it becomes the workflow card title); a `phase` label per task groups workers under phase headers — the same titled, phased card a native Workflow renders.
+
+**Keep each task's `prompt` compact.** Say what to do and give the repo path — then let the worker read the files itself. Do NOT inline file contents or long absolute-path dumps, and prefer forward slashes. A large, escape-heavy payload makes the model more likely to emit the `delegate` call as malformed JSON, which is rejected and costs a wasted retry turn.
+
+**Cut non-overlapping boundaries first.** The top failure mode of a large fan-out is workers duplicating each other's work. Before you fan out, split the work into disjoint slices (by file / subsystem / search-angle) and state what each worker owns.
+
+**Parallelize only genuinely independent work.** Tasks that share state, are tightly coupled, or have a sequential dependency belong in ONE worker (or your own thread) — splitting them across workers produces conflicting patches and lost context. Independent = no shared state, no ordering requirement.
+
+**Verify consequential fan-out output before acting on it.** Cheap routed workers are fast but can be wrong. For any finding you will commit, merge, or report, add a verify phase: a second `delegate` pass whose workers try to REFUTE each finding from distinct angles (logic, edge cases, security); drop what a refuter kills. Skip this only for throwaway exploratory reads."#;
+
+/// The Tier-1 harness system prompt: routing rules + fan-out discipline, joined. Set on the MAIN
+/// session spawn's `SpawnOptions.append_system_prompt` (appended to Claude Code's base prompt); NOT
+/// written into any CLAUDE.md, so delegate workers and the router never load it.
+pub fn harness_rules() -> String {
+    format!("{ROUTING_GUIDE}\n\n{FANOUT_GUIDE}")
+}
 
 /// Build-environment guidance, written into every session's CLAUDE.md next to ROUTING_GUIDE.
 /// A session worktree has the tracked source but none of the machine-local, gitignored build
@@ -250,11 +256,28 @@ mod tests {
         // The const carries its heading and the actionable verbs.
         assert!(WORKTREE_SETUP_GUIDE.contains("## Build environment — inherit it from the main checkout"));
         assert!(WORKTREE_SETUP_GUIDE.contains("symlink the pieces the build needs"));
-        // It composes into the written session CLAUDE.md alongside the routing guide.
+        // Tier-2 CLAUDE.md carries the build-env guide, NOT the routing guide (which moved to the
+        // Tier-1 append-system-prompt via `harness_rules`).
         let sess = tmp();
-        write_session_claude_md(&sess, &[ROUTING_GUIDE.to_string(), WORKTREE_SETUP_GUIDE.to_string()]);
+        write_session_claude_md(&sess, &[WORKTREE_SETUP_GUIDE.to_string()]);
         let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
         assert!(content.contains("Build environment — inherit it from the main checkout"));
         assert!(content.contains("Do NOT link build OUTPUT"));
+        assert!(!content.contains("Model routing"), "routing guide must NOT be in the session CLAUDE.md");
+    }
+
+    #[test]
+    fn harness_rules_hold_routing_and_fan_out_but_not_build_env() {
+        let rules = harness_rules();
+        // Tier-1 = routing + fan-out discipline, concatenated.
+        assert!(rules.contains("## Model routing — always route fan-out through `delegate`"));
+        assert!(rules.contains("## Fan-out discipline"));
+        // The split is clean: routing is "which model"; fan-out discipline is "how to structure it".
+        assert!(ROUTING_GUIDE.contains("Do NOT set the `model` field"));
+        assert!(!ROUTING_GUIDE.contains("Cut non-overlapping boundaries"));
+        assert!(FANOUT_GUIDE.contains("Cut non-overlapping boundaries first"));
+        assert!(FANOUT_GUIDE.contains("Verify consequential fan-out output"));
+        // Tier-1 must NOT carry the build-env guide (that's Tier-2 CLAUDE.md).
+        assert!(!rules.contains("Build environment — inherit it from the main checkout"));
     }
 }

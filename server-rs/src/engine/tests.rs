@@ -2169,6 +2169,9 @@ mod fork_session {
             .expect("forked session must get an injected CLAUDE.md");
         assert!(fork_md.contains("## Build environment — inherit it from the main checkout"),
             "fork_session must inject the worktree build-env guide");
+        // Same Tier-1 exclusion as submit_session: routing/fan-out live in the appended system prompt.
+        assert!(!fork_md.contains("Model routing") && !fork_md.contains("Fan-out discipline"),
+            "routing/fan-out guide must NOT be in the forked session CLAUDE.md");
 
         // No claude process was spawned — there is no RunningTurn with the new id.
         let list = e.list().await;
@@ -2574,6 +2577,11 @@ mod fork_session {
         // injected on every session (single-repo too), not just hand-built in a unit test.
         assert!(body.contains("## Build environment — inherit it from the main checkout"),
             "submit_session must inject the worktree build-env guide");
+        // The routing / fan-out rules are Tier-1 (appended to the main turn's system prompt), NOT
+        // project memory — assert at the real engine assembly site that they're gone from CLAUDE.md,
+        // so a regression that re-adds them to the `sections` vec is caught.
+        assert!(!body.contains("Model routing") && !body.contains("Fan-out discipline"),
+            "routing/fan-out guide must NOT be in the session CLAUDE.md (it's the appended system prompt)");
     }
 
     /// Multi-repo + custom CLAUDE.md combines both into one file, separated by a horizontal rule:

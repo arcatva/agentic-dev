@@ -36,6 +36,9 @@ pub struct RunSpec {
     pub forced_on_skills: Vec<String>,
     /// MCP server names forced ON (stored; no-op at spawn until global MCP disable exists).
     pub forced_on_mcp_servers: Vec<String>,
+    /// Tier-1 harness rules appended to Claude Code's system prompt via `--append-system-prompt`
+    /// (SdkRunner forwards it as `SDK_BRIDGE_APPEND_SYSTEM_PROMPT`). Set on main session turns only.
+    pub append_system_prompt: Option<String>,
 }
 
 /// A started turn. Liveness + exit are polled. Optional methods default to no-ops.
