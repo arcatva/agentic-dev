@@ -63,22 +63,32 @@ pub(crate) fn iso_to_ms(ts: &str) -> i64 {
 }
 
 /// Extract plain user text from a native `user` line's `message.content`.
-/// Returns `None` for tool-result-only / meta / sidechain / non-user lines.
+/// Returns `None` for tool-result-only / meta / sidechain / slash-command-wrapper / non-user lines.
 pub fn user_prompt_text(line: &serde_json::Value) -> Option<String> {
     if line.get("type").and_then(|v| v.as_str()) != Some("user") { return None; }
     for flag in ["isMeta", "isSidechain", "isCompactSummary"] {
         if line.get(flag).and_then(|v| v.as_bool()) == Some(true) { return None; }
     }
     let content = line.pointer("/message/content")?;
-    if let Some(s) = content.as_str() {
-        return if s.trim().is_empty() { None } else { Some(s.to_string()) };
+    let text = if let Some(s) = content.as_str() {
+        s.to_string()
+    } else {
+        content.as_array()?.iter()
+            .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>().join("\n")
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() { return None; }
+    // Claude Code slash-command transcripts (/model, /exit, /clear, …) log the command as a user
+    // message wrapped in these markers — an artifact, not a real prompt to adopt or render.
+    if trimmed.starts_with("<local-command-caveat>")
+        || trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+    {
+        return None;
     }
-    let arr = content.as_array()?;
-    let text: String = arr.iter()
-        .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
-        .collect::<Vec<_>>().join("\n");
-    if text.trim().is_empty() { None } else { Some(text) }
+    Some(text)
 }
 
 /// Read a JSONL transcript into a Vec<Value>; bad lines are skipped, missing file = empty.
@@ -133,6 +143,11 @@ pub fn scan_adoptable(
                 continue;
             }
             let first_prompt = lines.iter().find_map(|l| user_prompt_text(l)).unwrap_or_default();
+            // No real user-authored prompt (aborted/empty session, or a transcript made up only of
+            // slash-command artifacts / tool results): nothing conversational to adopt.
+            if first_prompt.trim().is_empty() {
+                continue;
+            }
             let resumable = super::resume_gate::transcript_is_resumable(&p);
             let mtime_ms = f.metadata().ok()
                 .and_then(|m| m.modified().ok())
@@ -244,6 +259,30 @@ mod tests {
         assert_eq!(got[0].cwd, "/home/me/proj");
         assert_eq!(got[0].first_prompt, "hello");
         assert!(got[0].resumable);
+    }
+
+    #[test]
+    fn scan_skips_slash_command_and_empty_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects").join("-home-me");
+        std::fs::create_dir_all(&projects).unwrap();
+        // A real external session -> kept.
+        std::fs::write(projects.join("real.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":\"why is my disk not showing\"}}\n").unwrap();
+        // Slash-command transcript (/model): a meta caveat + a command-name wrapper, no real
+        // user prompt -> skipped.
+        std::fs::write(projects.join("cmd.jsonl"),
+            "{\"type\":\"user\",\"isMeta\":true,\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-caveat>x</local-command-caveat>\"}}\n\
+             {\"type\":\"user\",\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/model</command-name>\\n<command-message>model</command-message>\"}}\n").unwrap();
+        // No user-authored text at all (assistant-only) -> skipped.
+        std::fs::write(projects.join("empty.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n").unwrap();
+
+        let known = std::collections::HashSet::new();
+        let got = scan_adoptable(tmp.path(), &known, std::path::Path::new("/nonexistent-wt-root"));
+        assert_eq!(got.len(), 1, "only the real external session survives (command + empty skipped)");
+        assert_eq!(got[0].session_id, "real");
+        assert_eq!(got[0].first_prompt, "why is my disk not showing");
     }
 
     #[test]
