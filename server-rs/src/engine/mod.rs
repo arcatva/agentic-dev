@@ -1051,16 +1051,18 @@ impl Engine {
             (session_dir, base_shas, wts)
         };
 
-        // Session-dir CLAUDE.md. Claude Code loads it as project memory for the session — directly
-        // (multi-repo / no-repo cwd IS the session dir) or via parent-dir traversal (single-repo cwd
-        // is `session_dir/<repo>`). It layers ON TOP of each repo's own committed CLAUDE.md. We
-        // compose the one file from up to two optional sections, in order:
-        //   1. the multi-repo orientation guide (only when there's more than one worktree), and
-        //   2. the user's session-scoped custom guidance from the New-request form.
+        // Session-dir CLAUDE.md (Tier-2 project memory). Claude Code loads it for the session —
+        // directly (multi-repo / no-repo cwd IS the session dir) or via parent-dir traversal
+        // (single-repo cwd is `session_dir/<repo>`). It layers ON TOP of each repo's own committed
+        // CLAUDE.md. Composed in order:
+        //   1. the build-env guide (always),
+        //   2. the multi-repo orientation guide (only when there's more than one worktree), and
+        //   3. the user's session-scoped custom guidance from the New-request form.
+        // The routing / fan-out rules are Tier-1 — appended to the system prompt on each main turn
+        // (see `spawn_opts`), NOT written here, so delegate workers / the router never load them.
         // Best-effort — a write failure must never abort the session.
         {
             let mut sections: Vec<String> = vec![
-                crate::engine::session_guide::ROUTING_GUIDE.to_string(),
                 crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
             ];
             if wts.len() > 1 {
@@ -1642,10 +1644,10 @@ impl Engine {
         let base_shas_db: std::collections::HashMap<String, Option<String>> = wts
             .iter().map(|w| (w.repo.clone(), Some(w.base_sha.clone()))).collect();
 
-        // Session CLAUDE.md: the routing rule (always) + multi-repo orientation (when >1 worktree).
+        // Session CLAUDE.md (Tier-2): build-env guide (always) + multi-repo orientation (when >1
+        // worktree) + custom guidance. Routing / fan-out are Tier-1 (system prompt), not written here.
         {
             let mut sections = vec![
-                crate::engine::session_guide::ROUTING_GUIDE.to_string(),
                 crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
             ];
             if wts.len() > 1 {
@@ -2365,6 +2367,10 @@ The new session is now active. Awaiting the user's next message.",
             memory_high: self.0.cfg.memory_high.clone(),
             cpu_quota: self.0.cfg.cpu_quota.clone(),
             tasks_max: self.0.cfg.tasks_max.clone(),
+            // Tier-1 harness rules (routing + fan-out discipline) appended to the system prompt on
+            // EVERY main turn. NOT in the session CLAUDE.md — so delegate workers / the router (which
+            // build their own SpawnOptions with `..Default::default()` → None) never carry them.
+            append_system_prompt: Some(crate::engine::session_guide::harness_rules()),
         }
     }
 

@@ -343,6 +343,15 @@ if (oneShotMode === "title" || oneShotMode === "retitle") {
   return;
 }
 
+// ── Tier-1 harness rules → appended system prompt (main session only) ──
+// The engine sets SDK_BRIDGE_APPEND_SYSTEM_PROMPT to the routing + fan-out discipline on the MAIN
+// turn only (worker SpawnOptions leave it unset, so this env is absent for a worker). APPEND — never
+// replace — so Claude Code's base prompt + tool instructions stay intact. The `!isWorker` check is a
+// belt-and-suspenders guard on top of that. Rides the same extraArgs → claude-CLI path
+// (`--append-system-prompt`) as permission-mode / effort / settings.
+const appendSystemPrompt = process.env.SDK_BRIDGE_APPEND_SYSTEM_PROMPT || "";
+if (!isWorker && appendSystemPrompt.trim()) extraArgs["append-system-prompt"] = appendSystemPrompt;
+
 // ── prefer `delegate` over the native `Workflow` tool ──
 // A Workflow's agents run in-process on the MAIN model and can't be cost-routed; `delegate` is the
 // routed equivalent. Nudge the agent there: DENY the first Workflow call (steering it to delegate),
