@@ -1,0 +1,38 @@
+# cargo-deny 供应链门禁配置。
+# 合并门禁只跑 licenses + bans + sources（见 .github/workflows/ci.yml 的 lint job）。
+# advisories 放独立 non-blocking job——新 RustSec 公告不应无差别拦住无关 PR（见 spec §4.1）。
+
+[graph]
+all-features = true
+
+[licenses]
+# 覆盖依赖树里出现的所有许可（用 cargo metadata 枚举后校验）。OR 表达式择一允许即可，
+# AND 表达式需各部分都在此列表。工作区 crate 的许可已在 Cargo.toml 声明为 MIT。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[advisories]
+# 仅在独立 non-blocking job 检查；此处保留有效配置。
+yanked = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
