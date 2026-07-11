@@ -15,7 +15,7 @@ Read this before deep work; keep `CLAUDE.md` for the short always-on rules.
   restarts) was removed — see `docs/streaming-only-refactor.md`. (Consequence: the Feature #6 cgroup caps
   `MemoryMax`/`CPUQuota`/etc. were only enforced by the systemd runner, so they are no longer applied.)
 - **Runner = the official Agent SDK via a Node bridge.** The Rust `SdkRunner` spawns
-  `server-rs/sdk-bridge.mjs` per turn; the bridge drives claude through
+  `server-rs/sdk-bridge/sdk-bridge.mjs` per turn; the bridge drives claude through
   `@anthropic-ai/claude-agent-sdk`, not the raw `claude -p` CLI. The SDK is the *harness* side of
   claude's stream-json control protocol — it does the `initialize` handshake and answers
   `can_use_tool`. That is what makes **AskUserQuestion actually wait** for the user (see stream-quirks

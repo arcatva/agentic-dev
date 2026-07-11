@@ -13,7 +13,7 @@ project notes there (or `docs/`), not to global `~/.claude` memory.
   worktree, spawner, runner, repos, engine (pool/subscribe/kill). Unit-tested in-crate.
 - `server-rs/src/api/` — axum routes + WS stream + HMAC token auth + config. This is the whole
   surface the Android client talks to; there is no server-rendered UI.
-- `server-rs/sdk-bridge.mjs` — the only Node code: the per-turn claude transport (Agent SDK),
+- `server-rs/sdk-bridge/sdk-bridge.mjs` — the only Node code: the per-turn claude transport (Agent SDK),
   spawned by the Rust runner so AskUserQuestion can pause in-turn.
 
 ## Rules
@@ -23,7 +23,7 @@ project notes there (or `docs/`), not to global `~/.claude` memory.
   invoked via `bash` instead of `node sdk-bridge.mjs`. The fake bridge appends canned stream-json to
   `$SDK_BRIDGE_LOG` (SdkRunner sends the bridge's stdout to /dev/null) — no node, no API cost.
 - Engine (`server-rs/src/engine/`) stays free of axum imports (keep it unit-testable in isolation).
-- Driver invariant (SDK bridge ONLY): the per-turn transport is `server-rs/sdk-bridge.mjs`, spawned by
+- Driver invariant (SDK bridge ONLY): the per-turn transport is `server-rs/sdk-bridge/sdk-bridge.mjs`, spawned by
   `runner::SdkRunner`, in BOTH production and tests — there is no raw-`claude`-CLI runner anymore (the
   old `LocalRunner` / `build_spec` argv / `fake-claude.sh` harness was removed). Production injects an
   SdkRunner pointed at the real bridge (`main.rs`); tests inject one pointed at a `fake-sdk-bridge-*.sh`
