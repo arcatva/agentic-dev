@@ -79,6 +79,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/repos", get(misc::repos_route))
         .route("/api/skills", get(misc::skills_route).post(misc::skills_add_route))
         .route("/api/skills/catalog", get(misc::skills_catalog_route))
+        .route("/api/skills/sources", get(misc::skills_sources_route).post(misc::skills_sources_add_route).delete(misc::skills_sources_delete_route))
         .route("/api/skills/install", post(misc::skills_install_route))
         .route("/api/skills/{name}", delete(misc::skills_delete_route))
         .route("/api/plugins", get(misc::plugins_route).post(misc::plugins_add_route))

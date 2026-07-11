@@ -13,9 +13,10 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Curated catalog repo (the "store" front page): every directory containing a SKILL.md.
-pub const CATALOG_OWNER: &str = "anthropics";
-pub const CATALOG_REPO: &str = "skills";
+/// The default store source, seeded when no sources file exists yet.
+pub const DEFAULT_SOURCE: &str = "anthropics/skills";
+/// Store sources live in `<config_base>/skill-sources.json` as `{"sources": ["owner/repo", …]}`.
+const SOURCES_FILE: &str = "skill-sources.json";
 
 /// Caps — a skill is a text bundle, not a software distribution.
 const MAX_FILES: usize = 40;
@@ -32,6 +33,9 @@ pub struct CatalogEntry {
     pub description: String,
     /// Ready-to-install source reference ("owner/repo/path") — POST it back to install.
     pub source: String,
+    /// The store source (as configured) this entry came from — for display/grouping.
+    #[serde(rename = "sourceRepo")]
+    pub source_repo: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -260,14 +264,20 @@ fn normalize_skill_md(bytes: &[u8], dir_name: &str) -> Vec<u8> {
 
 /// Write downloaded skill files under `<skills_dir>/<name>/…`, atomically: everything goes
 /// into a temp sibling dir first, then one rename publishes the skill. Refuses if the skill
-/// already exists. Pure filesystem — no network.
+/// already exists — unless `replace` (update): then the old dir is swapped out and restored
+/// on failure. Pure filesystem — no network.
 /// `files` = (skill-relative path, bytes, executable).
-pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8>, bool)]) -> io::Result<()> {
+pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8>, bool)], replace: bool) -> io::Result<()> {
     if !valid_name(name) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("invalid skill name '{name}'")));
     }
+    // Serialize the publish phase across concurrent installs/updates: without this, an update
+    // racing another update (or a delete) of the SAME name could park the other call's freshly
+    // published dir. Installs are rare and fast — one process-wide lock is fine.
+    static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let target = skills_dir.join(name);
-    if target.exists() {
+    if target.exists() && !replace {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("skill '{name}' already exists")));
     }
     // Unique per call (pid + atomic counter) so concurrent installs of the same skill name
@@ -305,7 +315,24 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
             #[cfg(not(unix))]
             let _ = executable;
         }
-        std::fs::rename(&tmp, &target)
+        if replace && target.exists() {
+            // Update: park the old version, publish the new one, then drop the old. If the
+            // publish rename fails the old version is restored — never left half-updated.
+            let old = skills_dir.join(format!(".old-{}-{}-{}", name, std::process::id(), nonce));
+            std::fs::rename(&target, &old)?;
+            match std::fs::rename(&tmp, &target) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&old);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = std::fs::rename(&old, &target); // restore
+                    Err(e)
+                }
+            }
+        } else {
+            std::fs::rename(&tmp, &target)
+        }
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&tmp); // best-effort cleanup; the skill dir never appeared
@@ -399,8 +426,9 @@ async fn resolve_commit_sha(client: &reqwest::Client, gh: &GithubRef) -> Result<
     Ok(sha.to_string())
 }
 
-/// Install a skill from a user-supplied source. Returns the installed skill's name.
-pub async fn install_from_source(skills_dir: &Path, source: &str) -> Result<String, String> {
+/// Install a skill from a user-supplied source. `update` replaces an existing install
+/// (atomically, restoring the old version if the swap fails). Returns the skill's name.
+pub async fn install_from_source(skills_dir: &Path, source: &str, update: bool) -> Result<String, String> {
     let candidates = parse_github_source(source)?;
     let client = http_client()?;
     // Resolve the first branch/path candidate whose ref actually exists (URL branch names may
@@ -421,8 +449,8 @@ pub async fn install_from_source(skills_dir: &Path, source: &str) -> Result<Stri
     let Some(gh) = gh else { return Err(last_err) };
     let tree = fetch_tree(&client, &gh).await?;
     let plan = plan_from_tree(&tree, &gh)?;
-    // Refuse early (before any downloads) if the name is taken.
-    if skills_dir.join(&plan.name).exists() {
+    // Refuse early (before any downloads) if the name is taken and this isn't an update.
+    if !update && skills_dir.join(&plan.name).exists() {
         return Err(format!("skill '{}' already exists", plan.name));
     }
     let mut files = Vec::with_capacity(plan.files.len());
@@ -430,60 +458,210 @@ pub async fn install_from_source(skills_dir: &Path, source: &str) -> Result<Stri
         let bytes = fetch_raw(&client, &raw_url(&gh, &f.repo_path), MAX_FILE_BYTES).await?;
         files.push((f.rel_path.clone(), bytes, f.executable));
     }
-    write_skill_files(skills_dir, &plan.name, &files).map_err(|e| e.to_string())?;
+    write_skill_files(skills_dir, &plan.name, &files, update).map_err(|e| e.to_string())?;
     Ok(plan.name)
 }
 
-/// In-process catalog cache: (fetched-at, entries).
-static CATALOG_CACHE: std::sync::Mutex<Option<(Instant, Vec<CatalogEntry>)>> = std::sync::Mutex::new(None);
+// ── Store sources (skill-sources.json) ──────────────────────────────────────
 
-/// The curated skill catalog: every directory of `anthropics/skills` that contains a SKILL.md,
-/// with the description pulled from each SKILL.md's frontmatter. Cached for [CATALOG_TTL].
-pub async fn fetch_catalog() -> Result<Vec<CatalogEntry>, String> {
-    if let Some((at, entries)) = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        if at.elapsed() < CATALOG_TTL {
-            return Ok(entries);
+/// Serializes source-file writes within this process (same trade-off as global_settings).
+static SOURCES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read the configured store sources (best-effort READ path). Missing/corrupt file → the
+/// seeded default; writes go through [read_sources_for_write], which refuses to clobber a
+/// corrupt file (mirrors settings.local.json handling).
+pub fn read_sources(config_base: &Path) -> Vec<String> {
+    match read_sources_for_write(config_base) {
+        Ok(Some(sources)) => sources,
+        _ => vec![DEFAULT_SOURCE.to_string()],
+    }
+}
+
+/// Read for a WRITE: `Ok(None)` = missing (treat as the seeded default), `Err` = corrupt —
+/// a mutation must NOT proceed, or the user's stored list would be silently replaced.
+fn read_sources_for_write(config_base: &Path) -> io::Result<Option<Vec<String>>> {
+    let path = config_base.join(SOURCES_FILE);
+    match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("sources").and_then(|s| s.as_array()).map(|a| {
+                a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect::<Vec<_>>()
+            }))
+            .map(Some)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "skill-sources.json is corrupt")),
+    }
+}
+
+fn write_sources(config_base: &Path, sources: &[String]) -> io::Result<()> {
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "sources": sources }))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    std::fs::create_dir_all(config_base)?;
+    crate::engine::atomic_write::write_file_atomic(&config_base.join(SOURCES_FILE), &content)
+}
+
+/// Canonical identity of a source: the FIRST parse candidate. Dedupes spelling variants
+/// ("owner/repo", "owner/repo/", "https://github.com/owner/repo") that scan the same repo.
+fn source_key(src: &str) -> Option<GithubRef> {
+    parse_github_source(src).ok()?.into_iter().next()
+}
+
+/// Drop a source's cached scan so mutations take effect immediately (and removed sources
+/// don't linger in memory).
+fn invalidate_source_cache(source: &str) {
+    if let Some(m) = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        m.remove(source);
+    }
+}
+
+/// Add a store source (validated by [parse_github_source]; deduplicated by canonical
+/// identity, not raw spelling). Returns the new list.
+pub fn add_source(config_base: &Path, source: &str) -> Result<Vec<String>, String> {
+    let source = source.trim().trim_end_matches('/');
+    let key = source_key(source).ok_or_else(|| "invalid source".to_string())?;
+    let _guard = SOURCES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sources = read_sources_for_write(config_base)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| vec![DEFAULT_SOURCE.to_string()]);
+    if !sources.iter().any(|s| source_key(s).as_ref() == Some(&key)) {
+        sources.push(source.to_string());
+        write_sources(config_base, &sources).map_err(|e| e.to_string())?;
+        invalidate_source_cache(source);
+    }
+    Ok(sources)
+}
+
+/// Remove a store source. Returns (new list, found). Removing the last source is allowed —
+/// the store is simply empty then (the default is only seeded while NO file exists).
+pub fn remove_source(config_base: &Path, source: &str) -> Result<(Vec<String>, bool), String> {
+    let source = source.trim().trim_end_matches('/');
+    let _guard = SOURCES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sources = read_sources_for_write(config_base)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| vec![DEFAULT_SOURCE.to_string()]);
+    let before = sources.len();
+    sources.retain(|s| s != source);
+    let found = sources.len() != before;
+    if found {
+        write_sources(config_base, &sources).map_err(|e| e.to_string())?;
+        invalidate_source_cache(source);
+    }
+    Ok((sources, found))
+}
+
+// ── Aggregated catalog ──────────────────────────────────────────────────────
+
+/// Per-source catalog cache: source string → (fetched-at, entries).
+static CATALOG_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (Instant, Vec<CatalogEntry>)>>> =
+    std::sync::Mutex::new(None);
+
+/// The aggregated skill catalog across every configured store source. One broken/unreachable
+/// source degrades to an entry in `errors` instead of failing the whole store. Per-source
+/// results are cached for [CATALOG_TTL]; `refresh` bypasses the cache.
+pub async fn fetch_catalog(config_base: &Path, refresh: bool) -> (Vec<CatalogEntry>, Vec<String>) {
+    let sources = read_sources(config_base);
+    let mut entries: Vec<CatalogEntry> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(e) => return (entries, vec![e]),
+    };
+    for src in sources {
+        if !refresh {
+            let cache = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, cached)) = cache.as_ref().and_then(|m| m.get(&src)) {
+                if at.elapsed() < CATALOG_TTL {
+                    entries.extend(cached.iter().cloned());
+                    continue;
+                }
+            }
+        }
+        match scan_source(&client, &src).await {
+            Ok(found) => {
+                CATALOG_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(Default::default)
+                    .insert(src.clone(), (Instant::now(), found.clone()));
+                entries.extend(found);
+            }
+            Err(e) => errors.push(format!("{src}: {e}")),
         }
     }
-    let gh = GithubRef {
-        owner: CATALOG_OWNER.into(),
-        repo: CATALOG_REPO.into(),
-        branch: "HEAD".into(),
-        path: String::new(),
-    };
-    let client = http_client()?;
-    let tree = fetch_tree(&client, &gh).await?;
-    let entries = tree.get("tree").and_then(|t| t.as_array()).ok_or("unexpected GitHub tree response")?;
-    // Every directory with a SKILL.md is a skill.
-    let mut dirs: Vec<String> = entries
+    entries.sort_by(|a, b| (a.name.as_str(), a.source_repo.as_str()).cmp(&(b.name.as_str(), b.source_repo.as_str())));
+    (entries, errors)
+}
+
+/// Scan ONE store source: every directory under it containing a SKILL.md (or the source path
+/// itself, when it points directly at a single skill), descriptions from each frontmatter.
+async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogEntry>, String> {
+    // Resolve the first branch/path candidate that exists, then pin to its commit so the
+    // listing and the description fetches read one snapshot.
+    let mut gh = None;
+    let mut last_err = String::from("unresolvable source");
+    for mut cand in parse_github_source(src)? {
+        match resolve_commit_sha(client, &cand).await {
+            Ok(sha) => {
+                cand.branch = sha;
+                gh = Some(cand);
+                break;
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    let Some(gh) = gh else { return Err(last_err) };
+    let tree = fetch_tree(client, &gh).await?;
+    let tree_entries = tree.get("tree").and_then(|t| t.as_array()).ok_or("unexpected GitHub tree response")?;
+    let prefix = if gh.path.is_empty() { String::new() } else { format!("{}/", gh.path) };
+    let mut dirs: Vec<String> = tree_entries
         .iter()
         .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("blob"))
         .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
-        .filter_map(|p| p.strip_suffix("/SKILL.md").map(str::to_string))
+        .filter_map(|p| {
+            let rel = p.strip_prefix(&prefix)?;
+            // SKILL.md at the source path itself → the source IS one skill. This also covers
+            // a repo whose ROOT is the skill (empty prefix, rel == "SKILL.md" → dir == "").
+            if rel == "SKILL.md" {
+                return Some(gh.path.clone());
+            }
+            rel.strip_suffix("/SKILL.md").map(|d| format!("{prefix}{d}"))
+        })
         .collect();
     dirs.sort();
+    dirs.dedup();
     // Pull each SKILL.md's description (bounded concurrency).
     let mut out = Vec::with_capacity(dirs.len());
     for chunk in dirs.chunks(8) {
         let fetches = chunk.iter().map(|dir| {
             let client = &client;
             let gh = &gh;
+            let src = src;
             async move {
-                let text = fetch_raw(client, &raw_url(gh, &format!("{dir}/SKILL.md")), 64 * 1024)
+                let md_path = if dir.is_empty() { "SKILL.md".to_string() } else { format!("{dir}/SKILL.md") };
+                let text = fetch_raw(client, &raw_url(gh, &md_path), 64 * 1024)
                     .await
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
-                let name = dir.rsplit('/').next().unwrap_or(dir).to_string();
+                let name = if dir.is_empty() {
+                    gh.repo.clone()
+                } else {
+                    dir.rsplit('/').next().unwrap_or(dir).to_string()
+                };
                 CatalogEntry {
                     name,
                     description: frontmatter_description(&text),
-                    source: format!("{CATALOG_OWNER}/{CATALOG_REPO}/{dir}"),
+                    source: if dir.is_empty() {
+                        format!("{}/{}", gh.owner, gh.repo)
+                    } else {
+                        format!("{}/{}/{}", gh.owner, gh.repo, dir)
+                    },
+                    source_repo: src.to_string(),
                 }
             }
         });
         out.extend(futures_util::future::join_all(fetches).await);
     }
-    *CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), out.clone()));
     Ok(out)
 }
 
@@ -580,15 +758,15 @@ mod tests {
             ("SKILL.md".to_string(), b"---\nname: x\n---\nbody".to_vec(), false),
             ("refs/a.md".to_string(), b"ref".to_vec(), false),
         ];
-        write_skill_files(&dir, "x", &files).unwrap();
+        write_skill_files(&dir, "x", &files, false).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("x/refs/a.md")).unwrap(), "ref");
         // Existing skill → AlreadyExists; nothing overwritten.
-        let err = write_skill_files(&dir, "x", &files).unwrap_err();
+        let err = write_skill_files(&dir, "x", &files, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         // Traversal in the name and in a rel path → refused.
-        assert!(write_skill_files(&dir, "..", &files).is_err());
+        assert!(write_skill_files(&dir, "..", &files, false).is_err());
         let bad = vec![("../escape.md".to_string(), b"x".to_vec(), false)];
-        let err = write_skill_files(&dir, "y", &bad).unwrap_err();
+        let err = write_skill_files(&dir, "y", &bad, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(!dir.join("y").exists(), "failed install must not leave a skill dir");
         assert!(!dir.parent().unwrap().join("escape.md").exists());
@@ -603,7 +781,7 @@ mod tests {
             ("SKILL.md".to_string(), b"---\nname: other-name\ndescription: d\n---\nbody\n".to_vec(), false),
             ("scripts/run.sh".to_string(), b"#!/bin/sh\n".to_vec(), true),
         ];
-        write_skill_files(&dir, "my-skill", &files).unwrap();
+        write_skill_files(&dir, "my-skill", &files, false).unwrap();
         let md = std::fs::read_to_string(dir.join("my-skill/SKILL.md")).unwrap();
         assert!(md.contains("name: my-skill"), "frontmatter name must be rewritten: {md}");
         assert!(md.contains("description: d"), "other frontmatter lines must survive");
@@ -617,6 +795,49 @@ mod tests {
             let mode = std::fs::metadata(dir.join("my-skill/scripts/run.sh")).unwrap().permissions().mode();
             assert_eq!(mode & 0o111, 0o111, "helper script must stay executable");
         }
+    }
+
+    #[test]
+    fn replace_swaps_existing_skill_and_missing_target_still_works() {
+        let dir = tmp();
+        let v1 = vec![("SKILL.md".to_string(), b"---\nname: x\n---\nv1".to_vec(), false)];
+        write_skill_files(&dir, "x", &v1, false).unwrap();
+        // Update: replace=true swaps in the new version.
+        let v2 = vec![
+            ("SKILL.md".to_string(), b"---\nname: x\n---\nv2".to_vec(), false),
+            ("refs/new.md".to_string(), b"n".to_vec(), false),
+        ];
+        write_skill_files(&dir, "x", &v2, true).unwrap();
+        assert!(std::fs::read_to_string(dir.join("x/SKILL.md")).unwrap().contains("v2"));
+        assert!(dir.join("x/refs/new.md").exists());
+        // No leftover parked .old-* dirs.
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
+        // replace=true with no existing target behaves like a fresh install.
+        write_skill_files(&dir, "fresh", &v1, true).unwrap();
+        assert!(dir.join("fresh/SKILL.md").exists());
+    }
+
+    #[test]
+    fn sources_crud_roundtrip() {
+        let dir = tmp();
+        // No file → seeded default.
+        assert_eq!(read_sources(&dir), vec![DEFAULT_SOURCE.to_string()]);
+        // Add: validates syntax, dedupes, persists.
+        let s = add_source(&dir, "owner/repo/skills").unwrap();
+        assert_eq!(s, vec![DEFAULT_SOURCE.to_string(), "owner/repo/skills".to_string()]);
+        assert_eq!(add_source(&dir, "owner/repo/skills").unwrap().len(), 2, "dedupe");
+        assert!(add_source(&dir, "not a source").is_err());
+        assert!(add_source(&dir, "owner/repo/pa?th").is_err());
+        // Remove: found flag; unknown → false.
+        let (s, found) = remove_source(&dir, "owner/repo/skills").unwrap();
+        assert!(found);
+        assert_eq!(s, vec![DEFAULT_SOURCE.to_string()]);
+        assert!(!remove_source(&dir, "never-added/repo").unwrap().1);
+        // Removing the default works too — an empty store is allowed once a file exists.
+        let (s, found) = remove_source(&dir, DEFAULT_SOURCE).unwrap();
+        assert!(found);
+        assert!(s.is_empty());
+        assert_eq!(read_sources(&dir), Vec::<String>::new());
     }
 
     #[test]

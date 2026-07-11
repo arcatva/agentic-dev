@@ -541,16 +541,71 @@ pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Byte
     }
 }
 
-/// GET /api/skills/catalog — the curated external skill store (anthropics/skills), cached.
-pub async fn skills_catalog_route() -> Response {
-    match crate::engine::skill_install::fetch_catalog().await {
-        Ok(skills) => Json(json!({ "skills": skills })).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response(),
+#[derive(serde::Deserialize, Default)]
+pub struct CatalogQuery {
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// GET /api/skills/catalog[?refresh=true] — the aggregated external skill store across every
+/// configured source. A broken source shows up in `errors` instead of failing the whole store.
+pub async fn skills_catalog_route(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<CatalogQuery>,
+) -> Response {
+    let (skills, errors) =
+        crate::engine::skill_install::fetch_catalog(&st.config.claude_config_base, q.refresh).await;
+    Json(json!({ "skills": skills, "errors": errors })).into_response()
+}
+
+/// GET /api/skills/sources — the configured store sources.
+pub async fn skills_sources_route(State(st): State<AppState>) -> Response {
+    Json(json!({ "sources": crate::engine::skill_install::read_sources(&st.config.claude_config_base) })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct SkillSourceBody { pub source: String }
+
+/// POST /api/skills/sources — add a store source (owner/repo[/path] or github.com URL).
+pub async fn skills_sources_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+    let b: SkillSourceBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+    };
+    // Caller-fault (bad syntax) → 400 up front; anything add_source itself fails on afterwards
+    // is a server-side write problem → 500 (consistent with the DELETE route).
+    if let Err(e) = crate::engine::skill_install::parse_github_source(&b.source) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    match crate::engine::skill_install::add_source(&st.config.claude_config_base, &b.source) {
+        Ok(sources) => Json(json!({ "sources": sources })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
 
 #[derive(serde::Deserialize)]
-pub struct InstallSkillBody { pub source: String }
+pub struct SkillSourceQuery { pub source: String }
+
+/// DELETE /api/skills/sources?source=… — remove a store source (query param: sources contain
+/// slashes, which a path segment would mangle).
+pub async fn skills_sources_delete_route(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SkillSourceQuery>,
+) -> Response {
+    match crate::engine::skill_install::remove_source(&st.config.claude_config_base, &q.source) {
+        Ok((sources, true)) => Json(json!({ "sources": sources })).into_response(),
+        Ok((_, false)) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("unknown source: {}", q.source)}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InstallSkillBody {
+    pub source: String,
+    /// true = update: replace an existing install of the same name (atomic swap).
+    #[serde(default)]
+    pub update: bool,
+}
 
 /// POST /api/skills/install — download a skill (SKILL.md + companion files) from a GitHub
 /// source (`owner/repo[/path]` or a github.com URL) into the skills dir.
@@ -565,7 +620,7 @@ pub async fn skills_install_route(State(st): State<AppState>, body: axum::body::
     }
     let skills = st.config.skills_dir.clone();
     let base = st.config.claude_config_base.clone();
-    match crate::engine::skill_install::install_from_source(&skills, &b.source).await {
+    match crate::engine::skill_install::install_from_source(&skills, &b.source, b.update).await {
         Ok(_name) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
         // Everything else mixes remote and local causes; BAD_GATEWAY for remote-ish messages
         // would be guesswork — a 400 with the human-readable reason serves the app either way.
