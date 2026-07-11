@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::Row;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// MCP server definition for per-session ad-hoc injection.
 /// Supports stdio (`command`+`args`+`env`) and http/sse (`url`+`type`+`headers`) transports.
@@ -11,20 +11,29 @@ use sqlx::Row;
 pub struct McpServerDef {
     pub name: String,
     // stdio transport:
-    #[serde(skip_serializing_if = "Option::is_none")] pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub args: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
     // http/sse transport:
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")] pub transport: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub headers: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum StoreError {
-    #[error("sqlite error: {0}")] Sqlx(#[from] sqlx::Error),
-    #[error("io error: {0}")] Io(#[from] std::io::Error),
-    #[error("json error: {0}")] Json(#[from] serde_json::Error),
+    #[error("sqlite error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Runtime-only activity counters attached to a Session by the engine's with_activity().
@@ -46,11 +55,13 @@ pub struct Session {
     pub skills: Vec<String>,
     /// Skills the user chose to HIDE from this session (blacklist). Mapped to claude
     /// `skillOverrides:{<name>:"off"}` in the `--settings` flag at spawn time.
-    #[serde(rename = "hiddenSkills", default)] pub hidden_skills: Vec<String>,
+    #[serde(rename = "hiddenSkills", default)]
+    pub hidden_skills: Vec<String>,
     /// Plugins (`<plugin>@<marketplace>` ids) the user chose to DISABLE for this session
     /// (blacklist). Mapped to claude `enabledPlugins:{<id>:false}` in the `--settings` flag
     /// at spawn time.
-    #[serde(rename = "hiddenPlugins", default)] pub hidden_plugins: Vec<String>,
+    #[serde(rename = "hiddenPlugins", default)]
+    pub hidden_plugins: Vec<String>,
     pub prompt: String,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -65,30 +76,46 @@ pub struct Session {
     /// leave this false so they can still be retitled. Column: `titlePinned`.
     #[serde(rename = "titlePinned", default)]
     pub title_pinned: bool,
-    #[serde(rename = "worktreePath")] pub worktree_path: Option<String>,
+    #[serde(rename = "worktreePath")]
+    pub worktree_path: Option<String>,
     pub branch: Option<String>,
-    #[serde(rename = "claudeSessionId")] pub claude_session_id: Option<String>,
+    #[serde(rename = "claudeSessionId")]
+    pub claude_session_id: Option<String>,
     pub status: String,
-    #[serde(rename = "costUsd")] pub cost_usd: Option<f64>,
-    #[serde(rename = "exitCode")] pub exit_code: Option<i64>,
+    #[serde(rename = "costUsd")]
+    pub cost_usd: Option<f64>,
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i64>,
     pub error: Option<String>,
-    #[serde(rename = "errorKind")] pub error_kind: Option<String>,
-    #[serde(rename = "createdAt")] pub created_at: i64,
-    #[serde(rename = "startedAt")] pub started_at: Option<i64>,
-    #[serde(rename = "endedAt")] pub ended_at: Option<i64>,
-    #[serde(rename = "lastUserMessageAt")] pub last_user_message_at: i64,
-    #[serde(rename = "baseSha")] pub base_sha: Option<String>,
-    #[serde(rename = "baseShas")] pub base_shas: std::collections::HashMap<String, Option<String>>,
-    #[serde(rename = "worktreeState")] pub worktree_state: String,
+    #[serde(rename = "errorKind")]
+    pub error_kind: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "startedAt")]
+    pub started_at: Option<i64>,
+    #[serde(rename = "endedAt")]
+    pub ended_at: Option<i64>,
+    #[serde(rename = "lastUserMessageAt")]
+    pub last_user_message_at: i64,
+    #[serde(rename = "baseSha")]
+    pub base_sha: Option<String>,
+    #[serde(rename = "baseShas")]
+    pub base_shas: std::collections::HashMap<String, Option<String>>,
+    #[serde(rename = "worktreeState")]
+    pub worktree_state: String,
     // Runtime-only fields set by the engine's with_activity(); not persisted to DB.
-    #[serde(skip_serializing_if = "Option::is_none")] pub activity: Option<Activity>,
-    #[serde(rename = "awaitingInput", skip_serializing_if = "Option::is_none")] pub awaiting_input: Option<bool>,
-    #[serde(rename = "workflowRunning", skip_serializing_if = "Option::is_none")] pub workflow_running: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
+    #[serde(rename = "awaitingInput", skip_serializing_if = "Option::is_none")]
+    pub awaiting_input: Option<bool>,
+    #[serde(rename = "workflowRunning", skip_serializing_if = "Option::is_none")]
+    pub workflow_running: Option<bool>,
     /// Runtime-only: the wire payload of the prompt this session is currently PARKED on (an
     /// AskUserQuestion / perm / plan awaiting the user), or None. Set by the engine's with_activity()
     /// from EngineState.parked; never persisted. Lets the client render the awaiting card from an
     /// authoritative source instead of inferring it from the log.
-    #[serde(rename = "pendingPrompt", skip_serializing_if = "Option::is_none")] pub pending_prompt: Option<serde_json::Value>,
+    #[serde(rename = "pendingPrompt", skip_serializing_if = "Option::is_none")]
+    pub pending_prompt: Option<serde_json::Value>,
     #[serde(rename = "parentSessionId", skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// Session group assignment (DB-backed folder). `None` = uncategorized.
@@ -120,40 +147,50 @@ pub struct Session {
     /// `"fork"` (created by `Engine::fork_session`), or `"adopted"` (imported from
     /// an external `claude` transcript). Immutable source of truth (survives user
     /// regrouping). Column `origin` (TEXT DEFAULT 'native').
-    #[serde(default = "default_origin")] pub origin: String,
+    #[serde(default = "default_origin")]
+    pub origin: String,
     /// `true` while this session has been handed off to a terminal `claude` and the
     /// server is paused. Used as a single-writer guard and as the reconcile trigger:
     /// when `detached == true` on a follow-up / reopen path, the engine imports any
     /// native-transcript delta into `#1` and clears the flag. Column `detached`
     /// (INTEGER DEFAULT 0 — SQLite has no native bool, stored as 0/1).
-    #[serde(default)] pub detached: bool,
+    #[serde(default)]
+    pub detached: bool,
     /// Line-count of the native Claude transcript (#2) already reflected in this
     /// session's rendered log (#1). Updated by adopt (full import) and reconcile
     /// (delta import). Column `nativeWatermarkLines` (INTEGER DEFAULT 0).
-    #[serde(rename = "nativeWatermarkLines", default)] pub native_watermark_lines: i64,
+    #[serde(rename = "nativeWatermarkLines", default)]
+    pub native_watermark_lines: i64,
     /// MCP server names to hide for this session (blacklist). Bridge writes them to
     /// `settings.disabledMcpjsonServers` and skips injecting any matching `extra_mcp_servers`.
-    #[serde(rename = "hiddenMcpServers", default)] pub hidden_mcp_servers: Vec<String>,
+    #[serde(rename = "hiddenMcpServers", default)]
+    pub hidden_mcp_servers: Vec<String>,
     /// Extra MCP servers to inject for this session only (not persisted globally).
     /// Serialized as JSON array to `extraMcpServers` DB column; forwarded to bridge as
     /// `SDK_BRIDGE_EXTRA_MCP` env (hidden names removed).
-    #[serde(rename = "extraMcpServers", default)] pub extra_mcp_servers: Vec<McpServerDef>,
+    #[serde(rename = "extraMcpServers", default)]
+    pub extra_mcp_servers: Vec<McpServerDef>,
     /// Plugin ids forced ON for this session (overrides a global-off). Precedence:
     /// forcedOn > hidden > global inherit.
-    #[serde(rename = "forcedOnPlugins", default)] pub forced_on_plugins: Vec<String>,
+    #[serde(rename = "forcedOnPlugins", default)]
+    pub forced_on_plugins: Vec<String>,
     /// Skill names forced ON for this session (overrides a global-off).
-    #[serde(rename = "forcedOnSkills", default)] pub forced_on_skills: Vec<String>,
+    #[serde(rename = "forcedOnSkills", default)]
+    pub forced_on_skills: Vec<String>,
     /// MCP server names forced ON for this session (overrides a global-off). A globally
     /// DISABLED server (parked in .claude.json's mcpServersDisabled) named here gets its
     /// definition injected back via the extra-defs channel at spawn. Precedence:
     /// forcedOn > hidden > global inherit (same as plugins/skills).
-    #[serde(rename = "forcedOnMcpServers", default)] pub forced_on_mcp_servers: Vec<String>,
+    #[serde(rename = "forcedOnMcpServers", default)]
+    pub forced_on_mcp_servers: Vec<String>,
 }
 
 /// Serde default for `Session::origin` — keeps the wire shape `"native"` for
 /// legacy rows that predate the column (and any row written before `origin`
 /// was set explicitly).
-fn default_origin() -> String { "native".into() }
+fn default_origin() -> String {
+    "native".into()
+}
 
 /// Serde default for `Session::auto_resume` — the toggle is opt-OUT.
 fn default_true() -> bool {
@@ -298,7 +335,7 @@ pub struct SessionUpdate {
     pub error_kind: Field<String>,
     pub started_at: Field<i64>,
     pub ended_at: Field<i64>,
-    pub unread_event_id: Option<i64>,  // None = don't touch; Some = set to this value
+    pub unread_event_id: Option<i64>, // None = don't touch; Some = set to this value
     pub last_user_message_at: Option<i64>,
     pub prompt: Option<String>,
     pub worktree_state: Option<String>,
@@ -465,7 +502,11 @@ impl Store {
     /// Apply a `SessionUpdate` to the row for `id`. No-op if `is_empty()`.
     /// Returns the updated `Session` (post-write read-back) so the caller
     /// can inspect the result without a second round-trip.
-    pub async fn apply_update(&self, id: &str, update: SessionUpdate) -> Result<Option<Session>, StoreError> {
+    pub async fn apply_update(
+        &self,
+        id: &str,
+        update: SessionUpdate,
+    ) -> Result<Option<Session>, StoreError> {
         if update.is_empty() {
             return Ok(None);
         }
@@ -483,13 +524,26 @@ const COLUMNS_DDL: &str = "id TEXT PRIMARY KEY, repo TEXT, prompt TEXT, worktree
 
 // (name, decl) — columns added after the initial schema; each ALTER is applied idempotently.
 const ADDED_COLUMNS: &[(&str, &str)] = &[
-    ("baseSha", "TEXT"), ("worktreeState", "TEXT DEFAULT 'live'"), ("repos", "TEXT"), ("skills", "TEXT"),
-    ("baseShas", "TEXT"), ("model", "TEXT"), ("effort", "TEXT"), ("mode", "TEXT"), ("errorKind", "TEXT"),
-    ("lastUserMessageAt", "INTEGER"), ("hiddenSkills", "TEXT"), ("permissionMode", "TEXT"),
-    ("parentSessionId", "TEXT"), ("titlePinned", "INTEGER"),
-    ("groupId", "TEXT"), ("unreadEventId", "INTEGER DEFAULT 0"), ("ackedEventId", "INTEGER DEFAULT 0"),
+    ("baseSha", "TEXT"),
+    ("worktreeState", "TEXT DEFAULT 'live'"),
+    ("repos", "TEXT"),
+    ("skills", "TEXT"),
+    ("baseShas", "TEXT"),
+    ("model", "TEXT"),
+    ("effort", "TEXT"),
+    ("mode", "TEXT"),
+    ("errorKind", "TEXT"),
+    ("lastUserMessageAt", "INTEGER"),
+    ("hiddenSkills", "TEXT"),
+    ("permissionMode", "TEXT"),
+    ("parentSessionId", "TEXT"),
+    ("titlePinned", "INTEGER"),
+    ("groupId", "TEXT"),
+    ("unreadEventId", "INTEGER DEFAULT 0"),
+    ("ackedEventId", "INTEGER DEFAULT 0"),
     // NULL = default ON for autoResume (existing rows keep the default without a backfill).
-    ("autoResume", "INTEGER"), ("autoResumeAt", "INTEGER"),
+    ("autoResume", "INTEGER"),
+    ("autoResumeAt", "INTEGER"),
     // NULL = no plugins disabled (rows written before the column existed keep the default).
     ("hiddenPlugins", "TEXT"),
     // Adopt / detach / re-sync provenance & handoff columns. Added for the
@@ -509,10 +563,14 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
 use crate::util::now_ms;
 
 fn normalize_mode(m: Option<String>) -> Option<String> {
-    match m.as_deref() { Some("ultracode") | Some("ultra") => Some("ultracode".into()), _ => None }
+    match m.as_deref() {
+        Some("ultracode") | Some("ultra") => Some("ultracode".into()),
+        _ => None,
+    }
 }
 fn safe_json_vec(raw: Option<String>, fallback: Vec<String>) -> Vec<String> {
-    raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or(fallback)
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or(fallback)
 }
 
 pub struct Store {
@@ -522,26 +580,54 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn open(db_path: impl AsRef<Path>, log_dir: impl AsRef<Path>) -> Result<Store, StoreError> {
+    pub async fn open(
+        db_path: impl AsRef<Path>,
+        log_dir: impl AsRef<Path>,
+    ) -> Result<Store, StoreError> {
         let db_path = db_path.as_ref();
-        if let Some(parent) = db_path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::create_dir_all(log_dir.as_ref())?;
         let url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let pool = SqlitePoolOptions::new().max_connections(1).connect(&url).await?;
-        sqlx::query("PRAGMA journal_mode = WAL").execute(&pool).await?;
-        sqlx::query("PRAGMA synchronous = NORMAL").execute(&pool).await?;
-        sqlx::query("PRAGMA busy_timeout = 5000").execute(&pool).await?;
-        sqlx::query(&format!("CREATE TABLE IF NOT EXISTS sessions ({COLUMNS_DDL})")).execute(&pool).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA busy_timeout = 5000")
+            .execute(&pool)
+            .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS sessions ({COLUMNS_DDL})"
+        ))
+        .execute(&pool)
+        .await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT, sortOrder INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL)").execute(&pool).await?;
         // migrate: add any missing ADDED_COLUMNS, then backfill lastUserMessageAt
-        let have: Vec<String> = sqlx::query("PRAGMA table_info(sessions)").fetch_all(&pool).await?
-            .iter().map(|r| r.get::<String, _>("name")).collect();
+        let have: Vec<String> = sqlx::query("PRAGMA table_info(sessions)")
+            .fetch_all(&pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
         for (name, decl) in ADDED_COLUMNS {
             if !have.iter().any(|h| h == name) {
-                sqlx::query(&format!("ALTER TABLE sessions ADD COLUMN {name} {decl}")).execute(&pool).await?;
+                sqlx::query(&format!("ALTER TABLE sessions ADD COLUMN {name} {decl}"))
+                    .execute(&pool)
+                    .await?;
             }
         }
-        sqlx::query("UPDATE sessions SET lastUserMessageAt = createdAt WHERE lastUserMessageAt IS NULL").execute(&pool).await?;
+        sqlx::query(
+            "UPDATE sessions SET lastUserMessageAt = createdAt WHERE lastUserMessageAt IS NULL",
+        )
+        .execute(&pool)
+        .await?;
         // Idempotent backfill: any session that has a parent (created by fork_session) but
         // still has the legacy `origin='native'` (or NULL on rows that predate the column)
         // is upgraded in place to 'fork'. Re-running this on already-migrated data is a
@@ -554,15 +640,25 @@ impl Store {
         // rollback then cleans up. Guarded on the column actually existing: a very old/minimal
         // legacy table (claudeSessionId is a base column, not in ADDED_COLUMNS, so it isn't
         // back-migrated) would otherwise make the index DDL fail on a missing column.
-        let cols_now: Vec<String> = sqlx::query("PRAGMA table_info(sessions)").fetch_all(&pool).await?
-            .iter().map(|r| r.get::<String, _>("name")).collect();
+        let cols_now: Vec<String> = sqlx::query("PRAGMA table_info(sessions)")
+            .fetch_all(&pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
         if cols_now.iter().any(|c| c == "claudeSessionId") {
             sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_claude_session_id ON sessions(claudeSessionId) WHERE claudeSessionId IS NOT NULL").execute(&pool).await?;
         }
-        Ok(Store { pool, log_dir: log_dir.as_ref().to_path_buf(), seq: AtomicI64::new(0) })
+        Ok(Store {
+            pool,
+            log_dir: log_dir.as_ref().to_path_buf(),
+            seq: AtomicI64::new(0),
+        })
     }
 
-    pub fn log_path(&self, id: &str) -> PathBuf { self.log_dir.join(format!("{id}.jsonl")) }
+    pub fn log_path(&self, id: &str) -> PathBuf {
+        self.log_dir.join(format!("{id}.jsonl"))
+    }
 
     /// Append a single line (with trailing `\n`) to the session's log file.
     /// The blocking file write runs in `spawn_blocking` so it never blocks the async executor.
@@ -571,10 +667,15 @@ impl Store {
         let line = line.to_string();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
             writeln!(f, "{line}")?;
             Ok(())
-        }).await.map_err(std::io::Error::other)??;
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         Ok(())
     }
 
@@ -583,7 +684,10 @@ impl Store {
         let path = self.log_path(id);
         let _ = (|| -> std::io::Result<()> {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
             writeln!(f, "{line}")?;
             Ok(())
         })();
@@ -595,7 +699,12 @@ impl Store {
         let repos: Vec<String> = if !input.repos.is_empty() {
             input.repos.clone()
         } else {
-            input.repo.as_ref().filter(|r| !r.is_empty()).map(|r| vec![r.clone()]).unwrap_or_default()
+            input
+                .repo
+                .as_ref()
+                .filter(|r| !r.is_empty())
+                .map(|r| vec![r.clone()])
+                .unwrap_or_default()
         };
         // repo: first element of repos, or empty string when no repos (non-optional string on the wire).
         let repo: String = repos.first().cloned().unwrap_or_default();
@@ -604,22 +713,23 @@ impl Store {
         // Since CreateInput.base_shas defaults to empty map, "not provided" is approximated as empty
         // with no legacy single-repo field. If base_shas is empty AND input.repo was set,
         // synthesize {repo: base_sha} — e.g. create({repo:'r', baseSha:'x'}) → baseShas={r:x}.
-        let base_shas: std::collections::HashMap<String, Option<String>> = if !input.base_shas.is_empty() {
-            // Explicitly provided — use as-is (covers multi-repo: create({repos, baseShas})).
-            input.base_shas.clone()
-        } else if let Some(ref r) = input.repo {
-            if !r.is_empty() {
-                // Legacy single-repo form: create({repo:'r', baseSha:'x'}) → {r: Some("x") or None}
-                let mut m = std::collections::HashMap::new();
-                m.insert(r.clone(), input.base_sha.clone());
-                m
+        let base_shas: std::collections::HashMap<String, Option<String>> =
+            if !input.base_shas.is_empty() {
+                // Explicitly provided — use as-is (covers multi-repo: create({repos, baseShas})).
+                input.base_shas.clone()
+            } else if let Some(ref r) = input.repo {
+                if !r.is_empty() {
+                    // Legacy single-repo form: create({repo:'r', baseSha:'x'}) → {r: Some("x") or None}
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(r.clone(), input.base_sha.clone());
+                    m
+                } else {
+                    std::collections::HashMap::new()
+                }
             } else {
+                // No repo and no base_shas → {}
                 std::collections::HashMap::new()
-            }
-        } else {
-            // No repo and no base_shas → {}
-            std::collections::HashMap::new()
-        };
+            };
 
         // baseSha: prefer the value from baseShas[repo] if present, otherwise fall back to input.baseSha.
         let base_sha: Option<String> = if base_shas.contains_key(&repo) {
@@ -702,7 +812,10 @@ impl Store {
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Session>, StoreError> {
-        let row = sqlx::query("SELECT * FROM sessions WHERE id = ?").bind(id).fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| row_to_session(&r)))
     }
 
@@ -729,8 +842,11 @@ impl Store {
     }
 
     pub async fn list(&self) -> Result<Vec<Session>, StoreError> {
-        let rows = sqlx::query("SELECT * FROM sessions ORDER BY COALESCE(lastUserMessageAt, createdAt) DESC, seq DESC")
-            .fetch_all(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT * FROM sessions ORDER BY COALESCE(lastUserMessageAt, createdAt) DESC, seq DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(row_to_session).collect())
     }
 
@@ -739,7 +855,6 @@ impl Store {
     /// Unset fields are dropped; Set fields become `Some(v)`; Clear fields
     /// become `Some(None)` (the SQL-NULL write sentinel).
     pub fn session_update_to_patch(u: &SessionUpdate) -> SessionPatch {
-        
         SessionPatch {
             status: match &u.status {
                 Field::Set(s) => Some(s.as_str().to_string()),
@@ -788,7 +903,17 @@ impl Store {
             mode: u.mode.clone(),
             permission_mode: u.permission_mode.clone(),
             title_pinned: u.title_pinned,
-            group_id: u.group_id.clone().map(|gid| if gid.is_empty() { Some(None) } else { Some(Some(gid)) }).unwrap_or(None),
+            group_id: u
+                .group_id
+                .clone()
+                .map(|gid| {
+                    if gid.is_empty() {
+                        Some(None)
+                    } else {
+                        Some(Some(gid))
+                    }
+                })
+                .unwrap_or(None),
             unread_event_id: u.unread_event_id,
             auto_resume: u.auto_resume,
             auto_resume_at: match &u.auto_resume_at {
@@ -802,43 +927,98 @@ impl Store {
     pub async fn update(&self, id: &str, patch: SessionPatch) -> Result<(), StoreError> {
         let mut sets: Vec<&str> = Vec::new();
         // Build the SET list + bind in the same order.
-        macro_rules! col { ($opt:expr, $sql:literal) => { if $opt.is_some() { sets.push($sql); } } }
-        col!(patch.status, "status = ?"); col!(patch.claude_session_id, "claudeSessionId = ?");
-        col!(patch.cost_usd, "costUsd = ?"); col!(patch.exit_code, "exitCode = ?");
-        col!(patch.error, "error = ?"); col!(patch.error_kind, "errorKind = ?");
-        col!(patch.started_at, "startedAt = ?"); col!(patch.ended_at, "endedAt = ?");
-        col!(patch.last_user_message_at, "lastUserMessageAt = ?"); col!(patch.prompt, "prompt = ?");
+        macro_rules! col {
+            ($opt:expr, $sql:literal) => {
+                if $opt.is_some() {
+                    sets.push($sql);
+                }
+            };
+        }
+        col!(patch.status, "status = ?");
+        col!(patch.claude_session_id, "claudeSessionId = ?");
+        col!(patch.cost_usd, "costUsd = ?");
+        col!(patch.exit_code, "exitCode = ?");
+        col!(patch.error, "error = ?");
+        col!(patch.error_kind, "errorKind = ?");
+        col!(patch.started_at, "startedAt = ?");
+        col!(patch.ended_at, "endedAt = ?");
+        col!(patch.last_user_message_at, "lastUserMessageAt = ?");
+        col!(patch.prompt, "prompt = ?");
         col!(patch.worktree_state, "worktreeState = ?");
-        col!(patch.model, "model = ?"); col!(patch.effort, "effort = ?");
-        col!(patch.mode, "mode = ?"); col!(patch.permission_mode, "permissionMode = ?");
+        col!(patch.model, "model = ?");
+        col!(patch.effort, "effort = ?");
+        col!(patch.mode, "mode = ?");
+        col!(patch.permission_mode, "permissionMode = ?");
         col!(patch.title_pinned, "titlePinned = ?");
         col!(patch.group_id, "groupId = ?");
         col!(patch.unread_event_id, "unreadEventId = ?");
         col!(patch.auto_resume, "autoResume = ?");
         col!(patch.auto_resume_at, "autoResumeAt = ?");
-        if sets.is_empty() { return Ok(()); }
+        if sets.is_empty() {
+            return Ok(());
+        }
         let sql = format!("UPDATE sessions SET {} WHERE id = ?", sets.join(", "));
         let mut q = sqlx::query(&sql);
-        if let Some(v) = &patch.status { q = q.bind(v); }
-        if let Some(v) = &patch.claude_session_id { q = q.bind(v); }
-        if let Some(v) = &patch.cost_usd { q = q.bind(v); }
-        if let Some(v) = &patch.exit_code { q = q.bind(v); }
-        if let Some(v) = &patch.error { q = q.bind(v); }
-        if let Some(v) = &patch.error_kind { q = q.bind(v); }
-        if let Some(v) = &patch.started_at { q = q.bind(v); }
-        if let Some(v) = &patch.ended_at { q = q.bind(v); }
-        if let Some(v) = &patch.last_user_message_at { q = q.bind(v); }
-        if let Some(v) = &patch.prompt { q = q.bind(v); }
-        if let Some(v) = &patch.worktree_state { q = q.bind(v); }
-        if let Some(v) = &patch.model { q = q.bind(v); }
-        if let Some(v) = &patch.effort { q = q.bind(v); }
-        if let Some(v) = &patch.mode { q = q.bind(v); }
-        if let Some(v) = &patch.permission_mode { q = q.bind(v); }
-        if let Some(v) = &patch.title_pinned { q = q.bind(v); }
-        if let Some(v) = &patch.group_id { q = q.bind(v); }
-        if let Some(v) = patch.unread_event_id { q = q.bind(v); }
-        if let Some(v) = patch.auto_resume { q = q.bind(v); }
-        if let Some(v) = &patch.auto_resume_at { q = q.bind(v); }
+        if let Some(v) = &patch.status {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.claude_session_id {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.cost_usd {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.exit_code {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.error {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.error_kind {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.started_at {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.ended_at {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.last_user_message_at {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.prompt {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.worktree_state {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.model {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.effort {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.mode {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.permission_mode {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.title_pinned {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.group_id {
+            q = q.bind(v);
+        }
+        if let Some(v) = patch.unread_event_id {
+            q = q.bind(v);
+        }
+        if let Some(v) = patch.auto_resume {
+            q = q.bind(v);
+        }
+        if let Some(v) = &patch.auto_resume_at {
+            q = q.bind(v);
+        }
         q.bind(id).execute(&self.pool).await?;
         Ok(())
     }
@@ -882,20 +1062,24 @@ impl Store {
     /// (Discord-style: unread = unreadEventId > lastAckedEventId, requiring no timestamp comparison
     /// or client-side idle detection loops).
     pub async fn incr_unread_event_id(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE sessions SET unreadEventId = COALESCE(unreadEventId, 0) + 1 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET unreadEventId = COALESCE(unreadEventId, 0) + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// Discord-style: ack session event. Sets ackedEventId = MAX(ackedEventId, eid).
     pub async fn ack_event(&self, id: &str, eid: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE sessions SET ackedEventId = MAX(COALESCE(ackedEventId, 0), ?) WHERE id = ?")
-            .bind(eid)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET ackedEventId = MAX(COALESCE(ackedEventId, 0), ?) WHERE id = ?",
+        )
+        .bind(eid)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -927,7 +1111,10 @@ impl Store {
 
     /// Delete the row + best-effort remove the log file. Idempotent.
     pub async fn remove(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM sessions WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         let _ = std::fs::remove_file(self.log_path(id)); // best-effort
         Ok(())
     }
@@ -935,7 +1122,11 @@ impl Store {
     /// Read the session log file → Vec of non-empty lines ([] if missing).
     pub fn read_log(&self, id: &str) -> Vec<String> {
         match std::fs::read_to_string(self.log_path(id)) {
-            Ok(s) => s.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect(),
+            Ok(s) => s
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -944,19 +1135,25 @@ impl Store {
 
     pub async fn list_groups(&self) -> Result<Vec<Group>, StoreError> {
         let rows = sqlx::query("SELECT * FROM groups ORDER BY sortOrder ASC, createdAt ASC")
-            .fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(|r| Group {
-            id: r.try_get("id").unwrap_or_default(),
-            name: r.try_get("name").unwrap_or_default(),
-            icon: r.try_get("icon").ok().flatten(),
-            sort_order: r.try_get("sortOrder").unwrap_or(0),
-            created_at: r.try_get("createdAt").unwrap_or(0),
-        }).collect())
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| Group {
+                id: r.try_get("id").unwrap_or_default(),
+                name: r.try_get("name").unwrap_or_default(),
+                icon: r.try_get("icon").ok().flatten(),
+                sort_order: r.try_get("sortOrder").unwrap_or(0),
+                created_at: r.try_get("createdAt").unwrap_or(0),
+            })
+            .collect())
     }
 
     pub async fn get_group(&self, id: &str) -> Result<Option<Group>, StoreError> {
-        let row = sqlx::query("SELECT * FROM groups WHERE id = ?").bind(id)
-            .fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT * FROM groups WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| Group {
             id: r.try_get("id").unwrap_or_default(),
             name: r.try_get("name").unwrap_or_default(),
@@ -971,9 +1168,20 @@ impl Store {
         let now = now_ms();
         let sort_order = now; // default: created order
         sqlx::query("INSERT INTO groups (id, name, icon, sortOrder, createdAt) VALUES (?,?,?,?,?)")
-            .bind(&id).bind(name).bind(icon).bind(sort_order).bind(now)
-            .execute(&self.pool).await?;
-        Ok(Group { id, name: name.to_string(), icon: icon.map(|s| s.to_string()), sort_order, created_at: now })
+            .bind(&id)
+            .bind(name)
+            .bind(icon)
+            .bind(sort_order)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(Group {
+            id,
+            name: name.to_string(),
+            icon: icon.map(|s| s.to_string()),
+            sort_order,
+            created_at: now,
+        })
     }
 
     /// Return the id of the group whose `name` matches; create it (with a
@@ -1027,27 +1235,48 @@ impl Store {
         Ok(winner)
     }
 
-    pub async fn update_group(&self, id: &str, name: Option<&str>, icon: Option<&str>) -> Result<Option<Group>, StoreError> {
+    pub async fn update_group(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        icon: Option<&str>,
+    ) -> Result<Option<Group>, StoreError> {
         let existing = self.get_group(id).await?;
-        let Some(_) = existing else { return Ok(None); };
+        let Some(_) = existing else {
+            return Ok(None);
+        };
         let mut sets: Vec<&str> = Vec::new();
-        if name.is_some() { sets.push("name = ?"); }
-        if icon.is_some() { sets.push("icon = ?"); }
-        if sets.is_empty() { return self.get_group(id).await; }
+        if name.is_some() {
+            sets.push("name = ?");
+        }
+        if icon.is_some() {
+            sets.push("icon = ?");
+        }
+        if sets.is_empty() {
+            return self.get_group(id).await;
+        }
         let sql = format!("UPDATE groups SET {} WHERE id = ?", sets.join(", "));
         let mut q = sqlx::query(&sql);
-        if let Some(v) = name { q = q.bind(v); }
-        if let Some(v) = icon { q = q.bind(v); }
+        if let Some(v) = name {
+            q = q.bind(v);
+        }
+        if let Some(v) = icon {
+            q = q.bind(v);
+        }
         q.bind(id).execute(&self.pool).await?;
         self.get_group(id).await
     }
 
     /// Delete a group and set all sessions referencing it to NULL (uncategorized).
     pub async fn delete_group(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE sessions SET groupId = NULL WHERE groupId = ?").bind(id)
-            .execute(&self.pool).await?;
-        sqlx::query("DELETE FROM groups WHERE id = ?").bind(id)
-            .execute(&self.pool).await?;
+        sqlx::query("UPDATE sessions SET groupId = NULL WHERE groupId = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM groups WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
@@ -1055,9 +1284,17 @@ impl Store {
 /// Convert a SQLite row to a `Session`, applying all column fallbacks.
 fn row_to_session(r: &SqliteRow) -> Session {
     // repo: raw column value — exposed as a non-optional String (empty string when no repo).
-    let repo_raw: String = r.try_get::<Option<String>, _>("repo").ok().flatten().unwrap_or_default();
+    let repo_raw: String = r
+        .try_get::<Option<String>, _>("repo")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     // repo_truthy: non-empty repo for fallback computations (empty string treated as absent).
-    let repo_truthy: Option<&str> = if repo_raw.is_empty() { None } else { Some(&repo_raw) };
+    let repo_truthy: Option<&str> = if repo_raw.is_empty() {
+        None
+    } else {
+        Some(&repo_raw)
+    };
     let base_sha_col: Option<String> = r.try_get("baseSha").ok().flatten();
 
     // baseShas: parse the JSON column, falling back to {repo: baseSha} when the column is NULL
@@ -1081,12 +1318,17 @@ fn row_to_session(r: &SqliteRow) -> Session {
     // repos: parse JSON column, falling back to [repo] when set (empty string → [] not [""])
     let repos: Vec<String> = {
         let raw: Option<String> = r.try_get("repos").ok().flatten();
-        safe_json_vec(raw, repo_truthy.map(|r| vec![r.to_string()]).unwrap_or_default())
+        safe_json_vec(
+            raw,
+            repo_truthy.map(|r| vec![r.to_string()]).unwrap_or_default(),
+        )
     };
 
     // baseSha: prefer column value; fall back to baseShas[repos[0]] when column is NULL.
     let base_sha: Option<String> = base_sha_col.clone().or_else(|| {
-        repos.first().and_then(|r0| base_shas.get(r0).cloned().flatten())
+        repos
+            .first()
+            .and_then(|r0| base_shas.get(r0).cloned().flatten())
     });
 
     let created_at: i64 = r.try_get("createdAt").unwrap_or(0);
@@ -1123,12 +1365,28 @@ fn row_to_session(r: &SqliteRow) -> Session {
         created_at,
         started_at: r.try_get("startedAt").ok().flatten(),
         ended_at: r.try_get("endedAt").ok().flatten(),
-        unread_event_id: r.try_get::<Option<i64>, _>("unreadEventId").ok().flatten().unwrap_or(0),
-            acked_event_id: r.try_get::<Option<i64>, _>("ackedEventId").ok().flatten().unwrap_or(0),
-        last_user_message_at: r.try_get::<Option<i64>, _>("lastUserMessageAt").ok().flatten().unwrap_or(created_at),
+        unread_event_id: r
+            .try_get::<Option<i64>, _>("unreadEventId")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        acked_event_id: r
+            .try_get::<Option<i64>, _>("ackedEventId")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        last_user_message_at: r
+            .try_get::<Option<i64>, _>("lastUserMessageAt")
+            .ok()
+            .flatten()
+            .unwrap_or(created_at),
         base_sha,
         base_shas,
-        worktree_state: r.try_get::<Option<String>, _>("worktreeState").ok().flatten().unwrap_or_else(|| "live".into()),
+        worktree_state: r
+            .try_get::<Option<String>, _>("worktreeState")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "live".into()),
         // Runtime-only fields — always None when reading from DB; the engine sets them via with_activity().
         activity: None,
         awaiting_input: None,
@@ -1145,7 +1403,11 @@ fn row_to_session(r: &SqliteRow) -> Session {
             .unwrap_or(true),
         auto_resume_at: r.try_get::<Option<i64>, _>("autoResumeAt").ok().flatten(),
         // Adopt / detach / watermark — legacy rows (pre-ALTER) read as defaults via the column DEFAULT.
-        origin: r.try_get::<Option<String>, _>("origin").ok().flatten().unwrap_or_else(|| "native".into()),
+        origin: r
+            .try_get::<Option<String>, _>("origin")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "native".into()),
         detached: r
             .try_get::<Option<i64>, _>("detached")
             .ok()
@@ -1158,12 +1420,18 @@ fn row_to_session(r: &SqliteRow) -> Session {
             .flatten()
             .unwrap_or(0),
         hidden_mcp_servers: safe_json_vec(r.try_get("hiddenMcpServers").ok().flatten(), vec![]),
-        extra_mcp_servers: r.try_get::<Option<String>, _>("extraMcpServers").ok().flatten()
+        extra_mcp_servers: r
+            .try_get::<Option<String>, _>("extraMcpServers")
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<Vec<McpServerDef>>(&s).ok())
             .unwrap_or_default(),
         forced_on_plugins: safe_json_vec(r.try_get("forcedOnPlugins").ok().flatten(), vec![]),
         forced_on_skills: safe_json_vec(r.try_get("forcedOnSkills").ok().flatten(), vec![]),
-        forced_on_mcp_servers: safe_json_vec(r.try_get("forcedOnMcpServers").ok().flatten(), vec![]),
+        forced_on_mcp_servers: safe_json_vec(
+            r.try_get("forcedOnMcpServers").ok().flatten(),
+            vec![],
+        ),
     }
 }
 
@@ -1186,8 +1454,18 @@ mod tests {
     #[tokio::test]
     async fn create_get_roundtrip_and_lastusermessageat_eq_createdat() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        let s = store.create(CreateInput { id: "s1".into(), repos: vec!["demo".into()], prompt: "do x".into(), ..Default::default() }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        let s = store
+            .create(CreateInput {
+                id: "s1".into(),
+                repos: vec!["demo".into()],
+                prompt: "do x".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(s.last_user_message_at, s.created_at);
         let got = store.get("s1").await.unwrap().unwrap();
         assert_eq!(got.id, "s1");
@@ -1198,14 +1476,57 @@ mod tests {
     #[tokio::test]
     async fn list_orders_by_last_user_message_at_desc() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        let a = store.create(CreateInput { id: "a".into(), prompt: "a".into(), ..Default::default() }).await.unwrap();
-        store.create(CreateInput { id: "b".into(), prompt: "b".into(), ..Default::default() }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        let a = store
+            .create(CreateInput {
+                id: "a".into(),
+                prompt: "a".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "b".into(),
+                prompt: "b".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // default: newest-created first (b before a)
-        assert_eq!(store.list().await.unwrap().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(
+            store
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
         // bump a past b
-        store.update("a", SessionPatch { last_user_message_at: Some(a.created_at + 10_000), ..Default::default() }).await.unwrap();
-        assert_eq!(store.list().await.unwrap().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec!["a", "b"]);
+        store
+            .update(
+                "a",
+                SessionPatch {
+                    last_user_message_at: Some(a.created_at + 10_000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[tokio::test]
@@ -1215,7 +1536,10 @@ mod tests {
         let path = dir.join("db.sqlite");
         {
             use sqlx::sqlite::SqlitePoolOptions;
-            let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+            let pool = SqlitePoolOptions::new()
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
             sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, createdAt INTEGER, seq INTEGER)").execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO sessions (id,status,prompt,createdAt,seq) VALUES ('old','done','p',12345,0)").execute(&pool).await.unwrap();
             pool.close().await;
@@ -1234,7 +1558,9 @@ mod tests {
         {
             use sqlx::sqlite::SqlitePoolOptions;
             let pool = SqlitePoolOptions::new()
-                .connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
             sqlx::query(
                 "CREATE TABLE sessions (id TEXT PRIMARY KEY, repo TEXT, prompt TEXT, worktreePath TEXT, \
                  branch TEXT, claudeSessionId TEXT, status TEXT, costUsd REAL, exitCode INTEGER, \
@@ -1246,12 +1572,21 @@ mod tests {
         // proves repos/skills/baseShas/model/effort/mode/worktreeState columns now exist.
         {
             let store = Store::open(path.clone(), dir.join("logs")).await.unwrap();
-            store.create(CreateInput {
-                id: "s1".into(), prompt: "p".into(), repos: vec!["demo".into()],
-                model: Some("opus".into()), mode: Some("ultra".into()),
-                base_shas: std::collections::HashMap::from([("demo".into(), Some("abc".into()))]),
-                ..Default::default()
-            }).await.unwrap();
+            store
+                .create(CreateInput {
+                    id: "s1".into(),
+                    prompt: "p".into(),
+                    repos: vec!["demo".into()],
+                    model: Some("opus".into()),
+                    mode: Some("ultra".into()),
+                    base_shas: std::collections::HashMap::from([(
+                        "demo".into(),
+                        Some("abc".into()),
+                    )]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
             let s = store.get("s1").await.unwrap().unwrap();
             assert_eq!(s.repos, vec!["demo".to_string()]);
             assert_eq!(s.model.as_deref(), Some("opus"));
@@ -1260,16 +1595,27 @@ mod tests {
         // Re-open the SAME path: migration must be idempotent (re-running the ALTERs is a no-op,
         // not an error) and prior rows survive; a new create still works.
         let store2 = Store::open(path, dir.join("logs")).await.unwrap();
-        assert!(store2.get("s1").await.unwrap().is_some(), "row must survive reopen");
-        store2.create(CreateInput { id: "s2".into(), prompt: "q".into(), ..Default::default() })
-            .await.unwrap();
+        assert!(
+            store2.get("s1").await.unwrap().is_some(),
+            "row must survive reopen"
+        );
+        store2
+            .create(CreateInput {
+                id: "s2".into(),
+                prompt: "q".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert!(store2.get("s2").await.unwrap().is_some());
     }
 
     #[tokio::test]
     async fn append_log_writes_one_line_per_call() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         store.append_log("s1", "{\"type\":\"x\"}").await.unwrap();
         store.append_log("s1", "{\"type\":\"y\"}").await.unwrap();
         let content = std::fs::read_to_string(store.log_path("s1")).unwrap();
@@ -1280,17 +1626,33 @@ mod tests {
     #[tokio::test]
     async fn create_stores_raw_mode_get_normalizes() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         // "ultra" is stored raw in the returned Session from create(); but the
         // Session returned from create() has mode = raw (no normalization at write time).
-        let created = store.create(CreateInput {
-            id: "m1".into(), prompt: "p".into(), mode: Some("ultra".into()), ..Default::default()
-        }).await.unwrap();
+        let created = store
+            .create(CreateInput {
+                id: "m1".into(),
+                prompt: "p".into(),
+                mode: Some("ultra".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // create() returns the raw mode.
-        assert_eq!(created.mode.as_deref(), Some("ultra"), "create() must return raw mode");
+        assert_eq!(
+            created.mode.as_deref(),
+            Some("ultra"),
+            "create() must return raw mode"
+        );
         // get() normalizes on read.
         let got = store.get("m1").await.unwrap().unwrap();
-        assert_eq!(got.mode.as_deref(), Some("ultracode"), "get() must normalize mode on read");
+        assert_eq!(
+            got.mode.as_deref(),
+            Some("ultracode"),
+            "get() must normalize mode on read"
+        );
     }
 
     /// Fix #3/#6: a row with baseShas column NULL but repo+baseSha set reconstructs
@@ -1301,11 +1663,19 @@ mod tests {
         let path = dir.join("db.sqlite");
         {
             use sqlx::sqlite::SqlitePoolOptions;
-            let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+            let pool = SqlitePoolOptions::new()
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
             // Create minimal table (no baseShas column yet, simulating legacy row).
-            sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
+            sqlx::query(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
                 createdAt INTEGER, seq INTEGER, repo TEXT, baseSha TEXT, repos TEXT, \
-                worktreeState TEXT, lastUserMessageAt INTEGER)").execute(&pool).await.unwrap();
+                worktreeState TEXT, lastUserMessageAt INTEGER)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::query("INSERT INTO sessions (id,status,prompt,createdAt,seq,repo,baseSha,lastUserMessageAt) \
                 VALUES ('r1','pending','p',1000,0,'myrepo','abc123',1000)").execute(&pool).await.unwrap();
             pool.close().await;
@@ -1313,11 +1683,17 @@ mod tests {
         let store = Store::open(path, dir.join("logs")).await.unwrap();
         let s = store.get("r1").await.unwrap().unwrap();
         // baseShas fallback: {repo: baseSha}
-        assert_eq!(s.base_shas.get("myrepo").and_then(|v| v.as_deref()), Some("abc123"),
-            "base_shas must be reconstructed from repo+baseSha when baseShas column is null");
+        assert_eq!(
+            s.base_shas.get("myrepo").and_then(|v| v.as_deref()),
+            Some("abc123"),
+            "base_shas must be reconstructed from repo+baseSha when baseShas column is null"
+        );
         // base_sha fallback: baseSha column value
-        assert_eq!(s.base_sha.as_deref(), Some("abc123"),
-            "base_sha must be set from baseSha column");
+        assert_eq!(
+            s.base_sha.as_deref(),
+            Some("abc123"),
+            "base_sha must be set from baseSha column"
+        );
     }
 
     /// Fix #4: repos fallback — empty-string repo → [] not [""]
@@ -1327,18 +1703,34 @@ mod tests {
         let path = dir.join("db.sqlite");
         {
             use sqlx::sqlite::SqlitePoolOptions;
-            let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
-            sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
-                createdAt INTEGER, seq INTEGER, repo TEXT, lastUserMessageAt INTEGER)").execute(&pool).await.unwrap();
+            let pool = SqlitePoolOptions::new()
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
+            sqlx::query(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
+                createdAt INTEGER, seq INTEGER, repo TEXT, lastUserMessageAt INTEGER)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
             // repo = "" (empty string, treated as absent)
-            sqlx::query("INSERT INTO sessions (id,status,prompt,createdAt,seq,repo,lastUserMessageAt) \
-                VALUES ('r2','pending','p',1000,0,'',1000)").execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO sessions (id,status,prompt,createdAt,seq,repo,lastUserMessageAt) \
+                VALUES ('r2','pending','p',1000,0,'',1000)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
             pool.close().await;
         }
         let store = Store::open(path, dir.join("logs")).await.unwrap();
         let s = store.get("r2").await.unwrap().unwrap();
-        assert_eq!(s.repos, Vec::<String>::new(),
-            "empty-string repo must yield empty repos vec (empty string is treated as absent)");
+        assert_eq!(
+            s.repos,
+            Vec::<String>::new(),
+            "empty-string repo must yield empty repos vec (empty string is treated as absent)"
+        );
     }
 
     /// Multi-repo create round-trip: create({repos:['A','B'], baseShas:{A:'sa',B:'sb'}}) must
@@ -1347,39 +1739,67 @@ mod tests {
     #[tokio::test]
     async fn create_multi_repo_baseshas_roundtrip() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         let mut base_shas = std::collections::HashMap::new();
         base_shas.insert("A".to_string(), Some("sa".to_string()));
         base_shas.insert("B".to_string(), Some("sb".to_string()));
-        let created = store.create(CreateInput {
-            id: "multi1".into(),
-            prompt: "p".into(),
-            repos: vec!["A".into(), "B".into()],
-            base_shas: base_shas.clone(),
-            ..Default::default()
-        }).await.unwrap();
+        let created = store
+            .create(CreateInput {
+                id: "multi1".into(),
+                prompt: "p".into(),
+                repos: vec!["A".into(), "B".into()],
+                base_shas: base_shas.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // create() must derive base_sha = baseShas[repos[0]] = baseShas["A"] = "sa"
-        assert_eq!(created.base_sha.as_deref(), Some("sa"),
-            "create() must set base_sha = baseShas[repos[0]]");
-        assert_eq!(created.repo.as_str(), "A",
-            "create() must set repo = repos[0]");
-        assert_eq!(created.base_shas.get("A").and_then(|v| v.as_deref()), Some("sa"),
-            "create() base_shas must contain A=sa");
-        assert_eq!(created.base_shas.get("B").and_then(|v| v.as_deref()), Some("sb"),
-            "create() base_shas must contain B=sb");
+        assert_eq!(
+            created.base_sha.as_deref(),
+            Some("sa"),
+            "create() must set base_sha = baseShas[repos[0]]"
+        );
+        assert_eq!(
+            created.repo.as_str(),
+            "A",
+            "create() must set repo = repos[0]"
+        );
+        assert_eq!(
+            created.base_shas.get("A").and_then(|v| v.as_deref()),
+            Some("sa"),
+            "create() base_shas must contain A=sa"
+        );
+        assert_eq!(
+            created.base_shas.get("B").and_then(|v| v.as_deref()),
+            Some("sb"),
+            "create() base_shas must contain B=sb"
+        );
 
         // get() must return the same values after persisting.
         let got = store.get("multi1").await.unwrap().unwrap();
-        assert_eq!(got.base_sha.as_deref(), Some("sa"),
-            "get() must return persisted base_sha = baseShas[repos[0]]");
-        assert_eq!(got.repo.as_str(), "A",
-            "get() must return repo = repos[0]");
-        assert_eq!(got.repos, vec!["A".to_string(), "B".to_string()],
-            "get() must return repos round-tripped");
-        assert_eq!(got.base_shas.get("A").and_then(|v| v.as_deref()), Some("sa"),
-            "get() base_shas must contain A=sa");
-        assert_eq!(got.base_shas.get("B").and_then(|v| v.as_deref()), Some("sb"),
-            "get() base_shas must contain B=sb");
+        assert_eq!(
+            got.base_sha.as_deref(),
+            Some("sa"),
+            "get() must return persisted base_sha = baseShas[repos[0]]"
+        );
+        assert_eq!(got.repo.as_str(), "A", "get() must return repo = repos[0]");
+        assert_eq!(
+            got.repos,
+            vec!["A".to_string(), "B".to_string()],
+            "get() must return repos round-tripped"
+        );
+        assert_eq!(
+            got.base_shas.get("A").and_then(|v| v.as_deref()),
+            Some("sa"),
+            "get() base_shas must contain A=sa"
+        );
+        assert_eq!(
+            got.base_shas.get("B").and_then(|v| v.as_deref()),
+            Some("sb"),
+            "get() base_shas must contain B=sb"
+        );
     }
 
     /// Legacy single-repo create: create({repo:'r', baseSha:'x'}) must persist
@@ -1387,28 +1807,48 @@ mod tests {
     #[tokio::test]
     async fn create_legacy_single_repo_baseshas_roundtrip() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        let created = store.create(CreateInput {
-            id: "legacy1".into(),
-            prompt: "p".into(),
-            repo: Some("r".into()),
-            base_sha: Some("x".into()),
-            ..Default::default()
-        }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        let created = store
+            .create(CreateInput {
+                id: "legacy1".into(),
+                prompt: "p".into(),
+                repo: Some("r".into()),
+                base_sha: Some("x".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // create() must synthesize base_shas = {r: x} from legacy form
-        assert_eq!(created.base_shas.get("r").and_then(|v| v.as_deref()), Some("x"),
-            "create() must synthesize base_shas = {{repo: baseSha}} from legacy form");
-        assert_eq!(created.base_sha.as_deref(), Some("x"),
-            "create() must set base_sha = baseShas[repo] = x");
-        assert_eq!(created.repo.as_str(), "r",
-            "create() must set repo = repos[0]");
+        assert_eq!(
+            created.base_shas.get("r").and_then(|v| v.as_deref()),
+            Some("x"),
+            "create() must synthesize base_shas = {{repo: baseSha}} from legacy form"
+        );
+        assert_eq!(
+            created.base_sha.as_deref(),
+            Some("x"),
+            "create() must set base_sha = baseShas[repo] = x"
+        );
+        assert_eq!(
+            created.repo.as_str(),
+            "r",
+            "create() must set repo = repos[0]"
+        );
 
         // get() must round-trip correctly (not return {} for base_shas)
         let got = store.get("legacy1").await.unwrap().unwrap();
-        assert_eq!(got.base_shas.get("r").and_then(|v| v.as_deref()), Some("x"),
-            "get() must return base_shas = {{r: x}} for legacy single-repo create");
-        assert_eq!(got.base_sha.as_deref(), Some("x"),
-            "get() must return base_sha = x");
+        assert_eq!(
+            got.base_shas.get("r").and_then(|v| v.as_deref()),
+            Some("x"),
+            "get() must return base_shas = {{r: x}} for legacy single-repo create"
+        );
+        assert_eq!(
+            got.base_sha.as_deref(),
+            Some("x"),
+            "get() must return base_sha = x"
+        );
     }
 
     /// Corrupt JSON degradation: repos/skills/baseShas with invalid JSON must degrade to
@@ -1423,7 +1863,10 @@ mod tests {
         // Now insert rows with corrupt JSON via a raw pool on the already-migrated DB.
         {
             use sqlx::sqlite::SqlitePoolOptions;
-            let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+            let pool = SqlitePoolOptions::new()
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
             // Insert a row with invalid JSON in repos, skills, baseShas columns.
             sqlx::query(
                 "INSERT INTO sessions (id,repo,prompt,status,createdAt,lastUserMessageAt,worktreeState,repos,skills,baseShas,seq) \
@@ -1438,24 +1881,51 @@ mod tests {
         }
         // get() must not panic and must return degraded values.
         let s = store.get("corrupt1").await.unwrap().unwrap();
-        assert_eq!(s.repos, Vec::<String>::new(), "corrupt repos must degrade to []");
-        assert_eq!(s.skills, Vec::<String>::new(), "corrupt skills must degrade to []");
-        assert!(s.base_shas.is_empty(), "corrupt baseShas must degrade to {{}}");
+        assert_eq!(
+            s.repos,
+            Vec::<String>::new(),
+            "corrupt repos must degrade to []"
+        );
+        assert_eq!(
+            s.skills,
+            Vec::<String>::new(),
+            "corrupt skills must degrade to []"
+        );
+        assert!(
+            s.base_shas.is_empty(),
+            "corrupt baseShas must degrade to {{}}"
+        );
         // list() must not panic and must return all rows.
         let list = store.list().await.unwrap();
-        assert_eq!(list.len(), 2, "list() must return all rows even with corrupt JSON");
+        assert_eq!(
+            list.len(),
+            2,
+            "list() must return all rows even with corrupt JSON"
+        );
     }
 
     #[tokio::test]
     async fn remove_deletes_row_and_log() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput { id: "rm1".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "rm1".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         store.append_log("rm1", "{\"type\":\"x\"}").await.unwrap();
         assert!(store.get("rm1").await.unwrap().is_some());
         store.remove("rm1").await.unwrap();
         assert!(store.get("rm1").await.unwrap().is_none(), "row deleted");
-        assert!(store.read_log("rm1").is_empty(), "log read returns [] after remove");
+        assert!(
+            store.read_log("rm1").is_empty(),
+            "log read returns [] after remove"
+        );
         // idempotent
         store.remove("rm1").await.unwrap();
     }
@@ -1463,51 +1933,111 @@ mod tests {
     #[tokio::test]
     async fn read_log_returns_nonempty_lines_in_order() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        assert_eq!(store.read_log("missing"), Vec::<String>::new(), "missing log → []");
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_log("missing"),
+            Vec::<String>::new(),
+            "missing log → []"
+        );
         store.append_log("L", "{\"type\":\"a\"}").await.unwrap();
         store.append_log("L", "{\"type\":\"b\"}").await.unwrap();
-        assert_eq!(store.read_log("L"), vec!["{\"type\":\"a\"}".to_string(), "{\"type\":\"b\"}".to_string()]);
+        assert_eq!(
+            store.read_log("L"),
+            vec![
+                "{\"type\":\"a\"}".to_string(),
+                "{\"type\":\"b\"}".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
     async fn update_can_set_worktree_state() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput { id: "ws".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
-        store.update("ws", SessionPatch { worktree_state: Some("discarded".into()), ..Default::default() }).await.unwrap();
-        assert_eq!(store.get("ws").await.unwrap().unwrap().worktree_state, "discarded");
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "ws".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .update(
+                "ws",
+                SessionPatch {
+                    worktree_state: Some("discarded".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("ws").await.unwrap().unwrap().worktree_state,
+            "discarded"
+        );
     }
 
     #[test]
     fn session_runtime_fields_skip_when_none() {
-        let s = Session { id: "x".into(), status: "done".into(), worktree_state: "live".into(), ..Default::default() };
+        let s = Session {
+            id: "x".into(),
+            status: "done".into(),
+            worktree_state: "live".into(),
+            ..Default::default()
+        };
         let v = serde_json::to_value(&s).unwrap();
-        assert!(v.get("activity").is_none() && v.get("awaitingInput").is_none() && v.get("workflowRunning").is_none(),
-            "runtime fields omitted when None (optional props)");
+        assert!(
+            v.get("activity").is_none()
+                && v.get("awaitingInput").is_none()
+                && v.get("workflowRunning").is_none(),
+            "runtime fields omitted when None (optional props)"
+        );
     }
 
     /// Session.repo is a non-optional String: create() with no repo yields repo="", not null.
     #[tokio::test]
     async fn session_repo_is_non_optional_string() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         // No repo: must serialize as "" not null.
-        let s = store.create(CreateInput {
-            id: "norepo".into(), prompt: "p".into(), ..Default::default()
-        }).await.unwrap();
-        assert_eq!(s.repo, "", "Session.repo must be empty string (not null) when no repo");
+        let s = store
+            .create(CreateInput {
+                id: "norepo".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            s.repo, "",
+            "Session.repo must be empty string (not null) when no repo"
+        );
 
         // With repo: must serialize as the repo string.
-        let s2 = store.create(CreateInput {
-            id: "withrepo".into(), prompt: "p".into(),
-            repos: vec!["demo".into()], ..Default::default()
-        }).await.unwrap();
+        let s2 = store
+            .create(CreateInput {
+                id: "withrepo".into(),
+                prompt: "p".into(),
+                repos: vec!["demo".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(s2.repo, "demo", "Session.repo must equal repos[0]");
 
         // get() must round-trip the same values.
         let got = store.get("norepo").await.unwrap().unwrap();
-        assert_eq!(got.repo, "", "get() must return repo='' for no-repo session");
+        assert_eq!(
+            got.repo, "",
+            "get() must return repo='' for no-repo session"
+        );
         let got2 = store.get("withrepo").await.unwrap().unwrap();
         assert_eq!(got2.repo, "demo", "get() must return repo='demo'");
     }
@@ -1517,20 +2047,34 @@ mod tests {
     #[tokio::test]
     async fn update_only_some_fields_others_untouched_and_nullify() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput {
-            id: "u1".into(), prompt: "orig".into(), repos: vec!["demo".into()],
-            model: Some("opus".into()), ..Default::default()
-        }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "u1".into(),
+                prompt: "orig".into(),
+                repos: vec!["demo".into()],
+                model: Some("opus".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         // Set several optional fields to concrete values in one update.
-        store.update("u1", SessionPatch {
-            status: Some("running".into()),
-            cost_usd: Some(Some(1.5)),
-            exit_code: Some(Some(0)),
-            error: Some(Some("boom".into())),
-            started_at: Some(Some(7777)),
-            ..Default::default()
-        }).await.unwrap();
+        store
+            .update(
+                "u1",
+                SessionPatch {
+                    status: Some("running".into()),
+                    cost_usd: Some(Some(1.5)),
+                    exit_code: Some(Some(0)),
+                    error: Some(Some("boom".into())),
+                    started_at: Some(Some(7777)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let s = store.get("u1").await.unwrap().unwrap();
         assert_eq!(s.status, "running");
         assert_eq!(s.cost_usd, Some(1.5));
@@ -1544,30 +2088,58 @@ mod tests {
 
         // Now a partial update of only `prompt` must leave status/cost/error from before intact,
         // and Some(None) on error/cost must write SQL NULL (clearing previously-set values).
-        store.update("u1", SessionPatch {
-            prompt: Some("changed".into()),
-            error: Some(None),       // nullify
-            cost_usd: Some(None),    // nullify
-            ..Default::default()
-        }).await.unwrap();
+        store
+            .update(
+                "u1",
+                SessionPatch {
+                    prompt: Some("changed".into()),
+                    error: Some(None),    // nullify
+                    cost_usd: Some(None), // nullify
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let s2 = store.get("u1").await.unwrap().unwrap();
         assert_eq!(s2.prompt, "changed");
         assert_eq!(s2.error, None, "Some(None) must clear error to SQL NULL");
-        assert_eq!(s2.cost_usd, None, "Some(None) must clear costUsd to SQL NULL");
+        assert_eq!(
+            s2.cost_usd, None,
+            "Some(None) must clear costUsd to SQL NULL"
+        );
         // Fields not in the second patch keep their first-update values.
-        assert_eq!(s2.status, "running", "status must survive a prompt-only update");
-        assert_eq!(s2.exit_code, Some(0), "exitCode must survive a prompt-only update");
-        assert_eq!(s2.started_at, Some(7777), "startedAt must survive a prompt-only update");
+        assert_eq!(
+            s2.status, "running",
+            "status must survive a prompt-only update"
+        );
+        assert_eq!(
+            s2.exit_code,
+            Some(0),
+            "exitCode must survive a prompt-only update"
+        );
+        assert_eq!(
+            s2.started_at,
+            Some(7777),
+            "startedAt must survive a prompt-only update"
+        );
     }
-
 
     /// An empty SessionPatch (all None) must be a no-op: it must not error and must not
     /// alter any column. Guards the `if sets.is_empty() { return Ok(()) }` early-return.
     #[tokio::test]
     async fn update_empty_patch_is_noop() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput { id: "noop".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "noop".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         let before = store.get("noop").await.unwrap().unwrap();
         store.update("noop", SessionPatch::default()).await.unwrap();
         let after = store.get("noop").await.unwrap().unwrap();
@@ -1575,63 +2147,141 @@ mod tests {
         assert_eq!(after.status, before.status);
         assert_eq!(after.last_user_message_at, before.last_user_message_at);
         // update() of a non-existent id is also a silent no-op (UPDATE matches 0 rows).
-        store.update("ghost", SessionPatch { status: Some("x".into()), ..Default::default() }).await.unwrap();
+        store
+            .update(
+                "ghost",
+                SessionPatch {
+                    status: Some("x".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert!(store.get("ghost").await.unwrap().is_none());
     }
-
 
     /// list() ordering tiebreak: when lastUserMessageAt is equal across rows, ordering falls
     /// back to `seq DESC` — i.e. the most-recently-created row sorts first. seq is monotonic.
     #[tokio::test]
     async fn list_tiebreaks_equal_timestamps_by_seq_desc() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         // Create three rows, then force identical lastUserMessageAt so only seq distinguishes them.
         for id in ["t0", "t1", "t2"] {
-            store.create(CreateInput { id: id.into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
-            store.update(id, SessionPatch { last_user_message_at: Some(5000), ..Default::default() }).await.unwrap();
+            store
+                .create(CreateInput {
+                    id: id.into(),
+                    prompt: "p".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            store
+                .update(
+                    id,
+                    SessionPatch {
+                        last_user_message_at: Some(5000),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
         }
         // Equal timestamps → seq DESC → newest-created (t2) first, oldest (t0) last.
-        let ids: Vec<String> = store.list().await.unwrap().into_iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec!["t2", "t1", "t0"],
-            "equal lastUserMessageAt must tiebreak by seq DESC (newest create first)");
+        let ids: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["t2", "t1", "t0"],
+            "equal lastUserMessageAt must tiebreak by seq DESC (newest create first)"
+        );
     }
-
 
     /// read_log must skip blank / whitespace-only lines (not just be empty on a missing file),
     /// returning only the meaningful JSONL lines in order.
     #[tokio::test]
     async fn read_log_skips_blank_and_whitespace_lines() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         // Write a file directly containing blank lines and whitespace-only lines between entries.
-        std::fs::write(store.log_path("blanks"), "{\"a\":1}\n\n   \n{\"b\":2}\n\t\n").unwrap();
-        assert_eq!(store.read_log("blanks"),
+        std::fs::write(
+            store.log_path("blanks"),
+            "{\"a\":1}\n\n   \n{\"b\":2}\n\t\n",
+        )
+        .unwrap();
+        assert_eq!(
+            store.read_log("blanks"),
             vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()],
-            "blank and whitespace-only lines must be filtered out");
+            "blank and whitespace-only lines must be filtered out"
+        );
         // An empty file (created by append never called, or truncated) reads as [].
         std::fs::write(store.log_path("empty"), "").unwrap();
-        assert_eq!(store.read_log("empty"), Vec::<String>::new(), "empty file → []");
+        assert_eq!(
+            store.read_log("empty"),
+            Vec::<String>::new(),
+            "empty file → []"
+        );
     }
-
 
     /// normalize_mode edges (read-side): only "ultra"/"ultracode" map to "ultracode"; any other
     /// stored value (including a bogus mode or NULL) reads back as None.
     #[tokio::test]
     async fn mode_normalization_edges_unknown_becomes_none() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput { id: "mw".into(), prompt: "p".into(), mode: Some("weird".into()), ..Default::default() }).await.unwrap();
-        assert_eq!(store.get("mw").await.unwrap().unwrap().mode, None,
-            "unknown stored mode must normalize to None on read");
-        store.create(CreateInput { id: "muc".into(), prompt: "p".into(), mode: Some("ultracode".into()), ..Default::default() }).await.unwrap();
-        assert_eq!(store.get("muc").await.unwrap().unwrap().mode.as_deref(), Some("ultracode"),
-            "already-normalized 'ultracode' stays 'ultracode'");
-        store.create(CreateInput { id: "mnone".into(), prompt: "p".into(), ..Default::default() }).await.unwrap();
-        assert_eq!(store.get("mnone").await.unwrap().unwrap().mode, None,
-            "absent mode reads back as None");
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "mw".into(),
+                prompt: "p".into(),
+                mode: Some("weird".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("mw").await.unwrap().unwrap().mode,
+            None,
+            "unknown stored mode must normalize to None on read"
+        );
+        store
+            .create(CreateInput {
+                id: "muc".into(),
+                prompt: "p".into(),
+                mode: Some("ultracode".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("muc").await.unwrap().unwrap().mode.as_deref(),
+            Some("ultracode"),
+            "already-normalized 'ultracode' stays 'ultracode'"
+        );
+        store
+            .create(CreateInput {
+                id: "mnone".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("mnone").await.unwrap().unwrap().mode,
+            None,
+            "absent mode reads back as None"
+        );
     }
-
 
     /// Concurrent create() on a shared Arc<Store>: spawned tasks racing on the single-connection
     /// pool + AtomicI64 seq must all succeed, produce distinct rows, and yield strictly distinct
@@ -1639,15 +2289,27 @@ mod tests {
     #[tokio::test]
     async fn concurrent_create_all_rows_persist_with_distinct_seq() {
         let dir = tmp();
-        let store = std::sync::Arc::new(Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap());
+        let store = std::sync::Arc::new(
+            Store::open(dir.join("db.sqlite"), dir.join("logs"))
+                .await
+                .unwrap(),
+        );
         let mut handles = Vec::new();
         for i in 0..16 {
             let st = store.clone();
             handles.push(tokio::spawn(async move {
-                st.create(CreateInput { id: format!("c{i}"), prompt: "p".into(), ..Default::default() }).await.unwrap();
+                st.create(CreateInput {
+                    id: format!("c{i}"),
+                    prompt: "p".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
             }));
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
         // All 16 rows present, ids unique.
         let list = store.list().await.unwrap();
         assert_eq!(list.len(), 16, "all concurrent creates must persist");
@@ -1658,11 +2320,18 @@ mod tests {
         // seq values must be strictly distinct (AtomicI64 fetch_add guarantees no collisions),
         // covering the full contiguous 0..16 range.
         let mut seqs: Vec<i64> = sqlx::query("SELECT seq FROM sessions")
-            .fetch_all(&store.pool).await.unwrap()
-            .iter().map(|r| r.get::<i64, _>("seq")).collect();
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<i64, _>("seq"))
+            .collect();
         seqs.sort();
-        assert_eq!(seqs, (0..16).collect::<Vec<i64>>(),
-            "16 concurrent creates must consume a distinct contiguous seq range 0..16");
+        assert_eq!(
+            seqs,
+            (0..16).collect::<Vec<i64>>(),
+            "16 concurrent creates must consume a distinct contiguous seq range 0..16"
+        );
     }
 
     /// Adopted session round-trip: `origin` is persisted at create time,
@@ -1671,14 +2340,19 @@ mod tests {
     #[tokio::test]
     async fn adopted_origin_and_watermark_round_trip() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         let id = "sess-adopt-1";
-        store.create(CreateInput {
-            id: id.into(),
-            prompt: "p".into(),
-            origin: Some("adopted".into()),
-            ..Default::default()
-        }).await.unwrap();
+        store
+            .create(CreateInput {
+                id: id.into(),
+                prompt: "p".into(),
+                origin: Some("adopted".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         let s = store.get(id).await.unwrap().unwrap();
         assert_eq!(s.origin, "adopted");
         assert_eq!(s.detached, false);
@@ -1703,16 +2377,25 @@ mod tests {
     #[tokio::test]
     async fn ensure_group_is_idempotent() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         // Adopted name — stable id, idempotent.
         let a = store.ensure_group("Claude Code Adopted").await.unwrap();
         let b = store.ensure_group("Claude Code Adopted").await.unwrap();
         assert_eq!(a, b, "two calls for the same name must return the same id");
-        assert_eq!(a, "grp-adopted",
-            "the 'Claude Code Adopted' group must use the stable id 'grp-adopted'");
         assert_eq!(
-            store.list_groups().await.unwrap()
-                .iter().filter(|g| g.name == "Claude Code Adopted").count(),
+            a, "grp-adopted",
+            "the 'Claude Code Adopted' group must use the stable id 'grp-adopted'"
+        );
+        assert_eq!(
+            store
+                .list_groups()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|g| g.name == "Claude Code Adopted")
+                .count(),
             1,
             "only one 'Claude Code Adopted' row must exist after repeat calls"
         );
@@ -1721,8 +2404,10 @@ mod tests {
         let c1 = store.ensure_group("Other Group").await.unwrap();
         let c2 = store.ensure_group("Other Group").await.unwrap();
         assert_eq!(c1, c2, "non-adopted name is also idempotent");
-        assert!(c1.starts_with("grp-") && c1 != "grp-adopted",
-            "non-adopted name must get a deterministic grp-<hash> id, got {c1}");
+        assert!(
+            c1.starts_with("grp-") && c1 != "grp-adopted",
+            "non-adopted name must get a deterministic grp-<hash> id, got {c1}"
+        );
     }
 
     /// Non-adopted names must get a stable id derived from the name (not a
@@ -1733,37 +2418,62 @@ mod tests {
     #[tokio::test]
     async fn ensure_group_same_name_is_stable_id() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         let first = store.ensure_group("My Group").await.unwrap();
         let second = store.ensure_group("My Group").await.unwrap();
-        assert_eq!(first, second,
-            "two sequential calls for the same non-adopted name must return the same id");
-        assert!(first.starts_with("grp-") && first != "grp-adopted",
-            "non-adopted name must get a deterministic grp-<hash> id, got {first}");
-        let rows: Vec<_> = store.list_groups().await.unwrap()
-            .into_iter().filter(|g| g.name == "My Group").collect();
-        assert_eq!(rows.len(), 1,
+        assert_eq!(
+            first, second,
+            "two sequential calls for the same non-adopted name must return the same id"
+        );
+        assert!(
+            first.starts_with("grp-") && first != "grp-adopted",
+            "non-adopted name must get a deterministic grp-<hash> id, got {first}"
+        );
+        let rows: Vec<_> = store
+            .list_groups()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.name == "My Group")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
             "exactly one row must exist for the non-adopted name, got {} ({:?})",
-            rows.len(), rows.iter().map(|g| &g.id).collect::<Vec<_>>());
-        assert_eq!(rows[0].id, first,
-            "the single surviving row must carry the deterministic id");
+            rows.len(),
+            rows.iter().map(|g| &g.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rows[0].id, first,
+            "the single surviving row must carry the deterministic id"
+        );
     }
 
     #[tokio::test]
     async fn parent_session_id_round_trip() {
         let dir = tmp();
-        let store = Store::open(dir.join("s.db"), dir.join("logs")).await.unwrap();
-        store.create(CreateInput {
-            id: "parent".into(),
-            prompt: "p".into(),
-            ..Default::default()
-        }).await.unwrap();
-        store.create(CreateInput {
-            id: "child".into(),
-            prompt: "c".into(),
-            parent_session_id: Some("parent".into()),
-            ..Default::default()
-        }).await.unwrap();
+        let store = Store::open(dir.join("s.db"), dir.join("logs"))
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "parent".into(),
+                prompt: "p".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .create(CreateInput {
+                id: "child".into(),
+                prompt: "c".into(),
+                parent_session_id: Some("parent".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
         let c = store.get("child").await.unwrap().unwrap();
         assert_eq!(c.parent_session_id.as_deref(), Some("parent"));
@@ -1779,7 +2489,9 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_mcp_session_fields() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
         let extra = vec![
             McpServerDef {
                 name: "my-mcp".into(),
@@ -1795,13 +2507,16 @@ mod tests {
             },
         ];
         let hidden = vec!["unwanted-mcp".into()];
-        store.create(CreateInput {
-            id: "mcp1".into(),
-            prompt: "test mcp fields".into(),
-            extra_mcp_servers: extra.clone(),
-            hidden_mcp_servers: hidden.clone(),
-            ..Default::default()
-        }).await.unwrap();
+        store
+            .create(CreateInput {
+                id: "mcp1".into(),
+                prompt: "test mcp fields".into(),
+                extra_mcp_servers: extra.clone(),
+                hidden_mcp_servers: hidden.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
         let got = store.get("mcp1").await.unwrap().unwrap();
         assert_eq!(got.extra_mcp_servers, extra);
@@ -1811,38 +2526,46 @@ mod tests {
     #[tokio::test]
     async fn forced_on_fields_round_trip_and_old_rows_default_empty() {
         let dir = tmp();
-        let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+        let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap();
 
         let plugins = vec!["superpowers@official".to_string()];
-        let skills  = vec!["rke2-ops".to_string()];
-        let mcp     = vec!["my-server".to_string()];
+        let skills = vec!["rke2-ops".to_string()];
+        let mcp = vec!["my-server".to_string()];
 
-        let created = store.create(CreateInput {
-            id: "s-forced".into(),
-            repos: vec!["r".into()],
-            prompt: "x".into(),
-            forced_on_plugins:     plugins.clone(),
-            forced_on_skills:      skills.clone(),
-            forced_on_mcp_servers: mcp.clone(),
-            ..Default::default()
-        }).await.unwrap();
+        let created = store
+            .create(CreateInput {
+                id: "s-forced".into(),
+                repos: vec!["r".into()],
+                prompt: "x".into(),
+                forced_on_plugins: plugins.clone(),
+                forced_on_skills: skills.clone(),
+                forced_on_mcp_servers: mcp.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        assert_eq!(created.forced_on_plugins,     plugins);
-        assert_eq!(created.forced_on_skills,      skills);
+        assert_eq!(created.forced_on_plugins, plugins);
+        assert_eq!(created.forced_on_skills, skills);
         assert_eq!(created.forced_on_mcp_servers, mcp);
 
         let got = store.get("s-forced").await.unwrap().unwrap();
-        assert_eq!(got.forced_on_plugins,     plugins);
-        assert_eq!(got.forced_on_skills,      skills);
+        assert_eq!(got.forced_on_plugins, plugins);
+        assert_eq!(got.forced_on_skills, skills);
         assert_eq!(got.forced_on_mcp_servers, mcp);
 
         // A session without forced-on fields must default to empty (legacy compat).
-        let plain = store.create(CreateInput {
-            id: "s-plain".into(),
-            repos: vec!["r".into()],
-            prompt: "y".into(),
-            ..Default::default()
-        }).await.unwrap();
+        let plain = store
+            .create(CreateInput {
+                id: "s-plain".into(),
+                repos: vec!["r".into()],
+                prompt: "y".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert!(plain.forced_on_plugins.is_empty());
         assert!(plain.forced_on_skills.is_empty());
         assert!(plain.forced_on_mcp_servers.is_empty());
@@ -1855,11 +2578,16 @@ mod tests {
         {
             use sqlx::sqlite::SqlitePoolOptions;
             let pool = SqlitePoolOptions::new()
-                .connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
             sqlx::query(
                 "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, prompt TEXT, \
-                 createdAt INTEGER, seq INTEGER)"
-            ).execute(&pool).await.unwrap();
+                 createdAt INTEGER, seq INTEGER)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::query("INSERT INTO sessions (id,status,prompt,createdAt,seq) VALUES ('old2','done','p',12345,0)")
                 .execute(&pool).await.unwrap();
             pool.close().await;

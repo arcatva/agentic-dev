@@ -18,10 +18,10 @@
 //! in the session transcript. Off by default? No — on. The file is tiny (a few KB at most) and
 //! it gets the next-failure root cause back into the transcript without a service redeploy.
 
+use parking_lot::Mutex;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use crate::engine::runner::{RunHandle, RunSpec, Runner};
 
@@ -39,7 +39,10 @@ impl SdkRunner {
     }
     /// Constructor with an explicit node binary (tests inject a fake; diagnostics override node).
     pub fn with_node(node_bin: impl Into<String>, bridge_path: impl Into<String>) -> Self {
-        SdkRunner { node_bin: node_bin.into(), bridge_path: bridge_path.into() }
+        SdkRunner {
+            node_bin: node_bin.into(),
+            bridge_path: bridge_path.into(),
+        }
     }
 }
 
@@ -51,7 +54,11 @@ struct SdkHandle {
 
 impl SdkHandle {
     fn send(&self, line: &str) {
-        let line = if line.ends_with('\n') { line.to_string() } else { format!("{line}\n") };
+        let line = if line.ends_with('\n') {
+            line.to_string()
+        } else {
+            format!("{line}\n")
+        };
         if let Some(w) = self.stdin.lock().as_mut() {
             if let Err(e) = w.write_all(line.as_bytes()) {
                 tracing::warn!("[sdk_runner] stdin write failed: {e}");
@@ -63,8 +70,12 @@ impl SdkHandle {
 }
 
 impl RunHandle for SdkHandle {
-    fn is_active(&self) -> bool { self.state.lock().0 }
-    fn exit_code(&self) -> Option<i32> { self.state.lock().1 }
+    fn is_active(&self) -> bool {
+        self.state.lock().0
+    }
+    fn exit_code(&self) -> Option<i32> {
+        self.state.lock().1
+    }
     fn stop(&self) {
         // SIGTERM the bridge's process group → the bridge abort()s the SDK query and exits; the kill
         // also reaps the claude grandchild.
@@ -104,8 +115,12 @@ impl RunHandle for SdkHandle {
         // question is parked — treats it as the AskUserQuestion answer.
         self.send(line);
     }
-    fn end_input(&self) { self.send("{\"__bridge\":\"end\"}"); }
-    fn interrupt(&self) { self.send("{\"__bridge\":\"interrupt\"}"); }
+    fn end_input(&self) {
+        self.send("{\"__bridge\":\"end\"}");
+    }
+    fn interrupt(&self) {
+        self.send("{\"__bridge\":\"interrupt\"}");
+    }
     fn respond_permission(&self, decision: &str, feedback: Option<&str>) {
         // Relay the app's allow/deny to the bridge's parked canUseTool. The bridge resolves the single
         // live perm/plan request, writes the agentic_perm_resolved marker, and (on a plan approve)
@@ -145,7 +160,10 @@ impl Runner for SdkRunner {
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(&spec.env) // spec.env already merges the process env + per-session CLAUDE_CONFIG_DIR
-            .env("SDK_BRIDGE_LOG", spec.log_path.to_string_lossy().to_string())
+            .env(
+                "SDK_BRIDGE_LOG",
+                spec.log_path.to_string_lossy().to_string(),
+            )
             // SDK_BRIDGE_STDERR is set unconditionally so the bridge knows where to write
             // (and later read back) the captured stderr. It's empty when the runner falls
             // back to Stdio::null (file-open failed), in which case the bridge skips capture.
@@ -207,15 +225,31 @@ impl Runner for SdkRunner {
                     }
                 }
             });
-        if let Some(m) = spec.model.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_MODEL", m); }
-        if let Some(r) = spec.resume_session_id.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_RESUME", r); }
-        if let Some(md) = spec.mode.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_MODE", md); }
-        if let Some(e) = spec.effort.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_EFFORT", e); }
-        if let Some(p) = spec.permission_mode.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_PERMISSION_MODE", p); }
+        if let Some(m) = spec.model.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env("SDK_BRIDGE_MODEL", m);
+        }
+        if let Some(r) = spec.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env("SDK_BRIDGE_RESUME", r);
+        }
+        if let Some(md) = spec.mode.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env("SDK_BRIDGE_MODE", md);
+        }
+        if let Some(e) = spec.effort.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env("SDK_BRIDGE_EFFORT", e);
+        }
+        if let Some(p) = spec.permission_mode.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env("SDK_BRIDGE_PERMISSION_MODE", p);
+        }
         // Tier-1 harness rules (routing + fan-out discipline) → appended to Claude Code's system prompt
         // in the bridge. Set only on main session turns; worker specs leave this None, so a delegate
         // worker never carries the orchestrator-only rules.
-        if let Some(sp) = spec.append_system_prompt.as_deref().filter(|s| !s.is_empty()) { cmd.env("SDK_BRIDGE_APPEND_SYSTEM_PROMPT", sp); }
+        if let Some(sp) = spec
+            .append_system_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            cmd.env("SDK_BRIDGE_APPEND_SYSTEM_PROMPT", sp);
+        }
         let hidden_skills: Vec<&str> = spec
             .hidden_skills
             .iter()
@@ -315,7 +349,11 @@ impl Runner for SdkRunner {
             g.0 = false;
             g.1 = code;
         });
-        Box::new(SdkHandle { state, pid: Some(pid), stdin: Mutex::new(stdin) })
+        Box::new(SdkHandle {
+            state,
+            pid: Some(pid),
+            stdin: Mutex::new(stdin),
+        })
     }
 }
 
@@ -362,7 +400,10 @@ pub fn preflight(node_bin: &str, bridge_path: &str) -> Vec<String> {
         ));
     }
     if !sdk_installed(bridge) {
-        let dir = bridge.parent().map(|p| p.display().to_string()).unwrap_or_else(|| ".".into());
+        let dir = bridge
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".into());
         problems.push(format!(
             "@anthropic-ai/claude-agent-sdk not installed — every turn will fail. Fix: (cd {dir} && npm install)"
         ));
@@ -380,7 +421,9 @@ pub fn preflight(node_bin: &str, bridge_path: &str) -> Vec<String> {
 fn sdk_installed(bridge: &std::path::Path) -> bool {
     let mut dir = bridge.parent();
     while let Some(d) = dir {
-        if d.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json").exists() {
+        if d.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json")
+            .exists()
+        {
             return true;
         }
         dir = d.parent();
@@ -407,7 +450,11 @@ mod tests {
 
     fn tmpdir() -> std::path::PathBuf {
         static C: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!("sdkr-{}-{}", std::process::id(), C.fetch_add(1, Ordering::SeqCst)));
+        let p = std::env::temp_dir().join(format!(
+            "sdkr-{}-{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::SeqCst)
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -438,7 +485,10 @@ mod tests {
         std::fs::write(sdk.join("package.json"), "{}").unwrap();
         // "/bin/sh" is an explicit path that exists → stands in for a real node binary.
         let problems = preflight("/bin/sh", &bridge.to_string_lossy());
-        assert!(problems.is_empty(), "expected no problems, got {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "expected no problems, got {problems:?}"
+        );
     }
 
     #[test]
@@ -449,7 +499,9 @@ mod tests {
         // no node_modules next to the bridge
         let problems = preflight("/bin/sh", &bridge.to_string_lossy());
         assert!(
-            problems.iter().any(|p| p.contains("claude-agent-sdk") && p.contains("npm install")),
+            problems
+                .iter()
+                .any(|p| p.contains("claude-agent-sdk") && p.contains("npm install")),
             "must flag the missing SDK with the npm-install fix: {problems:?}"
         );
     }
@@ -459,8 +511,14 @@ mod tests {
         let dir = tmpdir();
         let bridge = dir.join("does-not-exist.mjs");
         let problems = preflight("/no/such/node", &bridge.to_string_lossy());
-        assert!(problems.iter().any(|p| p.contains("bridge")), "flags missing bridge: {problems:?}");
-        assert!(problems.iter().any(|p| p.contains("node")), "flags missing node: {problems:?}");
+        assert!(
+            problems.iter().any(|p| p.contains("bridge")),
+            "flags missing bridge: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("node")),
+            "flags missing node: {problems:?}"
+        );
     }
 
     #[test]
@@ -470,8 +528,14 @@ mod tests {
         let log = dir.join("turn.jsonl");
         let runner = SdkRunner::with_node(fake_node(&dir, &rec), "/ignored/sdk-bridge.mjs");
         let mut env = HashMap::new();
-        env.insert("HOME".to_string(), std::env::var("HOME").unwrap_or_default());
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "HOME".to_string(),
+            std::env::var("HOME").unwrap_or_default(),
+        );
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
             env,
@@ -491,21 +555,42 @@ mod tests {
             recorded = std::fs::read_to_string(&rec).unwrap_or_default();
             // Break on the full STDIN payload, not just the "STDIN:" prefix — the recorder appends
             // the line in one write, but polling can still observe it before the value is flushed.
-            if logged.contains("\"subtype\":\"success\"") && recorded.contains("\"content\":\"hi\"") {
+            if logged.contains("\"subtype\":\"success\"") && recorded.contains("\"content\":\"hi\"")
+            {
                 break;
             }
         }
-        assert!(h.is_active(), "the bridge stays alive after a turn (persistent session)");
-        assert!(logged.contains("\"subtype\":\"init\"") && logged.contains("\"subtype\":\"success\""), "bridge wrote the turn to the log: {logged}");
-        assert!(recorded.contains("SDK_BRIDGE_LOG="), "log env wired: {recorded}");
-        assert!(recorded.contains("SDK_BRIDGE_MODEL=opus"), "model wired: {recorded}");
-        assert!(recorded.contains("SDK_BRIDGE_APPEND_SYSTEM_PROMPT=HARNESS_MARKER"), "append-system-prompt wired: {recorded}");
-        assert!(recorded.contains("STDIN:") && recorded.contains("\"content\":\"hi\""), "the user turn reached the bridge over stdin: {recorded}");
+        assert!(
+            h.is_active(),
+            "the bridge stays alive after a turn (persistent session)"
+        );
+        assert!(
+            logged.contains("\"subtype\":\"init\"") && logged.contains("\"subtype\":\"success\""),
+            "bridge wrote the turn to the log: {logged}"
+        );
+        assert!(
+            recorded.contains("SDK_BRIDGE_LOG="),
+            "log env wired: {recorded}"
+        );
+        assert!(
+            recorded.contains("SDK_BRIDGE_MODEL=opus"),
+            "model wired: {recorded}"
+        );
+        assert!(
+            recorded.contains("SDK_BRIDGE_APPEND_SYSTEM_PROMPT=HARNESS_MARKER"),
+            "append-system-prompt wired: {recorded}"
+        );
+        assert!(
+            recorded.contains("STDIN:") && recorded.contains("\"content\":\"hi\""),
+            "the user turn reached the bridge over stdin: {recorded}"
+        );
         h.stop();
         // Generous deadline: on loaded CI runners the process-group kill + reaper-thread update
         // can take several seconds; a genuine failure still fails, just later.
         for _ in 0..300 {
-            if !h.is_active() { break; }
+            if !h.is_active() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(!h.is_active(), "stop() terminates the bridge");
@@ -522,7 +607,10 @@ mod tests {
         let log = dir.join("turn.jsonl");
         let runner = SdkRunner::with_node(fake_node(&dir, &rec), "/ignored/sdk-bridge.mjs");
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
         let h = runner.start(RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
             env,
@@ -558,7 +646,10 @@ mod tests {
 
         let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
 
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
@@ -600,7 +691,10 @@ mod tests {
 
         let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
 
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
@@ -638,7 +732,10 @@ mod tests {
 
         let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
 
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
@@ -675,7 +772,10 @@ mod tests {
     #[test]
     fn missing_node_degrades_to_inactive_127_not_panic() {
         let runner = SdkRunner::with_node("/no/such/node/binary", "/x.mjs");
-        let h = runner.start(RunSpec { log_path: tmpdir().join("l"), ..Default::default() });
+        let h = runner.start(RunSpec {
+            log_path: tmpdir().join("l"),
+            ..Default::default()
+        });
         assert!(!h.is_active());
         assert_eq!(h.exit_code(), Some(127));
     }
@@ -685,7 +785,8 @@ mod tests {
     /// in the synthetic error result. Without this, "Claude Code process exited with code 1"
     /// failures have no actionable stderr to look at.
     fn fake_node_with_stderr(dir: &std::path::Path) -> String {
-        let script = "#!/bin/sh\necho 'fake stderr line 1' 1>&2\necho 'fake stderr line 2' 1>&2\nsleep 60\n";
+        let script =
+            "#!/bin/sh\necho 'fake stderr line 1' 1>&2\necho 'fake stderr line 2' 1>&2\nsleep 60\n";
         let p = dir.join("fakenode-stderr.sh");
         std::fs::write(&p, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -702,7 +803,10 @@ mod tests {
         assert!(!stderr_expected.exists());
         let runner = SdkRunner::with_node(fake_node_with_stderr(&dir), "/ignored/sdk-bridge.mjs");
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
         let h = runner.start(RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
             env,
@@ -721,7 +825,9 @@ mod tests {
         }
         h.stop();
         for _ in 0..60 {
-            if !h.is_active() { break; }
+            if !h.is_active() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(
@@ -741,7 +847,10 @@ mod tests {
 
         let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
 
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),
@@ -769,7 +878,9 @@ mod tests {
         for _ in 0..200 {
             std::thread::sleep(std::time::Duration::from_millis(20));
             recorded = std::fs::read_to_string(&rec).unwrap_or_default();
-            if recorded.contains("SDK_BRIDGE_HIDDEN_MCP") && recorded.contains("SDK_BRIDGE_EXTRA_MCP") {
+            if recorded.contains("SDK_BRIDGE_HIDDEN_MCP")
+                && recorded.contains("SDK_BRIDGE_EXTRA_MCP")
+            {
                 break;
             }
         }
@@ -782,7 +893,8 @@ mod tests {
         // Extra MCP must contain "extra-mcp" and must NOT contain "hidden-one" in the EXTRA var.
         // Parse just the line that starts with SDK_BRIDGE_EXTRA_MCP= to avoid false-positives from
         // SDK_BRIDGE_HIDDEN_MCP appearing later in the recorded env dump.
-        let extra_mcp_line = recorded.lines()
+        let extra_mcp_line = recorded
+            .lines()
             .find(|l| l.starts_with("SDK_BRIDGE_EXTRA_MCP="))
             .unwrap_or("");
         assert!(
@@ -806,7 +918,10 @@ mod tests {
 
         let runner = SdkRunner::with_node(fake, bridge.to_string_lossy());
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
 
         let spec = RunSpec {
             cwd: dir.to_string_lossy().into_owned(),

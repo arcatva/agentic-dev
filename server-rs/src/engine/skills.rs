@@ -2,7 +2,10 @@ use std::io;
 use std::path::Path;
 
 #[derive(serde::Serialize, Clone, Debug)]
-pub struct SkillInfo { pub name: String, pub description: String }
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
 
 /// Create `<skills_dir>/<name>/SKILL.md` with YAML frontmatter and the skill's
 /// INSTRUCTIONS as the markdown body. An empty `instructions` writes frontmatter
@@ -16,7 +19,12 @@ pub struct SkillInfo { pub name: String, pub description: String }
 /// were bypassed.  (Note: checking the parent of the joined path does
 /// NOT work for `..` — `Path::parent` strips the `..` component, so the
 /// comparison would always pass.  Component-level inspection avoids that.)
-pub fn add_skill(skills_dir: &Path, name: &str, description: &str, instructions: &str) -> io::Result<()> {
+pub fn add_skill(
+    skills_dir: &Path,
+    name: &str,
+    description: &str,
+    instructions: &str,
+) -> io::Result<()> {
     // Belt-and-suspenders traversal guard: verify that `name` is a single,
     // normal path component — no `..`, no `.`, no separators, no absolute
     // path.  We check the components of the *name* itself (before joining)
@@ -30,18 +38,22 @@ pub fn add_skill(skills_dir: &Path, name: &str, description: &str, instructions:
         use std::path::Component;
         let mut components = std::path::Path::new(name).components();
         let single = components.next();
-        let is_single_normal = matches!(single, Some(Component::Normal(_)))
-            && components.next().is_none();
+        let is_single_normal =
+            matches!(single, Some(Component::Normal(_))) && components.next().is_none();
         if !is_single_normal {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-                format!("refusing to create skill '{name}': name must be a single path component")));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("refusing to create skill '{name}': name must be a single path component"),
+            ));
         }
     }
 
     let skill_dir = skills_dir.join(name);
     if skill_dir.exists() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists,
-            format!("skill '{name}' already exists")));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("skill '{name}' already exists"),
+        ));
     }
     std::fs::create_dir_all(&skill_dir)?;
     let mut content = format!("---\nname: {name}\ndescription: {description}\n---\n");
@@ -62,42 +74,65 @@ pub fn add_skill(skills_dir: &Path, name: &str, description: &str, instructions:
 /// attacks even if the name validator in the API layer were bypassed.
 pub fn delete_skill(skills_dir: &Path, name: &str) -> io::Result<bool> {
     let target = skills_dir.join(name);
-    if !target.exists() { return Ok(false); }
+    if !target.exists() {
+        return Ok(false);
+    }
 
     let canon_skills = skills_dir.canonicalize()?;
     let canon_target = target.canonicalize()?;
-    let canon_parent = canon_target.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::PermissionDenied, "target has no parent")
-    })?;
+    let canon_parent = canon_target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "target has no parent"))?;
     if canon_parent != canon_skills {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            format!("refusing to delete '{}': not a direct child of skills_dir",
-                canon_target.display())));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to delete '{}': not a direct child of skills_dir",
+                canon_target.display()
+            ),
+        ));
     }
     std::fs::remove_dir_all(&canon_target)?;
     Ok(true)
 }
 
 pub fn list_skills(skills_dir: &Path) -> Vec<SkillInfo> {
-    let Ok(entries) = std::fs::read_dir(skills_dir) else { return vec![]; };
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return vec![];
+    };
     let mut out = Vec::new();
     for e in entries.flatten() {
         let md = e.path().join("SKILL.md");
-        if !md.exists() { continue; }
-        let Ok(text) = std::fs::read_to_string(&md) else { continue; };
+        if !md.exists() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&md) else {
+            continue;
+        };
         let entry_name = e.file_name().to_string_lossy().into_owned();
         let (mut name, mut description) = (entry_name.clone(), String::new());
-        if let Some(fm) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) {
+        if let Some(fm) = text
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---"))
+        {
             // First match wins — a duplicate name:/ description: line does not override the first.
             let (mut name_set, mut desc_set) = (false, false);
             for line in fm.0.lines() {
                 if let Some(v) = line.strip_prefix("name:") {
-                    if !name_set { name = v.trim().to_string(); name_set = true; }
+                    if !name_set {
+                        name = v.trim().to_string();
+                        name_set = true;
+                    }
                 } else if let Some(v) = line.strip_prefix("description:") {
-                    if !desc_set { description = v.trim().to_string(); desc_set = true; }
+                    if !desc_set {
+                        description = v.trim().to_string();
+                        desc_set = true;
+                    }
                 }
             }
-            if name.is_empty() { name = entry_name; }
+            if name.is_empty() {
+                name = entry_name;
+            }
         }
         out.push(SkillInfo { name, description });
     }
@@ -110,9 +145,14 @@ mod tests {
     use super::*;
 
     fn tmp() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("agentic-skills-{}-{}",
+        let d = std::env::temp_dir().join(format!(
+            "agentic-skills-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -121,7 +161,8 @@ mod tests {
     fn lists_skills_from_frontmatter_sorted() {
         let dir = tmp();
         let make = |name: &str, fm: &str| {
-            let d = dir.join(name); std::fs::create_dir_all(&d).unwrap();
+            let d = dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("SKILL.md"), fm).unwrap();
         };
         make("zskill", "---\nname: zed\ndescription: last one\n---\nbody");
@@ -148,7 +189,13 @@ mod tests {
     #[test]
     fn add_skill_writes_instructions_as_body() {
         let dir = tmp();
-        add_skill(&dir, "real-skill", "does things", "## Steps\n1. do the thing\n").unwrap();
+        add_skill(
+            &dir,
+            "real-skill",
+            "does things",
+            "## Steps\n1. do the thing\n",
+        )
+        .unwrap();
         let text = std::fs::read_to_string(dir.join("real-skill").join("SKILL.md")).unwrap();
         assert_eq!(
             text,
@@ -156,7 +203,9 @@ mod tests {
         );
         // And list_skills still parses the frontmatter with a body present.
         let listed = list_skills(&dir);
-        assert!(listed.iter().any(|s| s.name == "real-skill" && s.description == "does things"));
+        assert!(listed
+            .iter()
+            .any(|s| s.name == "real-skill" && s.description == "does things"));
     }
 
     #[test]
@@ -187,25 +236,36 @@ mod tests {
         // ".." resolves to the parent of skills_dir — must be refused BEFORE any directory
         // or file is created; in particular, <skills_dir>/../SKILL.md must NOT appear.
         let err = add_skill(&dir, "..", "should be refused", "").unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied,
-            "traversal must be refused with PermissionDenied, got: {err}");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied,
+            "traversal must be refused with PermissionDenied, got: {err}"
+        );
         // Verify nothing was created above the skills dir.
         let outside_skill_md = dir.parent().unwrap().join("SKILL.md");
-        assert!(!outside_skill_md.exists(),
-            "SKILL.md must NOT have been created outside skills_dir");
+        assert!(
+            !outside_skill_md.exists(),
+            "SKILL.md must NOT have been created outside skills_dir"
+        );
     }
 
     #[test]
     fn delete_skill_rejects_path_traversal() {
         let dir = tmp();
         // Create a directory OUTSIDE skills_dir to try to delete via traversal.
-        let outside = dir.parent().unwrap().join(format!("outside-{}", std::process::id()));
+        let outside = dir
+            .parent()
+            .unwrap()
+            .join(format!("outside-{}", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         // The name "../outside-<pid>" would resolve to outside dir — must be refused.
         let name = format!("../outside-{}", std::process::id());
         let err = delete_skill(&dir, &name).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied,
-            "traversal must be refused with PermissionDenied, got: {err}");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "traversal must be refused with PermissionDenied, got: {err}"
+        );
         // The outside dir must still exist (not deleted).
         assert!(outside.exists());
         std::fs::remove_dir_all(&outside).ok();

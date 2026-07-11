@@ -182,10 +182,7 @@ mod tests {
     fn scans_tokens_with_boundaries() {
         assert_eq!(scan_prefixes("hi @session:abcd1234 x"), vec!["abcd1234"]);
         // uppercase hex normalized, hyphens allowed, full uuid ok
-        assert_eq!(
-            scan_prefixes("@session:ABCD-1234-ef"),
-            vec!["abcd-1234-ef"]
-        );
+        assert_eq!(scan_prefixes("@session:ABCD-1234-ef"), vec!["abcd-1234-ef"]);
         // too short, missing prefix char, or embedded in a word → no token
         assert!(scan_prefixes("@session:abc").is_empty());
         assert!(scan_prefixes("mail@session:abcd1234").is_empty());
@@ -205,8 +202,12 @@ mod tests {
 
     #[test]
     fn unique_match_appends_block_and_keeps_original_text() {
-        let sessions = vec![sess("abcd1234-0000-0000-0000-000000000000", "fix the login bug")];
-        let out = expand_session_mentions("look at @session:abcd1234 please", &sessions, &|id| lp(id));
+        let sessions = vec![sess(
+            "abcd1234-0000-0000-0000-000000000000",
+            "fix the login bug",
+        )];
+        let out =
+            expand_session_mentions("look at @session:abcd1234 please", &sessions, &|id| lp(id));
         assert!(out.starts_with("look at @session:abcd1234 please\n\n---\n"));
         assert!(out.contains("session abcd1234-0000-0000-0000-000000000000"));
         assert!(out.contains("\"fix the login bug\""));
@@ -224,8 +225,12 @@ mod tests {
         let mut s = sess("abcd1234-0000-0000-0000-000000000000", "multi");
         s.repos = vec!["alpha".to_string(), "beta".to_string()];
         let out = expand_session_mentions("@session:abcd1234", &[s], &|id| lp(id));
-        assert!(out.contains("- worktree [alpha]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/alpha"));
-        assert!(out.contains("- worktree [beta]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/beta"));
+        assert!(out.contains(
+            "- worktree [alpha]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/alpha"
+        ));
+        assert!(out.contains(
+            "- worktree [beta]: /tmp/worktrees/abcd1234-0000-0000-0000-000000000000/beta"
+        ));
     }
 
     #[test]

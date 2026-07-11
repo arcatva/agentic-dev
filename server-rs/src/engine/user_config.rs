@@ -1,6 +1,6 @@
+use crate::engine::store::McpServerDef;
 use std::io;
 use std::path::Path;
-use crate::engine::store::McpServerDef;
 
 // TOCTOU note: WRITE_LOCK serializes concurrent writes *within this process only*.
 // It does NOT guard against an external `claude` session (or any other process)
@@ -13,28 +13,41 @@ const MAX_BACKUPS: usize = 20;
 const CLAUDE_JSON: &str = ".claude.json";
 
 fn claude_json_path(config_base: &Path) -> std::path::PathBuf {
-    config_base.parent().unwrap_or(config_base).join(CLAUDE_JSON)
+    config_base
+        .parent()
+        .unwrap_or(config_base)
+        .join(CLAUDE_JSON)
 }
 
 /// Read `.claude.json` for a write:
 /// - Missing → Ok(None) (treat as empty object on write)
 /// - Valid JSON object → Ok(Some(map))
 /// - Anything else → Err(InvalidData) (refuse to clobber)
-fn read_claude_json_for_write(path: &Path) -> io::Result<Option<serde_json::Map<String, serde_json::Value>>> {
+fn read_claude_json_for_write(
+    path: &Path,
+) -> io::Result<Option<serde_json::Map<String, serde_json::Value>>> {
     match std::fs::read_to_string(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(serde_json::Value::Object(m)) => Ok(Some(m)),
-            Ok(_) => Err(io::Error::new(io::ErrorKind::InvalidData, ".claude.json is not a JSON object")),
-            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, format!(".claude.json is corrupt: {e}"))),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                ".claude.json is not a JSON object",
+            )),
+            Err(e) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(".claude.json is corrupt: {e}"),
+            )),
         },
     }
 }
 
 /// Back up `.claude.json` to `<config_base>/backups/.claude.json.<millis>.bak`, pruning to MAX_BACKUPS.
 fn backup_claude_json(config_base: &Path, path: &Path) -> io::Result<()> {
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     let backups = config_base.join("backups");
     std::fs::create_dir_all(&backups)?;
     let millis = std::time::SystemTime::now()
@@ -46,14 +59,17 @@ fn backup_claude_json(config_base: &Path, path: &Path) -> io::Result<()> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name().and_then(|n| n.to_str())
+            p.file_name()
+                .and_then(|n| n.to_str())
                 .map(|n| n.starts_with(CLAUDE_JSON) && n.ends_with(".bak"))
                 .unwrap_or(false)
         })
         .collect();
     baks.sort();
     if baks.len() > MAX_BACKUPS {
-        for p in &baks[..baks.len() - MAX_BACKUPS] { let _ = std::fs::remove_file(p); }
+        for p in &baks[..baks.len() - MAX_BACKUPS] {
+            let _ = std::fs::remove_file(p);
+        }
     }
     Ok(())
 }
@@ -89,7 +105,10 @@ fn serialize_def(def: &McpServerDef) -> serde_json::Map<String, serde_json::Valu
             m.insert("url".into(), serde_json::Value::String(u.clone()));
         }
         if let Some(ref h) = def.headers {
-            m.insert("headers".into(), serde_json::to_value(h).unwrap_or_default());
+            m.insert(
+                "headers".into(),
+                serde_json::to_value(h).unwrap_or_default(),
+            );
         }
     }
     m
@@ -100,7 +119,10 @@ fn serialize_def(def: &McpServerDef) -> serde_json::Map<String, serde_json::Valu
 /// The backup is taken only when a write will actually happen (after `mutate`, before the
 /// write — the on-disk file is still the original at that point), so no-op calls don't
 /// churn real history out of the bounded backup rotation.
-fn edit_claude_json(config_base: &Path, mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> bool) -> io::Result<bool> {
+fn edit_claude_json(
+    config_base: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> bool,
+) -> io::Result<bool> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = claude_json_path(config_base);
     let mut map = read_claude_json_for_write(&path)?.unwrap_or_default();
@@ -135,10 +157,14 @@ pub const MCP_DISABLED_KEY: &str = "mcpServersDisabled";
 pub fn add_mcp_server(config_base: &Path, def: &McpServerDef) -> io::Result<()> {
     edit_claude_json(config_base, |map| {
         remove_from_key(map, MCP_DISABLED_KEY, &def.name);
-        let servers = map.entry("mcpServers".to_string())
+        let servers = map
+            .entry("mcpServers".to_string())
             .or_insert_with(|| serde_json::Value::Object(Default::default()));
         if let serde_json::Value::Object(ref mut obj) = servers {
-            obj.insert(def.name.clone(), serde_json::Value::Object(serialize_def(def)));
+            obj.insert(
+                def.name.clone(),
+                serde_json::Value::Object(serialize_def(def)),
+            );
         }
         true
     })?;
@@ -147,14 +173,20 @@ pub fn add_mcp_server(config_base: &Path, def: &McpServerDef) -> io::Result<()> 
 
 /// Remove `name` from a top-level object key, dropping the parent object if it becomes empty.
 /// Returns the removed value (None if absent).
-fn remove_from_key(map: &mut serde_json::Map<String, serde_json::Value>, key: &str, name: &str) -> Option<serde_json::Value> {
+fn remove_from_key(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    name: &str,
+) -> Option<serde_json::Value> {
     let mut removed = None;
     let mut drop_parent = false;
     if let Some(serde_json::Value::Object(ref mut obj)) = map.get_mut(key) {
         removed = obj.remove(name);
         drop_parent = removed.is_some() && obj.is_empty();
     }
-    if drop_parent { map.remove(key); }
+    if drop_parent {
+        map.remove(key);
+    }
     removed
 }
 
@@ -191,7 +223,11 @@ pub fn set_mcp_server_enabled(config_base: &Path, name: &str, enabled: bool) -> 
     };
     let mut found = false;
     edit_claude_json(config_base, |map| {
-        let target_has = map.get(to).and_then(|v| v.as_object()).map(|o| o.contains_key(name)).unwrap_or(false);
+        let target_has = map
+            .get(to)
+            .and_then(|v| v.as_object())
+            .map(|o| o.contains_key(name))
+            .unwrap_or(false);
         let Some(def) = remove_from_key(map, from, name) else {
             // Nothing on the source side: success iff already on the target side; no write.
             found = target_has;
@@ -203,7 +239,8 @@ pub fn set_mcp_server_enabled(config_base: &Path, name: &str, enabled: bool) -> 
         //  - enabling with a live def already on target: keep the live one, drop the stale
         //    parked def we just removed.
         if !(enabled && target_has) {
-            let target = map.entry(to.to_string())
+            let target = map
+                .entry(to.to_string())
                 .or_insert_with(|| serde_json::Value::Object(Default::default()));
             if let serde_json::Value::Object(ref mut obj) = target {
                 obj.insert(name.to_string(), def);
@@ -221,9 +258,16 @@ pub fn set_mcp_server_enabled(config_base: &Path, name: &str, enabled: bool) -> 
 /// globally-ENABLED server needs no injection — sessions see it anyway).
 pub fn parked_mcp_defs(config_base: &Path, names: &[String]) -> Vec<McpServerDef> {
     let path = claude_json_path(config_base);
-    let Ok(text) = std::fs::read_to_string(&path) else { return vec![] };
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
-    let Some(parked) = map.get(MCP_DISABLED_KEY).and_then(|v| v.as_object()) else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return vec![];
+    };
+    let Some(parked) = map.get(MCP_DISABLED_KEY).and_then(|v| v.as_object()) else {
+        return vec![];
+    };
     names
         .iter()
         .map(|n| n.trim())
@@ -253,7 +297,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "agentic-uc-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -316,10 +363,16 @@ mod tests {
     fn add_preserves_other_top_level_keys() {
         let base = tmp();
         let cb = setup(&base);
-        std::fs::write(base.join(".claude.json"),
-            r#"{"otherKey":"preserved","mcpServers":{"existing":{"command":"x"}}}"#
-        ).unwrap();
-        let def = McpServerDef { name: "new".into(), command: Some("y".into()), ..Default::default() };
+        std::fs::write(
+            base.join(".claude.json"),
+            r#"{"otherKey":"preserved","mcpServers":{"existing":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let def = McpServerDef {
+            name: "new".into(),
+            command: Some("y".into()),
+            ..Default::default()
+        };
         add_mcp_server(&cb, &def).unwrap();
         let text = std::fs::read_to_string(base.join(".claude.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -333,24 +386,37 @@ mod tests {
         let base = tmp();
         let cb = setup(&base);
         std::fs::write(base.join(".claude.json"), "{corrupt").unwrap();
-        let err = add_mcp_server(&cb, &McpServerDef { name: "x".into(), command: Some("c".into()), ..Default::default() }).unwrap_err();
+        let err = add_mcp_server(
+            &cb,
+            &McpServerDef {
+                name: "x".into(),
+                command: Some("c".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         // file must be untouched
-        assert_eq!(std::fs::read_to_string(base.join(".claude.json")).unwrap(), "{corrupt");
+        assert_eq!(
+            std::fs::read_to_string(base.join(".claude.json")).unwrap(),
+            "{corrupt"
+        );
     }
 
     #[test]
     fn delete_returns_true_and_removes_entry() {
         let base = tmp();
         let cb = setup(&base);
-        std::fs::write(base.join(".claude.json"),
-            r#"{"mcpServers":{"to-delete":{"command":"x"},"keep":{"command":"y"}}}"#
-        ).unwrap();
+        std::fs::write(
+            base.join(".claude.json"),
+            r#"{"mcpServers":{"to-delete":{"command":"x"},"keep":{"command":"y"}}}"#,
+        )
+        .unwrap();
         let removed = delete_mcp_server(&cb, "to-delete").unwrap();
         assert!(removed);
-        let v: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(base.join(".claude.json")).unwrap()
-        ).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         assert!(v["mcpServers"].get("to-delete").is_none());
         assert_eq!(v["mcpServers"]["keep"]["command"], "y");
     }
@@ -367,13 +433,15 @@ mod tests {
     fn delete_drops_empty_mcp_servers_map() {
         let base = tmp();
         let cb = setup(&base);
-        std::fs::write(base.join(".claude.json"),
-            r#"{"mcpServers":{"only":{"command":"x"}}}"#
-        ).unwrap();
+        std::fs::write(
+            base.join(".claude.json"),
+            r#"{"mcpServers":{"only":{"command":"x"}}}"#,
+        )
+        .unwrap();
         delete_mcp_server(&cb, "only").unwrap();
-        let v: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(base.join(".claude.json")).unwrap()
-        ).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         // mcpServers key removed when empty
         assert!(v.get("mcpServers").is_none());
     }
@@ -389,7 +457,10 @@ mod tests {
         let def = McpServerDef {
             name: "stdio-explicit".into(),
             command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()]),
+            args: Some(vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-filesystem".into(),
+            ]),
             env: None,
             transport: Some("stdio".into()), // explicit transport field — must NOT flip to http branch
             url: None,
@@ -399,12 +470,16 @@ mod tests {
         let text = std::fs::read_to_string(base.join(".claude.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         // command and args must be present
-        assert_eq!(v["mcpServers"]["stdio-explicit"]["command"], "npx",
-            "command must survive even when transport=Some(\"stdio\") is set");
+        assert_eq!(
+            v["mcpServers"]["stdio-explicit"]["command"], "npx",
+            "command must survive even when transport=Some(\"stdio\") is set"
+        );
         assert_eq!(v["mcpServers"]["stdio-explicit"]["args"][0], "-y");
         // type/url/headers must NOT appear for stdio
-        assert!(v["mcpServers"]["stdio-explicit"].get("type").is_none(),
-            "type must not appear for a stdio server");
+        assert!(
+            v["mcpServers"]["stdio-explicit"].get("type").is_none(),
+            "type must not appear for a stdio server"
+        );
         assert!(v["mcpServers"]["stdio-explicit"].get("url").is_none());
     }
 
@@ -413,9 +488,16 @@ mod tests {
         let base = tmp();
         let cb = setup(&base);
         std::fs::write(base.join(".claude.json"), r#"{"mcpServers":{}}"#).unwrap();
-        let def = McpServerDef { name: "x".into(), command: Some("c".into()), ..Default::default() };
+        let def = McpServerDef {
+            name: "x".into(),
+            command: Some("c".into()),
+            ..Default::default()
+        };
         add_mcp_server(&cb, &def).unwrap();
-        let backups: Vec<_> = std::fs::read_dir(cb.join("backups")).unwrap().flatten().collect();
+        let backups: Vec<_> = std::fs::read_dir(cb.join("backups"))
+            .unwrap()
+            .flatten()
+            .collect();
         assert_eq!(backups.len(), 1);
     }
 
@@ -429,7 +511,9 @@ mod tests {
 
         // Disable: def moves verbatim to the parking key; other keys untouched.
         assert!(set_mcp_server_enabled(&cb, "srv", false).unwrap());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         assert!(v["mcpServers"].get("srv").is_none());
         assert_eq!(v[MCP_DISABLED_KEY]["srv"]["command"], "node");
         assert_eq!(v["mcpServers"]["other"]["url"], "https://x/mcp");
@@ -440,7 +524,9 @@ mod tests {
 
         // Re-enable: moves back, parking key collapses away.
         assert!(set_mcp_server_enabled(&cb, "srv", true).unwrap());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         assert_eq!(v["mcpServers"]["srv"]["args"][0], "s.js");
         assert!(v.get(MCP_DISABLED_KEY).is_none());
 
@@ -460,9 +546,17 @@ mod tests {
         ).unwrap();
 
         assert!(set_mcp_server_enabled(&cb, "srv", false).unwrap());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
-        assert!(v.get("mcpServers").and_then(|m| m.get("srv")).is_none(), "live copy must be scrubbed");
-        assert_eq!(v[MCP_DISABLED_KEY]["srv"]["command"], "new", "live def wins over stale parked copy");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
+        assert!(
+            v.get("mcpServers").and_then(|m| m.get("srv")).is_none(),
+            "live copy must be scrubbed"
+        );
+        assert_eq!(
+            v[MCP_DISABLED_KEY]["srv"]["command"], "new",
+            "live def wins over stale parked copy"
+        );
     }
 
     #[test]
@@ -474,9 +568,17 @@ mod tests {
         ).unwrap();
 
         assert!(set_mcp_server_enabled(&cb, "srv", true).unwrap());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
-        assert_eq!(v["mcpServers"]["srv"]["command"], "new", "live def is authoritative");
-        assert!(v.get(MCP_DISABLED_KEY).is_none(), "stale parked copy must be dropped");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            v["mcpServers"]["srv"]["command"], "new",
+            "live def is authoritative"
+        );
+        assert!(
+            v.get(MCP_DISABLED_KEY).is_none(),
+            "stale parked copy must be dropped"
+        );
     }
 
     #[test]
@@ -487,12 +589,23 @@ mod tests {
             r#"{"mcpServers":{"live":{"command":"a"}},"mcpServersDisabled":{"parked-stdio":{"command":"node","args":["s.js"],"env":{"K":"V"}},"parked-http":{"type":"sse","url":"https://x/mcp"}}}"#,
         ).unwrap();
 
-        let defs = parked_mcp_defs(&cb, &["parked-stdio".into(), "parked-http".into(), "live".into(), "absent".into()]);
+        let defs = parked_mcp_defs(
+            &cb,
+            &[
+                "parked-stdio".into(),
+                "parked-http".into(),
+                "live".into(),
+                "absent".into(),
+            ],
+        );
         // Only parked names come back — a live (enabled) server needs no injection.
         assert_eq!(defs.len(), 2);
         let s = defs.iter().find(|d| d.name == "parked-stdio").unwrap();
         assert_eq!(s.command.as_deref(), Some("node"));
-        assert_eq!(s.env.as_ref().unwrap().get("K").map(String::as_str), Some("V"));
+        assert_eq!(
+            s.env.as_ref().unwrap().get("K").map(String::as_str),
+            Some("V")
+        );
         let h = defs.iter().find(|d| d.name == "parked-http").unwrap();
         assert_eq!(h.transport.as_deref(), Some("sse"));
         assert_eq!(h.url.as_deref(), Some("https://x/mcp"));
@@ -502,10 +615,15 @@ mod tests {
     fn delete_removes_parked_entry_too() {
         let base = tmp();
         let cb = setup(&base);
-        std::fs::write(base.join(".claude.json"),
-            r#"{"mcpServersDisabled":{"parked":{"command":"c"}}}"#).unwrap();
+        std::fs::write(
+            base.join(".claude.json"),
+            r#"{"mcpServersDisabled":{"parked":{"command":"c"}}}"#,
+        )
+        .unwrap();
         assert!(delete_mcp_server(&cb, "parked").unwrap());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         assert!(v.get(MCP_DISABLED_KEY).is_none());
         assert!(!delete_mcp_server(&cb, "parked").unwrap());
     }
@@ -514,12 +632,24 @@ mod tests {
     fn re_adding_a_parked_name_drops_the_parked_copy() {
         let base = tmp();
         let cb = setup(&base);
-        std::fs::write(base.join(".claude.json"),
-            r#"{"mcpServersDisabled":{"srv":{"command":"old"}}}"#).unwrap();
-        let def = McpServerDef { name: "srv".into(), command: Some("new".into()), ..Default::default() };
+        std::fs::write(
+            base.join(".claude.json"),
+            r#"{"mcpServersDisabled":{"srv":{"command":"old"}}}"#,
+        )
+        .unwrap();
+        let def = McpServerDef {
+            name: "srv".into(),
+            command: Some("new".into()),
+            ..Default::default()
+        };
         add_mcp_server(&cb, &def).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(base.join(".claude.json")).unwrap())
+                .unwrap();
         assert_eq!(v["mcpServers"]["srv"]["command"], "new");
-        assert!(v.get(MCP_DISABLED_KEY).is_none(), "stale parked copy must be dropped");
+        assert!(
+            v.get(MCP_DISABLED_KEY).is_none(),
+            "stale parked copy must be dropped"
+        );
     }
 }

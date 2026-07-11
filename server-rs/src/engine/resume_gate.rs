@@ -157,6 +157,8 @@ mod tests {
 
     #[test]
     fn missing_file_is_not_resumable() {
-        assert!(!transcript_is_resumable(Path::new("/no/such/transcript.jsonl")));
+        assert!(!transcript_is_resumable(Path::new(
+            "/no/such/transcript.jsonl"
+        )));
     }
 }

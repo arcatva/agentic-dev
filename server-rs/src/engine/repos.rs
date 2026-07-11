@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 
 /// List all direct-child directories of src_root that contain a `.git` dir, sorted alphabetically.
 pub fn list_repos(src_root: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(src_root) else { return vec![]; };
-    let mut out: Vec<String> = entries.flatten()
+    let Ok(entries) = std::fs::read_dir(src_root) else {
+        return vec![];
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
         .filter(|e| e.path().is_dir() && e.path().join(".git").exists())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
@@ -13,19 +16,35 @@ pub fn list_repos(src_root: &Path) -> Vec<String> {
 
 fn default_gh_list(org: &str) -> Option<String> {
     let o = std::process::Command::new("gh")
-        .args(["repo", "list", org, "--json", "name", "-L", "200"]).output().ok()?;
-    if !o.status.success() { return None; }
+        .args(["repo", "list", org, "--json", "name", "-L", "200"])
+        .output()
+        .ok()?;
+    if !o.status.success() {
+        return None;
+    }
     Some(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// Run `gh repo list <org> --json name -L 200`, parse the result and return sorted names.
 /// `gh_fn` is an injectable seam (tests pass a closure); None → real `gh` subprocess.
-pub fn list_remote_repos(git_org: &str, gh_fn: Option<&dyn Fn(&str) -> Option<String>>) -> Vec<String> {
-    let raw = match gh_fn { Some(f) => f(git_org), None => default_gh_list(git_org) };
-    let Some(raw) = raw else { return vec![]; };
-    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else { return vec![]; };
-    let mut names: Vec<String> = arr.iter()
-        .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from)).collect();
+pub fn list_remote_repos(
+    git_org: &str,
+    gh_fn: Option<&dyn Fn(&str) -> Option<String>>,
+) -> Vec<String> {
+    let raw = match gh_fn {
+        Some(f) => f(git_org),
+        None => default_gh_list(git_org),
+    };
+    let Some(raw) = raw else {
+        return vec![];
+    };
+    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = arr
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
     names.sort();
     names
 }
@@ -50,7 +69,9 @@ pub fn ensure_local(
 
 /// Production clone via `git clone <url> <dest>`. Used when EngineConfig.clone_fn is None.
 pub fn default_clone(url: &str, dest: &str) -> std::io::Result<()> {
-    let status = std::process::Command::new("git").args(["clone", url, dest]).status()?;
+    let status = std::process::Command::new("git")
+        .args(["clone", url, dest])
+        .status()?;
     if status.success() {
         Ok(())
     } else {
@@ -81,14 +102,21 @@ mod tests {
         std::fs::create_dir_all(src.join("zeta").join(".git")).unwrap();
         std::fs::create_dir_all(src.join("alpha").join(".git")).unwrap();
         std::fs::create_dir_all(src.join("notrepo")).unwrap(); // no .git
-        assert_eq!(list_repos(&src), vec!["alpha".to_string(), "zeta".to_string()]);
+        assert_eq!(
+            list_repos(&src),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
         assert!(list_repos(&src.join("missing")).is_empty());
     }
 
     #[test]
     fn list_remote_repos_parses_and_sorts_and_is_lenient() {
-        let gh = |_org: &str| -> Option<String> { Some(r#"[{"name":"b"},{"name":"a"}]"#.to_string()) };
-        assert_eq!(list_remote_repos("org", Some(&gh)), vec!["a".to_string(), "b".to_string()]);
+        let gh =
+            |_org: &str| -> Option<String> { Some(r#"[{"name":"b"},{"name":"a"}]"#.to_string()) };
+        assert_eq!(
+            list_remote_repos("org", Some(&gh)),
+            vec!["a".to_string(), "b".to_string()]
+        );
         let bad = |_o: &str| -> Option<String> { None };
         assert!(list_remote_repos("org", Some(&bad)).is_empty());
     }
@@ -120,9 +148,7 @@ mod tests {
     fn propagates_clone_failure_for_an_unresolvable_repo() {
         let src = tmp();
         let boom = |_: &str, _: &str| -> std::io::Result<()> {
-            Err(std::io::Error::other(
-                "clone disabled in tests",
-            ))
+            Err(std::io::Error::other("clone disabled in tests"))
         };
         assert!(ensure_local("nope", &src, "arcatva", &boom).is_err());
     }

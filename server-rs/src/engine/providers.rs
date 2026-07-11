@@ -320,7 +320,9 @@ fn claude_credentials_path() -> PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".claude").join(".credentials.json")
+    PathBuf::from(home)
+        .join(".claude")
+        .join(".credentials.json")
 }
 
 /// Parse the OAuth access token out of a Claude Code credentials file. Returns `None` when the
@@ -380,7 +382,10 @@ fn fetch_claude_models_with(token: &str) -> Option<Vec<ClaudeModel>> {
                 return None;
             }
             let display = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
-            Some(ClaudeModel { id: id.to_string(), display_name: display.to_string() })
+            Some(ClaudeModel {
+                id: id.to_string(),
+                display_name: display.to_string(),
+            })
         })
         .collect();
     if list.is_empty() {
@@ -454,7 +459,11 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
                 o.capability,
                 o.priority,
                 o.cost,
-                if o.description.is_empty() { default_desc } else { o.description.clone() },
+                if o.description.is_empty() {
+                    default_desc
+                } else {
+                    o.description.clone()
+                },
             ),
             None => {
                 let (c, k) = family_default_metrics(fam);
@@ -493,8 +502,14 @@ pub fn env_overlay(p: &Provider) -> HashMap<String, String> {
     let mut overlay = HashMap::new();
     match p.protocol {
         Protocol::Openai => {
-            overlay.insert("ANTHROPIC_BASE_URL".to_string(), crate::engine::litellm::proxy_base_url());
-            overlay.insert("ANTHROPIC_AUTH_TOKEN".to_string(), crate::engine::litellm::PROXY_TOKEN.to_string());
+            overlay.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                crate::engine::litellm::proxy_base_url(),
+            );
+            overlay.insert(
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                crate::engine::litellm::PROXY_TOKEN.to_string(),
+            );
         }
         Protocol::Anthropic => {
             overlay.insert("ANTHROPIC_BASE_URL".to_string(), p.base_url.clone());
@@ -517,7 +532,8 @@ static FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// setenv racing a concurrent getenv from ANY other test thread is undefined behaviour in glibc
 /// (the "process-global set_var race" flake noted on the HTTPS PR) — this override is data-race-free.
 /// Always `None` in production.
-pub static PROVIDERS_FILE_OVERRIDE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
+pub static PROVIDERS_FILE_OVERRIDE: parking_lot::Mutex<Option<PathBuf>> =
+    parking_lot::Mutex::new(None);
 
 /// The providers JSON file: the test override if set, else `AGENTIC_PROVIDERS_FILE`, else
 /// `~/.agentic-dev/providers.json`.
@@ -529,7 +545,9 @@ pub fn providers_file_path() -> PathBuf {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agentic-dev").join("providers.json")
+    PathBuf::from(home)
+        .join(".agentic-dev")
+        .join("providers.json")
 }
 
 /// Read the provider list from `path`. `Ok([])` when the file is missing; `Err` when it exists but
@@ -569,7 +587,10 @@ pub fn save_list_to(path: &Path, providers: &[Provider]) -> std::io::Result<()> 
 pub fn upsert_at(path: &Path, mut p: Provider) -> std::io::Result<()> {
     let _guard = FILE_LOCK.lock();
     let mut list = load_list_from(path)?;
-    if let Some(slot) = list.iter_mut().find(|x| x.name.eq_ignore_ascii_case(&p.name)) {
+    if let Some(slot) = list
+        .iter_mut()
+        .find(|x| x.name.eq_ignore_ascii_case(&p.name))
+    {
         if p.api_key.is_empty() && p.api_key_env.is_none() {
             // `slot` is fully overwritten by `*slot = p` below, so move the stored key out of it
             // rather than cloning (no extra allocation).
@@ -610,10 +631,22 @@ pub fn remove(name: &str) -> std::io::Result<bool> {
 #[cfg(test)]
 pub(crate) fn seed_claude_models_for_tests() {
     let _ = CLAUDE_MODELS.set(vec![
-        ClaudeModel { id: "claude-fable-5".into(), display_name: "Claude Fable 5".into() },
-        ClaudeModel { id: "claude-opus-4-8".into(), display_name: "Claude Opus 4.8".into() },
-        ClaudeModel { id: "claude-opus-4-7".into(), display_name: "Claude Opus 4.7".into() },
-        ClaudeModel { id: "claude-sonnet-4-6".into(), display_name: "Claude Sonnet 4.6".into() },
+        ClaudeModel {
+            id: "claude-fable-5".into(),
+            display_name: "Claude Fable 5".into(),
+        },
+        ClaudeModel {
+            id: "claude-opus-4-8".into(),
+            display_name: "Claude Opus 4.8".into(),
+        },
+        ClaudeModel {
+            id: "claude-opus-4-7".into(),
+            display_name: "Claude Opus 4.7".into(),
+        },
+        ClaudeModel {
+            id: "claude-sonnet-4-6".into(),
+            display_name: "Claude Sonnet 4.6".into(),
+        },
         ClaudeModel {
             id: "claude-haiku-4-5-20251001".into(),
             display_name: "Claude Haiku 4.5".into(),
@@ -649,12 +682,29 @@ mod tests {
         use crate::engine::native_overrides::NativeOverride;
         // newest-first, two opus siblings + one haiku
         let models = vec![
-            ClaudeModel { id: "claude-opus-4-9".into(), display_name: "Claude Opus 4.9".into() },
-            ClaudeModel { id: "claude-opus-4-8".into(), display_name: "Claude Opus 4.8".into() },
-            ClaudeModel { id: "claude-haiku-5".into(), display_name: "Claude Haiku 5".into() },
+            ClaudeModel {
+                id: "claude-opus-4-9".into(),
+                display_name: "Claude Opus 4.9".into(),
+            },
+            ClaudeModel {
+                id: "claude-opus-4-8".into(),
+                display_name: "Claude Opus 4.8".into(),
+            },
+            ClaudeModel {
+                id: "claude-haiku-5".into(),
+                display_name: "Claude Haiku 5".into(),
+            },
         ];
         let mut ov = OverrideMap::new();
-        ov.insert("opus".into(), NativeOverride { capability: 0.9, priority: 0.85, cost: 0.2, description: String::new() });
+        ov.insert(
+            "opus".into(),
+            NativeOverride {
+                capability: 0.9,
+                priority: 0.85,
+                cost: 0.2,
+                description: String::new(),
+            },
+        );
 
         let c = candidates_from(&models, &ov);
         // opus collapses to the NEWEST (4-9); haiku stays → 2 candidates
@@ -667,11 +717,17 @@ mod tests {
         assert!((opus.capability - 0.9).abs() < f32::EPSILON);
         assert!((opus.cost - 0.2).abs() < f32::EPSILON);
         // empty override description → generated per-model description
-        assert_eq!(opus.description.as_deref(), Some("Anthropic Claude Opus 4.9 — native (subscription)"));
+        assert_eq!(
+            opus.description.as_deref(),
+            Some("Anthropic Claude Opus 4.9 — native (subscription)")
+        );
         // non-overridden family keeps defaults + priority 0.5
         let haiku = c.iter().find(|p| p.model == "claude-haiku-5").unwrap();
         assert!((haiku.priority - DEFAULT_NATIVE_PRIORITY).abs() < f32::EPSILON);
-        assert_eq!((haiku.capability, haiku.cost), family_default_metrics("haiku"));
+        assert_eq!(
+            (haiku.capability, haiku.cost),
+            family_default_metrics("haiku")
+        );
     }
 
     #[test]
@@ -716,9 +772,45 @@ mod tests {
     fn reg() -> ProviderRegistry {
         ProviderRegistry {
             providers: vec![
-                Provider { name: "minimax".into(), base_url: "https://mm/anthropic".into(), api_key: "mk".into(), api_key_env: None, model: "MiniMax-M3".into(), protocol: Protocol::Anthropic, capability: 0.5, description: None, priority: 0.3, cost: 0.5, router: false },
-                Provider { name: "deepseek".into(), base_url: "https://ds/anthropic".into(), api_key: "dk".into(), api_key_env: None, model: "deepseek-chat".into(), protocol: Protocol::Anthropic, capability: 0.6, description: None, priority: 0.5, cost: 0.5, router: false },
-                Provider { name: "opus".into(), base_url: "https://an/anthropic".into(), api_key: "ak".into(), api_key_env: None, model: "claude-opus-4-5".into(), protocol: Protocol::Anthropic, capability: 0.95, description: None, priority: 0.9, cost: 0.5, router: false },
+                Provider {
+                    name: "minimax".into(),
+                    base_url: "https://mm/anthropic".into(),
+                    api_key: "mk".into(),
+                    api_key_env: None,
+                    model: "MiniMax-M3".into(),
+                    protocol: Protocol::Anthropic,
+                    capability: 0.5,
+                    description: None,
+                    priority: 0.3,
+                    cost: 0.5,
+                    router: false,
+                },
+                Provider {
+                    name: "deepseek".into(),
+                    base_url: "https://ds/anthropic".into(),
+                    api_key: "dk".into(),
+                    api_key_env: None,
+                    model: "deepseek-chat".into(),
+                    protocol: Protocol::Anthropic,
+                    capability: 0.6,
+                    description: None,
+                    priority: 0.5,
+                    cost: 0.5,
+                    router: false,
+                },
+                Provider {
+                    name: "opus".into(),
+                    base_url: "https://an/anthropic".into(),
+                    api_key: "ak".into(),
+                    api_key_env: None,
+                    model: "claude-opus-4-5".into(),
+                    protocol: Protocol::Anthropic,
+                    capability: 0.95,
+                    description: None,
+                    priority: 0.9,
+                    cost: 0.5,
+                    router: false,
+                },
             ],
         }
     }
@@ -743,7 +835,9 @@ mod tests {
         // one candidate per family (newest): fable, opus, sonnet, haiku.
         assert_eq!(c.len(), 4);
         // all native: no base_url / key → run on the subscription with no provider overlay
-        assert!(c.iter().all(|p| is_native(p) && p.base_url.is_empty() && p.resolved_key().is_empty()));
+        assert!(c
+            .iter()
+            .all(|p| is_native(p) && p.base_url.is_empty() && p.resolved_key().is_empty()));
         // full model ids, not tier keywords
         assert!(c.iter().any(|p| p.model == "claude-opus-4-8"));
         assert!(!c.iter().any(|p| p.model == "claude-opus-4-7"));
@@ -752,8 +846,17 @@ mod tests {
         assert!(c.iter().any(|p| p.matches("sonnet")));
         assert!(c.iter().any(|p| p.matches("claude-haiku")));
         // family metrics: fable above opus above sonnet above haiku on capability
-        let cap = |needle: &str| c.iter().find(|p| p.model.contains(needle)).unwrap().capability;
-        assert!(cap("fable") > cap("opus") && cap("opus") > cap("sonnet") && cap("sonnet") > cap("haiku"));
+        let cap = |needle: &str| {
+            c.iter()
+                .find(|p| p.model.contains(needle))
+                .unwrap()
+                .capability
+        };
+        assert!(
+            cap("fable") > cap("opus")
+                && cap("opus") > cap("sonnet")
+                && cap("sonnet") > cap("haiku")
+        );
         // a registered provider is NOT native
         let reg_p = reg().providers.into_iter().next().unwrap();
         assert!(!is_native(&reg_p));
@@ -776,23 +879,46 @@ mod tests {
         // NOT shadow the native candidate when the hint is the bare keyword (else a router pick of
         // "haiku" would run on the user's paid api.anthropic.com endpoint instead of the subscription).
         let registered = Provider {
-            name: "claude-api".into(), base_url: "https://api.anthropic.com".into(), api_key: "k".into(),
-            api_key_env: None, model: "claude-3-5-haiku-latest".into(), protocol: Protocol::Anthropic,
-            capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
+            name: "claude-api".into(),
+            base_url: "https://api.anthropic.com".into(),
+            api_key: "k".into(),
+            api_key_env: None,
+            model: "claude-3-5-haiku-latest".into(),
+            protocol: Protocol::Anthropic,
+            capability: 0.5,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: false,
         };
         let native = native_claude_candidates(&Default::default());
         // candidate order mirrors run_delegate: registered FIRST, then native.
         let cands: Vec<&Provider> = std::iter::once(&registered).chain(native.iter()).collect();
         // bare "haiku" → the NATIVE haiku (newest discovered), not the substring-matching registered one.
         let got = resolve_candidate(&cands, "haiku").expect("resolves");
-        assert!(is_native(got), "bare family keyword must bind to the native candidate, got '{}'", got.name);
+        assert!(
+            is_native(got),
+            "bare family keyword must bind to the native candidate, got '{}'",
+            got.name
+        );
         assert_eq!(got.model, "claude-haiku-4-5-20251001");
         // bare "opus" → the newest native opus (API order), not an older sibling.
-        assert_eq!(resolve_candidate(&cands, "opus").unwrap().model, "claude-opus-4-8");
+        assert_eq!(
+            resolve_candidate(&cands, "opus").unwrap().model,
+            "claude-opus-4-8"
+        );
         // bare "fable" → the native fable candidate (family keywords generalize beyond 3 tiers).
-        assert_eq!(resolve_candidate(&cands, "fable").unwrap().model, "claude-fable-5");
+        assert_eq!(
+            resolve_candidate(&cands, "fable").unwrap().model,
+            "claude-fable-5"
+        );
         // the registered provider's full model id still resolves to IT (exact match wins).
-        assert_eq!(resolve_candidate(&cands, "claude-3-5-haiku-latest").unwrap().name, "claude-api");
+        assert_eq!(
+            resolve_candidate(&cands, "claude-3-5-haiku-latest")
+                .unwrap()
+                .name,
+            "claude-api"
+        );
         // a bare/empty hint resolves to nothing.
         assert!(resolve_candidate(&cands, "   ").is_none());
     }
@@ -806,8 +932,14 @@ mod tests {
 
     #[test]
     fn loads_providers_from_json_file() {
-        let dir = std::env::temp_dir().join(format!("agentic-prov-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "agentic-prov-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("providers.json");
         std::fs::write(&f, serde_json::json!([
@@ -822,7 +954,10 @@ mod tests {
         assert_eq!(r.providers.len(), 2);
         assert_eq!(r.find("kimi").unwrap().model, "kimi-k2");
         let lookup = |k: &str| (k == "X_PROVIDERS_TEST_KEY").then(|| "from-env".to_string());
-        assert_eq!(r.find("sonnet").unwrap().resolved_key_with(lookup), "from-env");
+        assert_eq!(
+            r.find("sonnet").unwrap().resolved_key_with(lookup),
+            "from-env"
+        );
         // resolved_key() (the real-env variant) falls back to empty when the env var is absent.
         assert_eq!(r.find("sonnet").unwrap().resolved_key(), "");
         // old file without a `capability` field → defaults to 0.5 (back-compat), `tier` ignored
@@ -832,14 +967,28 @@ mod tests {
 
     #[test]
     fn crud_roundtrip_on_a_file() {
-        let dir = std::env::temp_dir().join(format!("agentic-crud-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "agentic-crud-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("providers.json");
         let mk = |n: &str, m: &str| Provider {
-            name: n.into(), base_url: "https://x/anthropic".into(), api_key: "k".into(),
-            api_key_env: None, model: m.into(), protocol: Protocol::Anthropic,
-            capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
+            name: n.into(),
+            base_url: "https://x/anthropic".into(),
+            api_key: "k".into(),
+            api_key_env: None,
+            model: m.into(),
+            protocol: Protocol::Anthropic,
+            capability: 0.5,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: false,
         };
         assert!(load_list_from(&f).unwrap().is_empty());
         upsert_at(&f, mk("minimax", "MiniMax-M3")).unwrap();
@@ -849,7 +998,13 @@ mod tests {
         upsert_at(&f, mk("MiniMax", "MiniMax-M2")).unwrap();
         let list = load_list_from(&f).unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list.iter().find(|x| x.name.eq_ignore_ascii_case("minimax")).unwrap().model, "MiniMax-M2");
+        assert_eq!(
+            list.iter()
+                .find(|x| x.name.eq_ignore_ascii_case("minimax"))
+                .unwrap()
+                .model,
+            "MiniMax-M2"
+        );
         // remove (case-insensitive); missing → false
         assert!(remove_at(&f, "MINIMAX").unwrap());
         assert_eq!(load_list_from(&f).unwrap().len(), 1);
@@ -862,14 +1017,28 @@ mod tests {
         // The key is write-only, so the edit form leaves it blank to mean "keep the stored key".
         // A blank key on an EDIT must preserve the existing credential, not wipe it; a non-blank key
         // replaces it; and a blank key on a brand-NEW provider has nothing to preserve.
-        let dir = std::env::temp_dir().join(format!("agentic-preserve-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "agentic-preserve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("providers.json");
         let mk = |key: &str, model: &str, cap: f32| Provider {
-            name: "minimax".into(), base_url: "https://x/anthropic".into(), api_key: key.into(),
-            api_key_env: None, model: model.into(), protocol: Protocol::Anthropic,
-            capability: cap, description: None, priority: 0.5, cost: 0.5, router: false,
+            name: "minimax".into(),
+            base_url: "https://x/anthropic".into(),
+            api_key: key.into(),
+            api_key_env: None,
+            model: model.into(),
+            protocol: Protocol::Anthropic,
+            capability: cap,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: false,
         };
         // seed with a real key
         upsert_at(&f, mk("secret-key", "MiniMax-M3", 0.5)).unwrap();
@@ -877,43 +1046,105 @@ mod tests {
         upsert_at(&f, mk("", "MiniMax-M2", 0.8)).unwrap();
         let after_edit = load_list_from(&f).unwrap();
         let p = after_edit.iter().find(|x| x.name == "minimax").unwrap();
-        assert_eq!(p.resolved_key(), "secret-key", "blank key on edit must keep the stored key");
+        assert_eq!(
+            p.resolved_key(),
+            "secret-key",
+            "blank key on edit must keep the stored key"
+        );
         assert_eq!(p.model, "MiniMax-M2", "other fields still update");
         assert!((p.capability - 0.8).abs() < f32::EPSILON);
         // edit with a NEW non-blank key → replaces
         upsert_at(&f, mk("rotated-key", "MiniMax-M2", 0.8)).unwrap();
-        assert_eq!(load_list_from(&f).unwrap().iter().find(|x| x.name == "minimax").unwrap().resolved_key(), "rotated-key");
+        assert_eq!(
+            load_list_from(&f)
+                .unwrap()
+                .iter()
+                .find(|x| x.name == "minimax")
+                .unwrap()
+                .resolved_key(),
+            "rotated-key"
+        );
         // a brand-new provider with a blank key has nothing to preserve → stays blank
-        upsert_at(&f, Provider {
-            name: "fresh".into(), base_url: "https://y/anthropic".into(), api_key: String::new(),
-            api_key_env: None, model: "fresh-1".into(), protocol: Protocol::Anthropic,
-            capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
-        }).unwrap();
-        assert_eq!(load_list_from(&f).unwrap().iter().find(|x| x.name == "fresh").unwrap().resolved_key(), "");
+        upsert_at(
+            &f,
+            Provider {
+                name: "fresh".into(),
+                base_url: "https://y/anthropic".into(),
+                api_key: String::new(),
+                api_key_env: None,
+                model: "fresh-1".into(),
+                protocol: Protocol::Anthropic,
+                capability: 0.5,
+                description: None,
+                priority: 0.5,
+                cost: 0.5,
+                router: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_list_from(&f)
+                .unwrap()
+                .iter()
+                .find(|x| x.name == "fresh")
+                .unwrap()
+                .resolved_key(),
+            ""
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn corrupt_file_errors_instead_of_wiping_providers() {
-        let dir = std::env::temp_dir().join(format!("agentic-corrupt-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "agentic-corrupt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("providers.json");
-        upsert_at(&f, Provider {
-            name: "minimax".into(), base_url: "https://x/anthropic".into(), api_key: "k".into(),
-            api_key_env: None, model: "MiniMax-M3".into(), protocol: Protocol::Anthropic,
-            capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
-        }).unwrap();
+        upsert_at(
+            &f,
+            Provider {
+                name: "minimax".into(),
+                base_url: "https://x/anthropic".into(),
+                api_key: "k".into(),
+                api_key_env: None,
+                model: "MiniMax-M3".into(),
+                protocol: Protocol::Anthropic,
+                capability: 0.5,
+                description: None,
+                priority: 0.5,
+                cost: 0.5,
+                router: false,
+            },
+        )
+        .unwrap();
         // the file gets corrupted (a bad manual edit, a partial write, ...)
         std::fs::write(&f, "{ this is : not json").unwrap();
         // CRUD must ERROR rather than read an empty list and overwrite it (which would wipe data).
         assert!(load_list_from(&f).is_err());
         assert!(remove_at(&f, "minimax").is_err());
-        assert!(upsert_at(&f, Provider {
-            name: "x".into(), base_url: "y".into(), api_key: String::new(),
-            api_key_env: None, model: "z".into(), protocol: Protocol::Anthropic,
-            capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
-        }).is_err());
+        assert!(upsert_at(
+            &f,
+            Provider {
+                name: "x".into(),
+                base_url: "y".into(),
+                api_key: String::new(),
+                api_key_env: None,
+                model: "z".into(),
+                protocol: Protocol::Anthropic,
+                capability: 0.5,
+                description: None,
+                priority: 0.5,
+                cost: 0.5,
+                router: false,
+            }
+        )
+        .is_err());
         // the corrupt file is left intact, NOT wiped to "[]"
         assert!(std::fs::read_to_string(&f).unwrap().contains("not json"));
         std::fs::remove_dir_all(&dir).ok();

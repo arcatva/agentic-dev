@@ -9,9 +9,8 @@ impl Engine {
     pub(super) fn start_watchdog(&self) {
         let inner = self.0.clone();
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_millis(WATCHDOG_TICK_MS),
-            );
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_millis(WATCHDOG_TICK_MS));
             interval.tick().await; // skip the first immediate tick
             loop {
                 interval.tick().await;
@@ -65,22 +64,31 @@ impl Engine {
                     let no_pending_delegate = !state.pending_delegate.contains(&id);
                     let last_ev = state.last_event_at.get(&id).copied().unwrap_or(now);
                     let run_handle = state.running.get(&id).map(|r| r.run.clone());
-                    (is_awaiting, no_pending_ask, no_pending_delegate, last_ev, run_handle)
+                    (
+                        is_awaiting,
+                        no_pending_ask,
+                        no_pending_delegate,
+                        last_ev,
+                        run_handle,
+                    )
                 };
 
-                if is_awaiting && no_pending_ask && no_pending_delegate && (now - last_ev) > ttl_ms {
+                if is_awaiting && no_pending_ask && no_pending_delegate && (now - last_ev) > ttl_ms
+                {
                     // Reap: set status done (or failed if there's already an error).
                     let store = self.0.store.clone();
                     let id2 = id.clone();
                     let _now2 = now;
                     // Read current session to check for error.
                     let final_status = {
-                        store.get(&id2).await
-                        .ok()
-                        .flatten()
-                        .map(|s| if s.error.is_some() { "failed" } else { "done" })
-                        .unwrap_or("done")
-                        .to_string()
+                        store
+                            .get(&id2)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| if s.error.is_some() { "failed" } else { "done" })
+                            .unwrap_or("done")
+                            .to_string()
                     };
 
                     // PR6: route through transition() with WatchdogIdleTtl
@@ -89,8 +97,11 @@ impl Engine {
                     let _ = crate::engine::Engine(self.0.clone())
                         .transition(
                             &id2,
-                            std::str::FromStr::from_str(&final_status).unwrap_or(SessionStatus::Done),
-                            TransitionReason::WatchdogIdleTtl { had_error: final_status == "failed" },
+                            std::str::FromStr::from_str(&final_status)
+                                .unwrap_or(SessionStatus::Done),
+                            TransitionReason::WatchdogIdleTtl {
+                                had_error: final_status == "failed",
+                            },
                         )
                         .await
                         .map_err(|e| tracing::error!("[engine] transition watchdog idle-ttl: {e}"));
@@ -151,7 +162,9 @@ impl Engine {
                     .transition(
                         &id2,
                         SessionStatus::Done,
-                        TransitionReason::WatchdogCancel { kind: "idle_or_wall_max" },
+                        TransitionReason::WatchdogCancel {
+                            kind: "idle_or_wall_max",
+                        },
                     )
                     .await
                 {

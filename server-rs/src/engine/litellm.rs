@@ -18,7 +18,10 @@ use crate::engine::providers::{Protocol, ProviderRegistry};
 
 /// Localhost port the proxy listens on (override with `AGENTIC_LITELLM_PORT`).
 pub fn port() -> u16 {
-    std::env::var("AGENTIC_LITELLM_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4111)
+    std::env::var("AGENTIC_LITELLM_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4111)
 }
 
 /// The base URL a worker's `ANTHROPIC_BASE_URL` points at for an openai provider.
@@ -37,7 +40,13 @@ fn home() -> PathBuf {
 fn binary() -> PathBuf {
     std::env::var("AGENTIC_LITELLM_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".agentic-dev").join("litellm-venv").join("bin").join("litellm"))
+        .unwrap_or_else(|_| {
+            home()
+                .join(".agentic-dev")
+                .join("litellm-venv")
+                .join("bin")
+                .join("litellm")
+        })
 }
 
 fn config_path() -> PathBuf {
@@ -92,7 +101,9 @@ fn build_config() -> Vec<(String, String)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(config_path(), std::fs::Permissions::from_mode(0o600)) {
+        if let Err(e) =
+            std::fs::set_permissions(config_path(), std::fs::Permissions::from_mode(0o600))
+        {
             tracing::warn!("[litellm] chmod 600 config failed: {e}");
         }
     }
@@ -111,7 +122,10 @@ pub fn request_reload() {
 /// Spawn the supervisor task once. No-op when the litellm binary is absent.
 pub fn start_supervisor() {
     if !available() {
-        tracing::info!("[litellm] binary not found at {:?}; openai providers disabled", binary());
+        tracing::info!(
+            "[litellm] binary not found at {:?}; openai providers disabled",
+            binary()
+        );
         return;
     }
     let notify = Arc::new(tokio::sync::Notify::new());
@@ -126,11 +140,19 @@ pub fn start_supervisor() {
                 notify.notified().await;
                 continue;
             }
-            tracing::info!("[litellm] starting proxy on :{} with {} openai model(s)", port(), envs.len());
+            tracing::info!(
+                "[litellm] starting proxy on :{} with {} openai model(s)",
+                port(),
+                envs.len()
+            );
             // Send the proxy's stdout+stderr to a log file so startup/crash failures (bad port, venv
             // issue, …) are diagnosable instead of vanishing.
             let log_path = home().join(".agentic-dev").join("litellm.log");
-            let (out, err) = match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let (out, err) = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
                 Ok(f) => match f.try_clone() {
                     Ok(f2) => (std::process::Stdio::from(f), std::process::Stdio::from(f2)),
                     Err(_) => (std::process::Stdio::null(), std::process::Stdio::null()),
@@ -141,9 +163,12 @@ pub fn start_supervisor() {
                 }
             };
             let mut cmd = tokio::process::Command::new(binary());
-            cmd.arg("--config").arg(config_path())
-                .arg("--host").arg("127.0.0.1")
-                .arg("--port").arg(port().to_string())
+            cmd.arg("--config")
+                .arg(config_path())
+                .arg("--host")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port().to_string())
                 .stdout(out)
                 .stderr(err)
                 .kill_on_drop(true);

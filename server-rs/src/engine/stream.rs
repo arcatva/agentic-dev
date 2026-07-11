@@ -11,36 +11,125 @@ pub struct SpawnedAgent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClaudeEvent {
-    Init { session_id: String, raw: Value },
-    Prompt { text: String, at: i64, raw: Value },
-    Text { text: String, parent_tool_use_id: Option<String>, raw: Value },
-    Skill { names: Vec<String>, parent_tool_use_id: Option<String>, raw: Value },
-    Ask { questions: Vec<Value>, parent_tool_use_id: Option<String>, raw: Value },
-    Agent { agents: Vec<SpawnedAgent>, parent_tool_use_id: Option<String>, raw: Value },
-    Workflow { id: String, name: String, parent_tool_use_id: Option<String>, raw: Value, delegate: bool },
-    Thinking { text: String, parent_tool_use_id: Option<String>, raw: Value },
-    Tool { name: String, input: Value, parent_tool_use_id: Option<String>, raw: Value },
-    AgentResult { tool_use_id: String, text: String, raw: Value },
-    Retry { attempt: u32, max_retries: u32, category: String, raw: Value },
-    Result { is_error: bool, cost_usd: Option<f64>, text: Option<String>, raw: Value },
-    Perm { id: String, tool: String, input: Value, raw: Value },
-    Plan { id: String, plan: String, raw: Value },
-    PermResolved { id: String, decision: String, raw: Value },
+    Init {
+        session_id: String,
+        raw: Value,
+    },
+    Prompt {
+        text: String,
+        at: i64,
+        raw: Value,
+    },
+    Text {
+        text: String,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    Skill {
+        names: Vec<String>,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    Ask {
+        questions: Vec<Value>,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    Agent {
+        agents: Vec<SpawnedAgent>,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    Workflow {
+        id: String,
+        name: String,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+        delegate: bool,
+    },
+    Thinking {
+        text: String,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    Tool {
+        name: String,
+        input: Value,
+        parent_tool_use_id: Option<String>,
+        raw: Value,
+    },
+    AgentResult {
+        tool_use_id: String,
+        text: String,
+        raw: Value,
+    },
+    Retry {
+        attempt: u32,
+        max_retries: u32,
+        category: String,
+        raw: Value,
+    },
+    Result {
+        is_error: bool,
+        cost_usd: Option<f64>,
+        text: Option<String>,
+        raw: Value,
+    },
+    Perm {
+        id: String,
+        tool: String,
+        input: Value,
+        raw: Value,
+    },
+    Plan {
+        id: String,
+        plan: String,
+        raw: Value,
+    },
+    PermResolved {
+        id: String,
+        decision: String,
+        raw: Value,
+    },
     /// A pull request the session created. Engine-synthesized (NOT raw model output): detected from a
     /// `gh pr create` tool result, enriched with title/body/state fetched via `gh pr view`, persisted
     /// as a rendered `{"type":"pr",...}` marker so it replays on reconnect. The client renders one card.
-    Pr { url: String, number: i64, repo: String, title: String, body: String, state: String, raw: Value },
+    Pr {
+        url: String,
+        number: i64,
+        repo: String,
+        title: String,
+        body: String,
+        state: String,
+        raw: Value,
+    },
     /// In-band request from the main session's `delegate` MCP tool to fan out cheap workers. The
     /// engine runs `delegate::run_delegate` and replies via the bridge's stdin control channel.
-    DelegateRequest { id: String, run_id: String, tasks: Vec<Value>, title: Option<String>, raw: Value },
+    DelegateRequest {
+        id: String,
+        run_id: String,
+        tasks: Vec<Value>,
+        title: Option<String>,
+        raw: Value,
+    },
     /// Engine-synthesized link from a workflow card's tool_use id (`id`) to its run id (`run_id`), so
     /// the client opens the EXACT run a card maps to instead of guessing by name.
-    WorkflowRun { id: String, run_id: String, raw: Value },
+    WorkflowRun {
+        id: String,
+        run_id: String,
+        raw: Value,
+    },
     /// Engine-synthesized marker for a file delivered to the session outbox. The engine writes an
     /// `agentic_file` marker at the moment the file is first noticed, so it appears inline in the
     /// transcript at its real delivery position — no client-side heuristic guessing needed.
-    File { path: String, at: i64, raw: Value },
-    Other { raw: Value },
+    File {
+        path: String,
+        at: i64,
+        raw: Value,
+    },
+    Other {
+        raw: Value,
+    },
 }
 
 /// Flatten a tool_result's content (string, or array of text blocks) to plain text.
@@ -146,12 +235,19 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
     // 1. system/init
     if ty == Some("system") && subtype == Some("init") {
         if let Some(session_id) = obj.get("session_id").and_then(|v| v.as_str()) {
-            return vec![ClaudeEvent::Init { session_id: session_id.to_string(), raw: obj }];
+            return vec![ClaudeEvent::Init {
+                session_id: session_id.to_string(),
+                raw: obj,
+            }];
         }
     }
     // 2. agentic_prompt
     if ty == Some("agentic_prompt") {
-        let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         // `at` is epoch-ms; accept a JSON integer OR a float-encoded number (serde_json's
         // as_i64() is None for floats); defaults to 0 when absent or non-numeric.
         let at = obj
@@ -168,45 +264,124 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
     // that one is no longer forwarded live (see `is_live_only`, which excludes AgentResult); the
     // rendered marker is the single delivery channel.
     if ty == Some("agent_result") {
-        let tool_use_id = obj.get("toolUseId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        return vec![ClaudeEvent::AgentResult { tool_use_id, text, raw: obj }];
+        let tool_use_id = obj
+            .get("toolUseId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return vec![ClaudeEvent::AgentResult {
+            tool_use_id,
+            text,
+            raw: obj,
+        }];
     }
     // 2c. agentic_perm / agentic_perm_resolved — the bridge's perm/plan approval markers.
     if ty == Some("agentic_perm") {
-        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if obj.get("permKind").and_then(|v| v.as_str()) == Some("plan") {
-            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let plan = obj
+                .get("plan")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             return vec![ClaudeEvent::Plan { id, plan, raw: obj }];
         }
-        let tool = obj.get("tool").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
-        let input = obj.get("input").cloned().unwrap_or_else(|| Value::Object(Default::default()));
-        return vec![ClaudeEvent::Perm { id, tool, input, raw: obj }];
+        let tool = obj
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool")
+            .to_string();
+        let input = obj
+            .get("input")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        return vec![ClaudeEvent::Perm {
+            id,
+            tool,
+            input,
+            raw: obj,
+        }];
     }
     if ty == Some("agentic_perm_resolved") {
-        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let decision = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("deny").to_string();
-        return vec![ClaudeEvent::PermResolved { id, decision, raw: obj }];
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let decision = obj
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("deny")
+            .to_string();
+        return vec![ClaudeEvent::PermResolved {
+            id,
+            decision,
+            raw: obj,
+        }];
     }
     // 2c-bis. pr — the engine-synthesized PR-card marker (written after `gh pr create` + `gh pr view`).
     // Decoding it here (instead of letting it fall to `Other`) makes the WS cursor deliver a proper
     // `kind:pr` frame exactly once, identically live and on reopen. Detection (which writes it) lives in
     // mod.rs; this only DECODES the marker, so re-tailing it never re-triggers a fetch (no feedback loop).
     if ty == Some("pr") {
-        let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let url = obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let number = obj.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
-        let repo = obj.get("repo").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let body = obj.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let state = obj.get("state").and_then(|v| v.as_str()).unwrap_or("OPEN").to_string();
-        return vec![ClaudeEvent::Pr { url, number, repo, title, body, state, raw: obj }];
+        let repo = obj
+            .get("repo")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = obj
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let state = obj
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OPEN")
+            .to_string();
+        return vec![ClaudeEvent::Pr {
+            url,
+            number,
+            repo,
+            title,
+            body,
+            state,
+            raw: obj,
+        }];
     }
     // 2c-bis. agentic_file — engine-synthesized marker for a file delivered to the session outbox.
     // The engine writes this at the moment the file is first noticed (in with_activity), so the file
     // card appears inline in the transcript at its real delivery position.
     if ty == Some("agentic_file") {
-        let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let at = obj.get("at").and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))).unwrap_or(0);
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let at = obj
+            .get("at")
+            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+            .unwrap_or(0);
         return vec![ClaudeEvent::File { path, at, raw: obj }];
     }
     // 2c-ter. workflowRun — the engine-synthesized marker linking a workflow card's tool_use id to its
@@ -214,25 +389,67 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
     // to `Other`) makes the WS cursor deliver a `kind:workflowRun` frame exactly once, live and on
     // reopen. This only DECODES the marker, so re-tailing it never re-triggers detection (no loop).
     if ty == Some("workflowRun") {
-        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let run_id = obj.get("runId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        return vec![ClaudeEvent::WorkflowRun { id, run_id, raw: obj }];
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let run_id = obj
+            .get("runId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return vec![ClaudeEvent::WorkflowRun {
+            id,
+            run_id,
+            raw: obj,
+        }];
     }
     // 2d. agentic_delegate_request — the bridge's `delegate` tool asking the engine to fan out cheap
     // workers. The engine answers in-band via the bridge stdin control line {"__bridge":"delegate"}.
     if ty == Some("agentic_delegate_request") {
-        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let run_id = obj.get("runId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let tasks = obj.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let title = obj.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-        return vec![ClaudeEvent::DelegateRequest { id, run_id, tasks, title, raw: obj }];
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let run_id = obj
+            .get("runId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let tasks = obj
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        return vec![ClaudeEvent::DelegateRequest {
+            id,
+            run_id,
+            tasks,
+            title,
+            raw: obj,
+        }];
     }
     // 3. system/api_retry
     if ty == Some("system") && subtype == Some("api_retry") {
         let attempt = obj.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let max_retries = obj.get("max_retries").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let category = obj.get("error").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        return vec![ClaudeEvent::Retry { attempt, max_retries, category, raw: obj }];
+        let category = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        return vec![ClaudeEvent::Retry {
+            attempt,
+            max_retries,
+            category,
+            raw: obj,
+        }];
     }
     // 4 & 5. stream_event deltas
     if ty == Some("stream_event") {
@@ -243,7 +460,11 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            return vec![ClaudeEvent::Text { text, parent_tool_use_id: parent, raw: obj }];
+            return vec![ClaudeEvent::Text {
+                text,
+                parent_tool_use_id: parent,
+                raw: obj,
+            }];
         }
         if delta_type == Some("thinking_delta") {
             let text = obj
@@ -251,15 +472,27 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            return vec![ClaudeEvent::Thinking { text, parent_tool_use_id: parent, raw: obj }];
+            return vec![ClaudeEvent::Thinking {
+                text,
+                parent_tool_use_id: parent,
+                raw: obj,
+            }];
         }
     }
     // 6. result
     if ty == Some("result") {
         let cost_usd = obj.get("total_cost_usd").and_then(|v| v.as_f64());
         let text = result_text_field(&obj);
-        let is_error = obj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-        return vec![ClaudeEvent::Result { is_error, cost_usd, text, raw: obj }];
+        let is_error = obj
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        return vec![ClaudeEvent::Result {
+            is_error,
+            cost_usd,
+            text,
+            raw: obj,
+        }];
     }
     // 7. user message — subagent input (text+parent) and results (tool_result)
     if ty == Some("user") {
@@ -268,7 +501,11 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
             for b in content {
                 let bt = b.get("type").and_then(|v| v.as_str());
                 if bt == Some("text") && parent.is_some() {
-                    let text = b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let text = b
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     out.push(ClaudeEvent::Text {
                         text,
                         parent_tool_use_id: parent.clone(),
@@ -314,7 +551,11 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                             .or_else(|| b.get("text").and_then(|v| v.as_str()))
                             .filter(|s| !s.is_empty())
                         {
-                            out.push(ClaudeEvent::Thinking { text: text.to_string(), parent_tool_use_id: parent.clone(), raw: obj.clone() });
+                            out.push(ClaudeEvent::Thinking {
+                                text: text.to_string(),
+                                parent_tool_use_id: parent.clone(),
+                                raw: obj.clone(),
+                            });
                         }
                     }
                     Some("text") => {
@@ -323,7 +564,11 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                         {
-                            out.push(ClaudeEvent::Text { text: text.to_string(), parent_tool_use_id: parent.clone(), raw: obj.clone() });
+                            out.push(ClaudeEvent::Text {
+                                text: text.to_string(),
+                                parent_tool_use_id: parent.clone(),
+                                raw: obj.clone(),
+                            });
                         }
                     }
                     _ => {}
@@ -335,7 +580,9 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                 .iter()
                 .filter(|b| b.get("name").and_then(|v| v.as_str()) == Some("Skill"))
                 .filter_map(|b| {
-                    b.pointer("/input/skill").and_then(|v| v.as_str()).map(String::from)
+                    b.pointer("/input/skill")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
                 })
                 .collect();
             if !names.is_empty() {
@@ -354,7 +601,11 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                     (n == Some("Agent") || n == Some("Task")) && b.get("input").is_some()
                 })
                 .map(|b| SpawnedAgent {
-                    id: b.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    id: b
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     agent_type: b
                         .pointer("/input/subagent_type")
                         .and_then(|v| v.as_str())
@@ -398,13 +649,19 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                         .and_then(|v| v.as_str())
                         .map(String::from)
                         .or_else(|| {
-                            w.pointer("/input/title").and_then(|v| v.as_str()).map(String::from)
+                            w.pointer("/input/title")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
                         })
                         .or_else(|| meta_name(w.pointer("/input/script").unwrap_or(&Value::Null)))
                         .unwrap_or_else(|| "workflow".to_string())
                 };
                 out.push(ClaudeEvent::Workflow {
-                    id: w.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    id: w
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     name: wf_name,
                     parent_tool_use_id: parent.clone(),
                     raw: obj.clone(),
@@ -432,13 +689,24 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
             }
 
             // Every other tool call (Read/Edit/Bash/Write/…)
-            const SPECIAL: [&str; 6] = ["Skill", "Agent", "Task", "Workflow", "AskUserQuestion", "mcp__agentic__delegate"];
+            const SPECIAL: [&str; 6] = [
+                "Skill",
+                "Agent",
+                "Task",
+                "Workflow",
+                "AskUserQuestion",
+                "mcp__agentic__delegate",
+            ];
             for t in tools.iter().filter(|b| {
                 let n = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 !SPECIAL.contains(&n)
             }) {
                 out.push(ClaudeEvent::Tool {
-                    name: t.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string(),
+                    name: t
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string(),
                     input: t
                         .get("input")
                         .cloned()
@@ -471,50 +739,134 @@ impl ClaudeEvent {
     pub fn to_wire(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
-            ClaudeEvent::Init { session_id, raw } =>
-                json!({ "kind": "init", "sessionId": session_id, "raw": raw }),
-            ClaudeEvent::Prompt { text, at, raw } =>
-                json!({ "kind": "prompt", "text": text, "at": at, "raw": raw }),
-            ClaudeEvent::Text { text, parent_tool_use_id, raw } =>
-                json!({ "kind": "text", "text": text, "parentToolUseId": parent_tool_use_id, "raw": raw }),
-            ClaudeEvent::Thinking { text, parent_tool_use_id, raw } =>
-                json!({ "kind": "thinking", "text": text, "parentToolUseId": parent_tool_use_id, "raw": raw }),
-            ClaudeEvent::Skill { names, parent_tool_use_id, raw } =>
-                json!({ "kind": "skill", "names": names, "parentToolUseId": parent_tool_use_id, "raw": raw }),
-            ClaudeEvent::Ask { questions, parent_tool_use_id, raw } =>
-                json!({ "kind": "ask", "questions": questions, "parentToolUseId": parent_tool_use_id, "raw": raw }),
-            ClaudeEvent::Agent { agents, parent_tool_use_id, raw } => {
-                let agents: Vec<serde_json::Value> = agents.iter().map(|a| json!({
-                    "id": a.id, "agentType": a.agent_type, "description": a.description,
-                })).collect();
+            ClaudeEvent::Init { session_id, raw } => {
+                json!({ "kind": "init", "sessionId": session_id, "raw": raw })
+            }
+            ClaudeEvent::Prompt { text, at, raw } => {
+                json!({ "kind": "prompt", "text": text, "at": at, "raw": raw })
+            }
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                raw,
+            } => {
+                json!({ "kind": "text", "text": text, "parentToolUseId": parent_tool_use_id, "raw": raw })
+            }
+            ClaudeEvent::Thinking {
+                text,
+                parent_tool_use_id,
+                raw,
+            } => {
+                json!({ "kind": "thinking", "text": text, "parentToolUseId": parent_tool_use_id, "raw": raw })
+            }
+            ClaudeEvent::Skill {
+                names,
+                parent_tool_use_id,
+                raw,
+            } => {
+                json!({ "kind": "skill", "names": names, "parentToolUseId": parent_tool_use_id, "raw": raw })
+            }
+            ClaudeEvent::Ask {
+                questions,
+                parent_tool_use_id,
+                raw,
+            } => {
+                json!({ "kind": "ask", "questions": questions, "parentToolUseId": parent_tool_use_id, "raw": raw })
+            }
+            ClaudeEvent::Agent {
+                agents,
+                parent_tool_use_id,
+                raw,
+            } => {
+                let agents: Vec<serde_json::Value> = agents
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "id": a.id, "agentType": a.agent_type, "description": a.description,
+                        })
+                    })
+                    .collect();
                 json!({ "kind": "agent", "agents": agents, "parentToolUseId": parent_tool_use_id, "raw": raw })
             }
-            ClaudeEvent::Workflow { id, name, parent_tool_use_id, raw, delegate } =>
-                json!({ "kind": "workflow", "id": id, "name": name, "parentToolUseId": parent_tool_use_id, "raw": raw, "delegate": delegate }),
-            ClaudeEvent::Tool { name, input, parent_tool_use_id, raw } =>
-                json!({ "kind": "tool", "name": name, "input": input, "parentToolUseId": parent_tool_use_id, "raw": raw }),
-            ClaudeEvent::AgentResult { tool_use_id, text, raw } =>
-                json!({ "kind": "agentResult", "toolUseId": tool_use_id, "text": text, "raw": raw }),
-            ClaudeEvent::Retry { attempt, max_retries, category, raw } =>
-                json!({ "kind": "retry", "attempt": attempt, "maxRetries": max_retries, "category": category, "raw": raw }),
-            ClaudeEvent::Result { is_error, cost_usd, text, raw } =>
-                json!({ "kind": "result", "isError": is_error, "costUsd": cost_usd, "text": text, "raw": raw }),
-            ClaudeEvent::Perm { id, tool, input, raw } =>
-                json!({ "kind": "perm", "id": id, "tool": tool, "input": input, "raw": raw }),
-            ClaudeEvent::Plan { id, plan, raw } =>
-                json!({ "kind": "plan", "id": id, "plan": plan, "raw": raw }),
-            ClaudeEvent::PermResolved { id, decision, raw } =>
-                json!({ "kind": "permResolved", "id": id, "decision": decision, "raw": raw }),
-            ClaudeEvent::Pr { url, number, repo, title, body, state, raw } =>
-                json!({ "kind": "pr", "url": url, "number": number, "repo": repo, "title": title, "body": body, "state": state, "raw": raw }),
-            ClaudeEvent::DelegateRequest { id, run_id, tasks, title, raw } =>
-                json!({ "kind": "delegateRequest", "id": id, "runId": run_id, "tasks": tasks, "title": title, "raw": raw }),
-            ClaudeEvent::WorkflowRun { id, run_id, raw } =>
-                json!({ "kind": "workflowRun", "id": id, "runId": run_id, "raw": raw }),
-            ClaudeEvent::File { path, at, raw } =>
-                json!({ "kind": "file", "path": path, "at": at, "raw": raw }),
-            ClaudeEvent::Other { raw } =>
-                json!({ "kind": "other", "raw": raw }),
+            ClaudeEvent::Workflow {
+                id,
+                name,
+                parent_tool_use_id,
+                raw,
+                delegate,
+            } => {
+                json!({ "kind": "workflow", "id": id, "name": name, "parentToolUseId": parent_tool_use_id, "raw": raw, "delegate": delegate })
+            }
+            ClaudeEvent::Tool {
+                name,
+                input,
+                parent_tool_use_id,
+                raw,
+            } => {
+                json!({ "kind": "tool", "name": name, "input": input, "parentToolUseId": parent_tool_use_id, "raw": raw })
+            }
+            ClaudeEvent::AgentResult {
+                tool_use_id,
+                text,
+                raw,
+            } => {
+                json!({ "kind": "agentResult", "toolUseId": tool_use_id, "text": text, "raw": raw })
+            }
+            ClaudeEvent::Retry {
+                attempt,
+                max_retries,
+                category,
+                raw,
+            } => {
+                json!({ "kind": "retry", "attempt": attempt, "maxRetries": max_retries, "category": category, "raw": raw })
+            }
+            ClaudeEvent::Result {
+                is_error,
+                cost_usd,
+                text,
+                raw,
+            } => {
+                json!({ "kind": "result", "isError": is_error, "costUsd": cost_usd, "text": text, "raw": raw })
+            }
+            ClaudeEvent::Perm {
+                id,
+                tool,
+                input,
+                raw,
+            } => json!({ "kind": "perm", "id": id, "tool": tool, "input": input, "raw": raw }),
+            ClaudeEvent::Plan { id, plan, raw } => {
+                json!({ "kind": "plan", "id": id, "plan": plan, "raw": raw })
+            }
+            ClaudeEvent::PermResolved { id, decision, raw } => {
+                json!({ "kind": "permResolved", "id": id, "decision": decision, "raw": raw })
+            }
+            ClaudeEvent::Pr {
+                url,
+                number,
+                repo,
+                title,
+                body,
+                state,
+                raw,
+            } => {
+                json!({ "kind": "pr", "url": url, "number": number, "repo": repo, "title": title, "body": body, "state": state, "raw": raw })
+            }
+            ClaudeEvent::DelegateRequest {
+                id,
+                run_id,
+                tasks,
+                title,
+                raw,
+            } => {
+                json!({ "kind": "delegateRequest", "id": id, "runId": run_id, "tasks": tasks, "title": title, "raw": raw })
+            }
+            ClaudeEvent::WorkflowRun { id, run_id, raw } => {
+                json!({ "kind": "workflowRun", "id": id, "runId": run_id, "raw": raw })
+            }
+            ClaudeEvent::File { path, at, raw } => {
+                json!({ "kind": "file", "path": path, "at": at, "raw": raw })
+            }
+            ClaudeEvent::Other { raw } => json!({ "kind": "other", "raw": raw }),
         }
     }
 }
@@ -528,61 +880,176 @@ mod tests {
     fn to_wire_emits_kind_tagged_camelcase() {
         use serde_json::json;
         // text with no parent → parentToolUseId must be JSON null (present, not omitted).
-        let ev = ClaudeEvent::Text { text: "hi".into(), parent_tool_use_id: None, raw: json!({"type":"x"}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"text","text":"hi","parentToolUseId":null,"raw":{"type":"x"}}));
+        let ev = ClaudeEvent::Text {
+            text: "hi".into(),
+            parent_tool_use_id: None,
+            raw: json!({"type":"x"}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"text","text":"hi","parentToolUseId":null,"raw":{"type":"x"}})
+        );
 
         // text with a parent → camelCase parentToolUseId carries the id.
-        let ev = ClaudeEvent::Text { text: "yo".into(), parent_tool_use_id: Some("t1".into()), raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"text","text":"yo","parentToolUseId":"t1","raw":{}}));
+        let ev = ClaudeEvent::Text {
+            text: "yo".into(),
+            parent_tool_use_id: Some("t1".into()),
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"text","text":"yo","parentToolUseId":"t1","raw":{}})
+        );
 
         // init → sessionId.
-        let ev = ClaudeEvent::Init { session_id: "sess-1".into(), raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"init","sessionId":"sess-1","raw":{}}));
+        let ev = ClaudeEvent::Init {
+            session_id: "sess-1".into(),
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"init","sessionId":"sess-1","raw":{}})
+        );
 
         // prompt → text + at.
-        let ev = ClaudeEvent::Prompt { text: "go".into(), at: 42, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"prompt","text":"go","at":42,"raw":{}}));
+        let ev = ClaudeEvent::Prompt {
+            text: "go".into(),
+            at: 42,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"prompt","text":"go","at":42,"raw":{}})
+        );
 
         // result with a cost → isError + costUsd. Absent cost → costUsd null.
-        let ev = ClaudeEvent::Result { is_error: false, cost_usd: Some(0.0042), text: Some("ok".into()), raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"result","isError":false,"costUsd":0.0042,"text":"ok","raw":{}}));
-        let ev = ClaudeEvent::Result { is_error: true, cost_usd: None, text: None, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"result","isError":true,"costUsd":null,"text":null,"raw":{}}));
+        let ev = ClaudeEvent::Result {
+            is_error: false,
+            cost_usd: Some(0.0042),
+            text: Some("ok".into()),
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"result","isError":false,"costUsd":0.0042,"text":"ok","raw":{}})
+        );
+        let ev = ClaudeEvent::Result {
+            is_error: true,
+            cost_usd: None,
+            text: None,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"result","isError":true,"costUsd":null,"text":null,"raw":{}})
+        );
 
         // agentResult → toolUseId.
-        let ev = ClaudeEvent::AgentResult { tool_use_id: "tu".into(), text: "done".into(), raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"agentResult","toolUseId":"tu","text":"done","raw":{}}));
+        let ev = ClaudeEvent::AgentResult {
+            tool_use_id: "tu".into(),
+            text: "done".into(),
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"agentResult","toolUseId":"tu","text":"done","raw":{}})
+        );
 
         // retry → attempt + maxRetries + category.
-        let ev = ClaudeEvent::Retry { attempt: 1, max_retries: 3, category: "overloaded".into(), raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"retry","attempt":1,"maxRetries":3,"category":"overloaded","raw":{}}));
+        let ev = ClaudeEvent::Retry {
+            attempt: 1,
+            max_retries: 3,
+            category: "overloaded".into(),
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"retry","attempt":1,"maxRetries":3,"category":"overloaded","raw":{}})
+        );
 
         // agent → agents array of {id, agentType, description}.
         let ev = ClaudeEvent::Agent {
-            agents: vec![SpawnedAgent { id: "a1".into(), agent_type: "coder".into(), description: "d".into() }],
-            parent_tool_use_id: Some("p".into()), raw: json!({}),
+            agents: vec![SpawnedAgent {
+                id: "a1".into(),
+                agent_type: "coder".into(),
+                description: "d".into(),
+            }],
+            parent_tool_use_id: Some("p".into()),
+            raw: json!({}),
         };
-        assert_eq!(ev.to_wire(), json!({
-            "kind":"agent",
-            "agents":[{"id":"a1","agentType":"coder","description":"d"}],
-            "parentToolUseId":"p","raw":{}
-        }));
+        assert_eq!(
+            ev.to_wire(),
+            json!({
+                "kind":"agent",
+                "agents":[{"id":"a1","agentType":"coder","description":"d"}],
+                "parentToolUseId":"p","raw":{}
+            })
+        );
 
         // workflow / skill / ask / tool / thinking / other shapes.
-        let ev = ClaudeEvent::Workflow { id: "w".into(), name: "n".into(), parent_tool_use_id: None, raw: json!({}), delegate: false };
-        assert_eq!(ev.to_wire(), json!({"kind":"workflow","id":"w","name":"n","parentToolUseId":null,"raw":{},"delegate":false}));
-        let evd = ClaudeEvent::Workflow { id: "w".into(), name: "n".into(), parent_tool_use_id: None, raw: json!({}), delegate: true };
+        let ev = ClaudeEvent::Workflow {
+            id: "w".into(),
+            name: "n".into(),
+            parent_tool_use_id: None,
+            raw: json!({}),
+            delegate: false,
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"workflow","id":"w","name":"n","parentToolUseId":null,"raw":{},"delegate":false})
+        );
+        let evd = ClaudeEvent::Workflow {
+            id: "w".into(),
+            name: "n".into(),
+            parent_tool_use_id: None,
+            raw: json!({}),
+            delegate: true,
+        };
         assert_eq!(evd.to_wire()["delegate"], json!(true));
-        let ev = ClaudeEvent::Skill { names: vec!["s1".into()], parent_tool_use_id: None, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"skill","names":["s1"],"parentToolUseId":null,"raw":{}}));
-        let ev = ClaudeEvent::Ask { questions: vec![json!({"q":1})], parent_tool_use_id: None, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"ask","questions":[{"q":1}],"parentToolUseId":null,"raw":{}}));
-        let ev = ClaudeEvent::Tool { name: "bash".into(), input: json!({"cmd":"ls"}), parent_tool_use_id: None, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"tool","name":"bash","input":{"cmd":"ls"},"parentToolUseId":null,"raw":{}}));
-        let ev = ClaudeEvent::Thinking { text: "hmm".into(), parent_tool_use_id: None, raw: json!({}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"thinking","text":"hmm","parentToolUseId":null,"raw":{}}));
-        let ev = ClaudeEvent::Other { raw: json!({"engineExit":{"code":null,"status":"done"}}) };
-        assert_eq!(ev.to_wire(), json!({"kind":"other","raw":{"engineExit":{"code":null,"status":"done"}}}));
+        let ev = ClaudeEvent::Skill {
+            names: vec!["s1".into()],
+            parent_tool_use_id: None,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"skill","names":["s1"],"parentToolUseId":null,"raw":{}})
+        );
+        let ev = ClaudeEvent::Ask {
+            questions: vec![json!({"q":1})],
+            parent_tool_use_id: None,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"ask","questions":[{"q":1}],"parentToolUseId":null,"raw":{}})
+        );
+        let ev = ClaudeEvent::Tool {
+            name: "bash".into(),
+            input: json!({"cmd":"ls"}),
+            parent_tool_use_id: None,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"tool","name":"bash","input":{"cmd":"ls"},"parentToolUseId":null,"raw":{}})
+        );
+        let ev = ClaudeEvent::Thinking {
+            text: "hmm".into(),
+            parent_tool_use_id: None,
+            raw: json!({}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"thinking","text":"hmm","parentToolUseId":null,"raw":{}})
+        );
+        let ev = ClaudeEvent::Other {
+            raw: json!({"engineExit":{"code":null,"status":"done"}}),
+        };
+        assert_eq!(
+            ev.to_wire(),
+            json!({"kind":"other","raw":{"engineExit":{"code":null,"status":"done"}}})
+        );
     }
 
     #[test]
@@ -594,7 +1061,8 @@ mod tests {
 
     #[test]
     fn parses_init_and_extracts_session_id() {
-        let line = json!({ "type": "system", "subtype": "init", "session_id": "abc123" }).to_string();
+        let line =
+            json!({ "type": "system", "subtype": "init", "session_id": "abc123" }).to_string();
         let evs = parse_line(&line);
         assert_eq!(evs.len(), 1);
         match &evs[0] {
@@ -612,7 +1080,11 @@ mod tests {
         })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Text { text, parent_tool_use_id, .. } => {
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(text, "hello");
                 assert_eq!(parent_tool_use_id.as_deref(), Some("toolu_1"));
             }
@@ -628,7 +1100,11 @@ mod tests {
         })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Text { text, parent_tool_use_id, .. } => {
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(text, "hi");
                 assert_eq!(*parent_tool_use_id, None);
             }
@@ -641,7 +1117,12 @@ mod tests {
         let line = json!({ "type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 5, "error": "overloaded" })
             .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Retry { attempt, max_retries, category, .. } => {
+            ClaudeEvent::Retry {
+                attempt,
+                max_retries,
+                category,
+                ..
+            } => {
                 assert_eq!((*attempt, *max_retries), (2, 5));
                 assert_eq!(category, "overloaded");
             }
@@ -654,7 +1135,9 @@ mod tests {
         let line = json!({ "type": "result", "subtype": "success", "is_error": false, "total_cost_usd": 0.0123 })
             .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Result { is_error, cost_usd, .. } => {
+            ClaudeEvent::Result {
+                is_error, cost_usd, ..
+            } => {
                 assert!(!(*is_error));
                 assert_eq!(*cost_usd, Some(0.0123));
             }
@@ -712,10 +1195,13 @@ mod tests {
     fn parses_agent_result_marker() {
         // The engine-synthesized rendered marker must parse back to AgentResult (not fall through to
         // Other), so the WS cursor delivers it as kind:agentResult exactly once — live AND on reopen.
-        let line = json!({ "type": "agent_result", "toolUseId": "toolu_42", "text": "subagent said hi" })
-            .to_string();
+        let line =
+            json!({ "type": "agent_result", "toolUseId": "toolu_42", "text": "subagent said hi" })
+                .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::AgentResult { tool_use_id, text, .. } => {
+            ClaudeEvent::AgentResult {
+                tool_use_id, text, ..
+            } => {
                 assert_eq!(tool_use_id, "toolu_42");
                 assert_eq!(text, "subagent said hi");
             }
@@ -741,7 +1227,11 @@ mod tests {
             "message": { "content": [{ "type": "text", "text": "your job: reply pong" }] } })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Text { text, parent_tool_use_id, .. } => {
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(text, "your job: reply pong");
                 assert_eq!(parent_tool_use_id.as_deref(), Some("toolu_A"));
             }
@@ -756,7 +1246,9 @@ mod tests {
         ] } })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::AgentResult { tool_use_id, text, .. } => {
+            ClaudeEvent::AgentResult {
+                tool_use_id, text, ..
+            } => {
                 assert_eq!(tool_use_id, "toolu_A");
                 assert_eq!(text, "pong");
             }
@@ -785,14 +1277,22 @@ mod tests {
         // Leading prose block is now surfaced as a Text event (partials are off), then Skill, then Bash.
         assert_eq!(evs.len(), 3);
         match &evs[0] {
-            ClaudeEvent::Text { text, parent_tool_use_id, .. } => {
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(text, "thinking");
                 assert_eq!(*parent_tool_use_id, None);
             }
             other => panic!("expected Text first, got {other:?}"),
         }
         match &evs[1] {
-            ClaudeEvent::Skill { names, parent_tool_use_id, .. } => {
+            ClaudeEvent::Skill {
+                names,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(names, &vec!["superpowers:writing-plans".to_string()]);
                 assert_eq!(*parent_tool_use_id, None);
             }
@@ -830,7 +1330,10 @@ mod tests {
         match &parse_line(&line)[0] {
             ClaudeEvent::Ask { questions: q, .. } => {
                 assert_eq!(q.len(), 1);
-                assert_eq!(q[0].get("question").and_then(|v| v.as_str()), Some("A or B?"));
+                assert_eq!(
+                    q[0].get("question").and_then(|v| v.as_str()),
+                    Some("A or B?")
+                );
             }
             other => panic!("expected Ask, got {other:?}"),
         }
@@ -844,7 +1347,11 @@ mod tests {
         ] } })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Agent { agents, parent_tool_use_id, .. } => {
+            ClaudeEvent::Agent {
+                agents,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(agents.len(), 1);
                 assert_eq!(
                     agents[0],
@@ -935,7 +1442,10 @@ mod tests {
         assert_eq!(evs.len(), 1);
         match &evs[0] {
             ClaudeEvent::Other { raw } => {
-                assert_eq!(raw.get("type").and_then(|v| v.as_str()), Some("control_request"));
+                assert_eq!(
+                    raw.get("type").and_then(|v| v.as_str()),
+                    Some("control_request")
+                );
                 // raw is passed through verbatim, and to_wire stays stable.
                 assert_eq!(evs[0].to_wire(), json!({ "kind": "other", "raw": raw }));
             }
@@ -964,7 +1474,6 @@ mod tests {
         assert!(matches!(parse_line(&no_type)[0], ClaudeEvent::Other { .. }));
     }
 
-
     #[test]
     fn tool_use_blocks_with_missing_fields_use_defaults_and_dont_panic() {
         // Ordinary tool block with NO name and NO input.
@@ -973,7 +1482,12 @@ mod tests {
         ] } })
         .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Tool { name, input, parent_tool_use_id, .. } => {
+            ClaudeEvent::Tool {
+                name,
+                input,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(name, "tool");
                 assert_eq!(*input, json!({}));
                 assert_eq!(*parent_tool_use_id, None);
@@ -1010,7 +1524,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn multi_block_assistant_emits_events_in_array_order_per_category() {
         let line = json!({ "type": "assistant", "message": { "content": [
@@ -1035,7 +1548,9 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
         match &evs[1] {
-            ClaudeEvent::Skill { names, .. } => assert_eq!(names, &vec!["superpowers:writing-plans".to_string()]),
+            ClaudeEvent::Skill { names, .. } => {
+                assert_eq!(names, &vec!["superpowers:writing-plans".to_string()])
+            }
             other => panic!("expected Skill, got {other:?}"),
         }
         match &evs[2] {
@@ -1048,7 +1563,14 @@ mod tests {
         }
         // Workflows appear in source-array order: "first" (name) before "second" (title).
         match (&evs[3], &evs[4]) {
-            (ClaudeEvent::Workflow { name: n1, id: id1, .. }, ClaudeEvent::Workflow { name: n2, id: id2, .. }) => {
+            (
+                ClaudeEvent::Workflow {
+                    name: n1, id: id1, ..
+                },
+                ClaudeEvent::Workflow {
+                    name: n2, id: id2, ..
+                },
+            ) => {
                 assert_eq!((n1.as_str(), id1.as_str()), ("first", "wf1"));
                 assert_eq!((n2.as_str(), id2.as_str()), ("second", "wf2"));
             }
@@ -1067,7 +1589,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn ask_user_question_with_non_array_questions_yields_no_ask() {
         // questions is a string, not an array → no Ask, and no other tool blocks → empty vec.
@@ -1076,7 +1597,10 @@ mod tests {
         ] } })
         .to_string();
         let evs = parse_line(&line);
-        assert!(evs.is_empty(), "non-array questions must not yield an Ask, got {evs:?}");
+        assert!(
+            evs.is_empty(),
+            "non-array questions must not yield an Ask, got {evs:?}"
+        );
 
         // questions is an object → still skipped.
         let line = json!({ "type": "assistant", "message": { "content": [
@@ -1093,7 +1617,6 @@ mod tests {
         assert!(parse_line(&line).is_empty());
     }
 
-
     #[test]
     fn final_assistant_text_and_thinking_are_surfaced() {
         // A streamed delta (when partials are ON) still yields one Text event with the chunk.
@@ -1103,7 +1626,11 @@ mod tests {
         })
         .to_string();
         match &parse_line(&partial)[0] {
-            ClaudeEvent::Text { text, parent_tool_use_id, .. } => {
+            ClaudeEvent::Text {
+                text,
+                parent_tool_use_id,
+                ..
+            } => {
                 assert_eq!(text, "Hel");
                 assert_eq!(*parent_tool_use_id, None);
             }
@@ -1120,7 +1647,11 @@ mod tests {
         ] } })
         .to_string();
         let evs = parse_line(&final_msg);
-        assert_eq!(evs.len(), 2, "thinking + text must each surface, got {evs:?}");
+        assert_eq!(
+            evs.len(),
+            2,
+            "thinking + text must each surface, got {evs:?}"
+        );
         match &evs[0] {
             ClaudeEvent::Thinking { text, .. } => assert_eq!(text, "let me reason"),
             other => panic!("expected Thinking first, got {other:?}"),
@@ -1131,34 +1662,48 @@ mod tests {
         }
     }
 
-
     #[test]
     fn parses_agentic_perm_perm_and_plan_and_resolved() {
         // perm (a tool awaiting approval)
         let line = json!({ "type": "agentic_perm", "permKind": "perm", "id": "perm-1",
-            "tool": "Bash", "input": { "command": "rm -rf x" } }).to_string();
+            "tool": "Bash", "input": { "command": "rm -rf x" } })
+        .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Perm { id, tool, input, .. } => {
+            ClaudeEvent::Perm {
+                id, tool, input, ..
+            } => {
                 assert_eq!(id, "perm-1");
                 assert_eq!(tool, "Bash");
-                assert_eq!(input.get("command").and_then(|v| v.as_str()), Some("rm -rf x"));
+                assert_eq!(
+                    input.get("command").and_then(|v| v.as_str()),
+                    Some("rm -rf x")
+                );
             }
             other => panic!("expected Perm, got {other:?}"),
         }
         assert_eq!(parse_line(&line)[0].to_wire()["kind"], "perm");
 
         // plan (ExitPlanMode awaiting approval)
-        let line = json!({ "type": "agentic_perm", "permKind": "plan", "id": "perm-2", "plan": "do X" }).to_string();
+        let line =
+            json!({ "type": "agentic_perm", "permKind": "plan", "id": "perm-2", "plan": "do X" })
+                .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Plan { id, plan, .. } => { assert_eq!(id, "perm-2"); assert_eq!(plan, "do X"); }
+            ClaudeEvent::Plan { id, plan, .. } => {
+                assert_eq!(id, "perm-2");
+                assert_eq!(plan, "do X");
+            }
             other => panic!("expected Plan, got {other:?}"),
         }
         assert_eq!(parse_line(&line)[0].to_wire()["kind"], "plan");
 
         // resolved
-        let line = json!({ "type": "agentic_perm_resolved", "id": "perm-1", "decision": "allow" }).to_string();
+        let line = json!({ "type": "agentic_perm_resolved", "id": "perm-1", "decision": "allow" })
+            .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::PermResolved { id, decision, .. } => { assert_eq!(id, "perm-1"); assert_eq!(decision, "allow"); }
+            ClaudeEvent::PermResolved { id, decision, .. } => {
+                assert_eq!(id, "perm-1");
+                assert_eq!(decision, "allow");
+            }
             other => panic!("expected PermResolved, got {other:?}"),
         }
         let w = parse_line(&line)[0].to_wire();
@@ -1170,9 +1715,18 @@ mod tests {
     fn parses_pr_marker_and_wires_kind_pr() {
         let line = json!({ "type": "pr", "url": "https://github.com/arcatva/agentic-dev/pull/26",
             "number": 26, "repo": "arcatva/agentic-dev", "title": "Add PR cards",
-            "body": "Backend-driven\n\n- detail", "state": "OPEN" }).to_string();
+            "body": "Backend-driven\n\n- detail", "state": "OPEN" })
+        .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::Pr { url, number, repo, title, body, state, .. } => {
+            ClaudeEvent::Pr {
+                url,
+                number,
+                repo,
+                title,
+                body,
+                state,
+                ..
+            } => {
                 assert_eq!(url, "https://github.com/arcatva/agentic-dev/pull/26");
                 assert_eq!(*number, 26);
                 assert_eq!(repo, "arcatva/agentic-dev");
@@ -1205,10 +1759,17 @@ mod tests {
         );
         // Not a bare-URL line: inline prose, the `url:` view label, the `#issuecomment` comment suffix,
         // the `/pulls/` REST path, and an issue link must all NOT fire.
-        assert!(detect_created_pr_urls("Opened https://github.com/arcatva/a/pull/1 for review").is_empty());
+        assert!(
+            detect_created_pr_urls("Opened https://github.com/arcatva/a/pull/1 for review")
+                .is_empty()
+        );
         assert!(detect_created_pr_urls("url:\thttps://github.com/arcatva/a/pull/1").is_empty());
-        assert!(detect_created_pr_urls("https://github.com/arcatva/a/pull/1#issuecomment-9").is_empty());
-        assert!(detect_created_pr_urls("https://api.github.com/repos/arcatva/a/pulls/1").is_empty());
+        assert!(
+            detect_created_pr_urls("https://github.com/arcatva/a/pull/1#issuecomment-9").is_empty()
+        );
+        assert!(
+            detect_created_pr_urls("https://api.github.com/repos/arcatva/a/pulls/1").is_empty()
+        );
         assert!(detect_created_pr_urls("https://github.com/arcatva/a/issues/1").is_empty());
     }
 
@@ -1218,20 +1779,29 @@ mod tests {
             pr_repo_from_url("https://github.com/arcatva/agentic-dev/pull/26").as_deref(),
             Some("arcatva/agentic-dev"),
         );
-        assert_eq!(pr_repo_from_url("https://github.com/BerriAI/litellm/pull/14821").as_deref(), Some("BerriAI/litellm"));
+        assert_eq!(
+            pr_repo_from_url("https://github.com/BerriAI/litellm/pull/14821").as_deref(),
+            Some("BerriAI/litellm")
+        );
         assert_eq!(pr_repo_from_url("not a url"), None);
     }
 
     #[test]
     fn parses_agentic_delegate_request() {
         let line = json!({ "type": "agentic_delegate_request", "id": "deleg-1", "runId": "wf_d1",
-            "tasks": [{ "prompt": "explore X", "role": "explorer" }] }).to_string();
+            "tasks": [{ "prompt": "explore X", "role": "explorer" }] })
+        .to_string();
         match &parse_line(&line)[0] {
-            ClaudeEvent::DelegateRequest { id, run_id, tasks, .. } => {
+            ClaudeEvent::DelegateRequest {
+                id, run_id, tasks, ..
+            } => {
                 assert_eq!(id, "deleg-1");
                 assert_eq!(run_id, "wf_d1");
                 assert_eq!(tasks.len(), 1);
-                assert_eq!(tasks[0].get("prompt").and_then(|v| v.as_str()), Some("explore X"));
+                assert_eq!(
+                    tasks[0].get("prompt").and_then(|v| v.as_str()),
+                    Some("explore X")
+                );
             }
             other => panic!("expected DelegateRequest, got {other:?}"),
         }
@@ -1240,7 +1810,8 @@ mod tests {
 
     #[test]
     fn parses_workflow_run_marker_roundtrip() {
-        let line = json!({ "type": "workflowRun", "id": "toolu_W", "runId": "wf_abc123" }).to_string();
+        let line =
+            json!({ "type": "workflowRun", "id": "toolu_W", "runId": "wf_abc123" }).to_string();
         match &parse_line(&line)[0] {
             ClaudeEvent::WorkflowRun { id, run_id, .. } => {
                 assert_eq!(id, "toolu_W");
@@ -1277,10 +1848,15 @@ mod tests {
         let line = json!({ "type": "assistant", "message": { "content": [
             { "type": "tool_use", "id": "toolu_d", "name": "mcp__agentic__delegate",
               "input": { "tasks": [{"prompt":"a"},{"prompt":"b"},{"prompt":"c"}] } }
-        ] } }).to_string();
+        ] } })
+        .to_string();
         // delegate is surfaced as a Workflow card (not a generic Tool chip), like the native Workflow tool.
         let evs = parse_line(&line);
-        assert_eq!(evs.len(), 1, "delegate yields one workflow card, not also a tool chip");
+        assert_eq!(
+            evs.len(),
+            1,
+            "delegate yields one workflow card, not also a tool chip"
+        );
         match &evs[0] {
             ClaudeEvent::Workflow { id, name, .. } => {
                 assert_eq!(id, "toolu_d");
@@ -1307,7 +1883,10 @@ mod tests {
                 assert_eq!(text.as_str(), big.as_str());
                 // to_wire must preserve the exact unicode payload.
                 let wire = evs[0].to_wire();
-                assert_eq!(wire.get("text").and_then(|v| v.as_str()), Some(big.as_str()));
+                assert_eq!(
+                    wire.get("text").and_then(|v| v.as_str()),
+                    Some(big.as_str())
+                );
             }
             other => panic!("expected Text, got {other:?}"),
         }
@@ -1315,9 +1894,11 @@ mod tests {
         // Garbage with surrounding whitespace / embedded NUL must never panic; trims to non-JSON.
         assert_eq!(parse_line("\n\t  {bad json \0 \n"), vec![]);
         assert_eq!(parse_line("   \u{feff}   "), vec![]); // BOM + spaces, no JSON
-        // A bare JSON scalar (valid JSON, not an object) → has no "type" → Other, no panic.
+                                                          // A bare JSON scalar (valid JSON, not an object) → has no "type" → Other, no panic.
         assert!(matches!(parse_line("42")[0], ClaudeEvent::Other { .. }));
-        assert!(matches!(parse_line("\"just a string\"")[0], ClaudeEvent::Other { .. }));
+        assert!(matches!(
+            parse_line("\"just a string\"")[0],
+            ClaudeEvent::Other { .. }
+        ));
     }
-
 }

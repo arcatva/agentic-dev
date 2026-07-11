@@ -80,7 +80,10 @@ pub fn start_live_run(
             "phaseTitle": w.phase_title,
             "promptPreview": w.prompt.chars().take(200).collect::<String>(),
         });
-        std::fs::write(rd.join(format!("agent-{}.meta.json", w.agent_id)), serde_json::to_string(&am)?)?;
+        std::fs::write(
+            rd.join(format!("agent-{}.meta.json", w.agent_id)),
+            serde_json::to_string(&am)?,
+        )?;
     }
     // Ensure journal.jsonl exists (empty) so the live run is well-formed.
     std::fs::OpenOptions::new()
@@ -91,18 +94,30 @@ pub fn start_live_run(
 }
 
 /// Append a status line to the live journal.
-pub fn append_journal(journal_dir: &Path, run_id: &str, line: &serde_json::Value) -> std::io::Result<()> {
+pub fn append_journal(
+    journal_dir: &Path,
+    run_id: &str,
+    line: &serde_json::Value,
+) -> std::io::Result<()> {
     let jf = run_dir(journal_dir, run_id).join("journal.jsonl");
     if let Some(parent) = jf.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(jf)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(jf)?;
     writeln!(f, "{line}")?;
     Ok(())
 }
 
 /// Mark a worker done in the live journal (status -> done, with a short result preview).
-pub fn mark_agent_done(journal_dir: &Path, run_id: &str, agent_id: &str, result: &str) -> std::io::Result<()> {
+pub fn mark_agent_done(
+    journal_dir: &Path,
+    run_id: &str,
+    agent_id: &str,
+    result: &str,
+) -> std::io::Result<()> {
     append_journal(
         journal_dir,
         run_id,
@@ -150,7 +165,11 @@ pub fn write_summary(
             let wa = WorkflowAgent {
                 agent_id: a.agent_id.clone(),
                 label: a.label.clone(),
-                state: if a.failed { "failed".into() } else { "done".into() },
+                state: if a.failed {
+                    "failed".into()
+                } else {
+                    "done".into()
+                },
                 model: a.model.clone(),
                 phase_title: a.phase_title.clone(),
                 prompt_preview: a.prompt_preview.clone(),
@@ -235,7 +254,9 @@ pub struct WorkerSummary {
 const WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn content_text(content: Option<&serde_json::Value>) -> String {
-    let Some(content) = content else { return String::new() };
+    let Some(content) = content else {
+        return String::new();
+    };
     if let Some(s) = content.as_str() {
         return s.to_string();
     }
@@ -309,10 +330,11 @@ pub(crate) fn extract_model_from_transcript(jsonl: &Path) -> Option<String> {
             continue;
         };
         // system/init carries "model" at the top level; assistant messages carry message.model.
-        let m = o
-            .get("model")
-            .and_then(|v| v.as_str())
-            .or_else(|| o.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()));
+        let m = o.get("model").and_then(|v| v.as_str()).or_else(|| {
+            o.get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|v| v.as_str())
+        });
         if let Some(m) = m.filter(|s| !s.is_empty()) {
             return Some(m.to_string());
         }
@@ -347,12 +369,19 @@ pub async fn run_workers(
         overlay.insert("SDK_BRIDGE_WORKER".to_string(), "1".to_string());
         // Write workers run in their own isolated worktree (w.cwd_override); read workers share the
         // caller's worktree (the default), exactly as before.
-        let cwd = w.cwd_override.clone().unwrap_or_else(|| worktree.to_string());
+        let cwd = w
+            .cwd_override
+            .clone()
+            .unwrap_or_else(|| worktree.to_string());
         let opts = SpawnOptions {
             cwd,
             prompt: w.prompt.clone(),
             env: overlay,
-            model: if w.model.is_empty() { None } else { Some(w.model.clone()) },
+            model: if w.model.is_empty() {
+                None
+            } else {
+                Some(w.model.clone())
+            },
             permission_mode: Some("bypassPermissions".to_string()),
             log_path: log_path.clone(),
             unit: format!("agentic-worker-{run_id}-{}", w.agent_id),
@@ -387,12 +416,20 @@ pub async fn run_workers(
         let (summary, had_error) = extract_summary(&log_path);
         let failed = had_error || timed_out || exit_failed;
         let preview = if summary.is_empty() {
-            if failed { "(failed)" } else { "(no output)" }
+            if failed {
+                "(failed)"
+            } else {
+                "(no output)"
+            }
         } else {
             &summary
         };
         let _ = mark_agent_done(journal_dir, run_id, &agent_id, preview);
-        summaries.push(WorkerSummary { agent_id, summary, failed });
+        summaries.push(WorkerSummary {
+            agent_id,
+            summary,
+            failed,
+        });
     }
     Ok(summaries)
 }
@@ -441,11 +478,19 @@ pub fn finalize_orphaned_runs(journal_dir: &Path, now_ms: i64) -> usize {
         }
         let run_id = entry.file_name().to_string_lossy().into_owned();
         // Defense-in-depth: run_id flows into the summary file path below.
-        if run_id.is_empty() || run_id.contains('/') || run_id.contains('\\') || run_id.contains("..") {
+        if run_id.is_empty()
+            || run_id.contains('/')
+            || run_id.contains('\\')
+            || run_id.contains("..")
+        {
             continue;
         }
         // A completion summary already exists → the run finished (summary wins over the live dir).
-        if journal_dir.join("workflows").join(format!("wf_{run_id}.json")).exists() {
+        if journal_dir
+            .join("workflows")
+            .join(format!("wf_{run_id}.json"))
+            .exists()
+        {
             continue;
         }
         // Reconstruct the run exactly as the live workflow tab renders it (name, phases, per-worker
@@ -462,8 +507,10 @@ pub fn finalize_orphaned_runs(journal_dir: &Path, now_ms: i64) -> usize {
                 // Native-fallback workers have an empty meta model; read the real tier from the
                 // worker's transcript so the recovered row matches a normally-completed one.
                 let model = if a.model.is_empty() {
-                    extract_model_from_transcript(&entry.path().join(format!("agent-{}.jsonl", a.agent_id)))
-                        .unwrap_or_default()
+                    extract_model_from_transcript(
+                        &entry.path().join(format!("agent-{}.jsonl", a.agent_id)),
+                    )
+                    .unwrap_or_default()
                 } else {
                     a.model.clone()
                 };
@@ -539,7 +586,13 @@ async fn route_via_native_claude(
         return route_idxs
             .into_iter()
             .map(|i| {
-                (i, crate::engine::router::RouteChoice { model: only.model.clone(), reason: "only candidate".into() })
+                (
+                    i,
+                    crate::engine::router::RouteChoice {
+                        model: only.model.clone(),
+                        reason: "only candidate".into(),
+                    },
+                )
             })
             .collect();
     }
@@ -548,7 +601,8 @@ async fn route_via_native_claude(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let log_path = std::env::temp_dir().join(format!("agentic-route-{}-{uniq}.jsonl", std::process::id()));
+    let log_path =
+        std::env::temp_dir().join(format!("agentic-route-{}-{uniq}.jsonl", std::process::id()));
     let mut overlay = HashMap::new();
     // Headless: deny AskUserQuestion + don't mount delegate (no nested fan-out from the router call).
     overlay.insert("SDK_BRIDGE_WORKER".to_string(), "1".to_string());
@@ -567,7 +621,10 @@ async fn route_via_native_claude(
     handle.write(&encode_user_message(&prompt));
     handle.end_input();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    if tokio::time::timeout_at(deadline, &mut handle.exit).await.is_err() {
+    if tokio::time::timeout_at(deadline, &mut handle.exit)
+        .await
+        .is_err()
+    {
         handle.kill();
         // Wait for the killed process to ACTUALLY exit before reading/removing its log (bounded, so a
         // wedged kill can't hang the fan-out). Otherwise we could read/delete the log mid-write.
@@ -578,7 +635,10 @@ async fn route_via_native_claude(
     if text.trim().is_empty() {
         return HashMap::new();
     }
-    router::apply_priority(router::parse_route_response(&text, &route_idxs, candidates), candidates)
+    router::apply_priority(
+        router::parse_route_response(&text, &route_idxs, candidates),
+        candidates,
+    )
 }
 
 // ── write-mode worktree isolation ──────────────────────────────────────────────
@@ -640,7 +700,10 @@ fn provision_write_worktree(
     bases: &HashMap<String, String>,
 ) -> Result<WriteProvision, super::worktree::WorktreeError> {
     use super::worktree::WorktreeError;
-    let worker_dir = session_dir.join(".agentic-delegate").join(run_id).join(agent_id);
+    let worker_dir = session_dir
+        .join(".agentic-delegate")
+        .join(run_id)
+        .join(agent_id);
     std::fs::create_dir_all(&worker_dir)?;
     let mut out = Vec::new();
     for repo in repos {
@@ -653,9 +716,18 @@ fn provision_write_worktree(
         let rp = anchor.to_string_lossy();
         let wp = worker_wt.to_string_lossy();
         super::worktree::git_sync(&["-C", &rp, "worktree", "add", &wp, "-b", &branch, base])?;
-        out.push(WriteRepoWt { repo: repo.clone(), anchor, worker_wt, base_sha: base.clone(), branch });
+        out.push(WriteRepoWt {
+            repo: repo.clone(),
+            anchor,
+            worker_wt,
+            base_sha: base.clone(),
+            branch,
+        });
     }
-    Ok(WriteProvision { worker_dir, repos: out })
+    Ok(WriteProvision {
+        worker_dir,
+        repos: out,
+    })
 }
 
 /// Diff a write worker's isolated worktrees against their snapshot bases and format the combined
@@ -676,7 +748,10 @@ async fn collect_write_patch(prov: &WriteProvision) -> String {
                 patch.push_str(&format!("===== END PATCH · repo `{}` =====\n", r.repo));
             }
             Ok(_) => {}
-            Err(e) => patch.push_str(&format!("\n[delegate] could not diff repo `{}`: {e}\n", r.repo)),
+            Err(e) => patch.push_str(&format!(
+                "\n[delegate] could not diff repo `{}`: {e}\n",
+                r.repo
+            )),
         }
     }
     patch
@@ -713,22 +788,35 @@ impl super::Engine {
         title: Option<String>,
     ) -> Result<Vec<WorkerSummary>, String> {
         // Defense-in-depth: run_id flows into file paths; never let it escape the journal dir.
-        if run_id.is_empty() || run_id.contains('/') || run_id.contains('\\') || run_id.contains("..") {
+        if run_id.is_empty()
+            || run_id.contains('/')
+            || run_id.contains('\\')
+            || run_id.contains("..")
+        {
             return Err("invalid run_id".to_string());
         }
 
         // Run title (the workflow card title) + phases (distinct non-empty task.phase labels, in order).
-        let name = title.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("delegate").to_string();
+        let name = title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("delegate")
+            .to_string();
         // Distinct phases in first-appearance order. Dedup is case-insensitive (keyed by lowercase),
         // but we store the canonical FIRST-appearance casing — and normalize each worker's phase_title
         // to it below — so "Explore"/"explore" collapse to one phase header AND one Android agent group.
-        let mut canonical_phase: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut canonical_phase: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut phases: Vec<WorkflowPhase> = Vec::new();
         for t in &tasks {
             if let Some(ph) = t.phase.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 if !canonical_phase.contains_key(&ph.to_lowercase()) {
                     canonical_phase.insert(ph.to_lowercase(), ph.to_string());
-                    phases.push(WorkflowPhase { title: ph.to_string(), detail: None });
+                    phases.push(WorkflowPhase {
+                        title: ph.to_string(),
+                        detail: None,
+                    });
                 }
             }
         }
@@ -771,7 +859,9 @@ impl super::Engine {
         if has_write {
             if repos.is_empty() {
                 self.clear_delegate_pending(caller_id);
-                return Err("delegate write mode needs a session with at least one repo".to_string());
+                return Err(
+                    "delegate write mode needs a session with at least one repo".to_string()
+                );
             }
             let bases = match snapshot_session_repos(&session_dir, &repos, run_id) {
                 Ok(b) => b,
@@ -808,7 +898,8 @@ impl super::Engine {
         // Native candidates live in a local owned Vec; registered providers stay as references (no
         // clone). `candidates` borrows both.
         let native_overrides = crate::engine::native_overrides::load_map();
-        let native_candidates = crate::engine::providers::native_claude_candidates(&native_overrides);
+        let native_candidates =
+            crate::engine::providers::native_claude_candidates(&native_overrides);
         let candidates: Vec<&crate::engine::providers::Provider> = registry
             .providers
             .iter()
@@ -830,7 +921,14 @@ impl super::Engine {
             Some(rp) => crate::engine::router::route_batch(&tasks, &candidates, rp, None).await,
             None => {
                 let config_dir = self.0.cfg.claude_config_base.to_string_lossy().into_owned();
-                route_via_native_claude(self.0.runner.as_ref(), &worktree, &config_dir, &tasks, &candidates).await
+                route_via_native_claude(
+                    self.0.runner.as_ref(),
+                    &worktree,
+                    &config_dir,
+                    &tasks,
+                    &candidates,
+                )
+                .await
             }
         };
 
@@ -846,10 +944,12 @@ impl super::Engine {
                 // model id (e.g. "claude-3-5-haiku-latest") substring-contains it and appears earlier.
                 let resolved: Option<(&crate::engine::providers::Provider, Option<String>)> =
                     if let Some(m) = explicit {
-                        crate::engine::providers::resolve_candidate(&candidates, m).map(|p| (p, None))
+                        crate::engine::providers::resolve_candidate(&candidates, m)
+                            .map(|p| (p, None))
                     } else {
                         picks.get(&i).and_then(|c| {
-                            crate::engine::providers::resolve_candidate(&candidates, &c.model).map(|p| (p, Some(c.reason.clone())))
+                            crate::engine::providers::resolve_candidate(&candidates, &c.model)
+                                .map(|p| (p, Some(c.reason.clone())))
                         })
                     };
                 let (model, overlay, route_reason) = match resolved {
@@ -858,14 +958,22 @@ impl super::Engine {
                         (p.model.clone(), HashMap::new(), reason)
                     }
                     // A registered provider runs cheap via its endpoint overlay.
-                    Some((p, reason)) => (p.model.clone(), crate::engine::providers::env_overlay(p), reason),
+                    Some((p, reason)) => (
+                        p.model.clone(),
+                        crate::engine::providers::env_overlay(p),
+                        reason,
+                    ),
                     // No catalog match (explicit unknown model, or router unavailable/failed) → native
                     // Claude: an explicit id becomes a native override, otherwise the default model.
                     None => (explicit.unwrap_or("").to_string(), HashMap::new(), None),
                 };
                 WorkerSpec {
                     agent_id: format!("w{}", i + 1),
-                    label: format!("{} {}", if t.role.is_empty() { "worker" } else { &t.role }, i + 1),
+                    label: format!(
+                        "{} {}",
+                        if t.role.is_empty() { "worker" } else { &t.role },
+                        i + 1
+                    ),
                     model,
                     env_overlay: overlay,
                     // Write workers run in their isolated worktree (provisioned above); read workers
@@ -875,8 +983,17 @@ impl super::Engine {
                         .map(|p| p.worker_dir.to_string_lossy().into_owned()),
                     prompt: t.prompt.clone(),
                     route_reason,
-                    phase_title: t.phase.as_deref().map(str::trim).filter(|s| !s.is_empty())
-                        .map(|ph| canonical_phase.get(&ph.to_lowercase()).cloned().unwrap_or_else(|| ph.to_string())),
+                    phase_title: t
+                        .phase
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|ph| {
+                            canonical_phase
+                                .get(&ph.to_lowercase())
+                                .cloned()
+                                .unwrap_or_else(|| ph.to_string())
+                        }),
                 }
             })
             .collect();
@@ -885,11 +1002,31 @@ impl super::Engine {
         // into run_workers, so the completion summary shows them in the workflow tab.
         let meta: HashMap<String, (String, String, Option<String>, Option<String>)> = workers
             .iter()
-            .map(|w| (w.agent_id.clone(), (w.model.clone(), w.label.clone(), w.route_reason.clone(), w.phase_title.clone())))
+            .map(|w| {
+                (
+                    w.agent_id.clone(),
+                    (
+                        w.model.clone(),
+                        w.label.clone(),
+                        w.route_reason.clone(),
+                        w.phase_title.clone(),
+                    ),
+                )
+            })
             .collect();
 
         let config_dir = self.0.cfg.claude_config_base.to_string_lossy().into_owned();
-        let mut result = run_workers(self.0.runner.as_ref(), &worktree, &journal_dir, run_id, &config_dir, &name, &phases, workers).await;
+        let mut result = run_workers(
+            self.0.runner.as_ref(),
+            &worktree,
+            &journal_dir,
+            run_id,
+            &config_dir,
+            &name,
+            &phases,
+            workers,
+        )
+        .await;
 
         // ── WRITE-mode post-processing ──
         // For each write worker, diff its isolated worktree against the snapshot base and append the
@@ -901,7 +1038,10 @@ impl super::Engine {
                     if let Some(prov) = write_provisions.get(&sum.agent_id) {
                         let patch = collect_write_patch(prov).await;
                         sum.summary = if patch.trim().is_empty() {
-                            format!("{}\n\n[delegate] write worker produced no file changes.", sum.summary)
+                            format!(
+                                "{}\n\n[delegate] write worker produced no file changes.",
+                                sum.summary
+                            )
                         } else {
                             format!("{}\n{}", sum.summary, patch)
                         };
@@ -916,16 +1056,24 @@ impl super::Engine {
             let agents: Vec<DelegateAgentResult> = sums
                 .iter()
                 .map(|s| {
-                    let (model, label, route_reason, phase_title) = meta.get(&s.agent_id).cloned().unwrap_or_default();
+                    let (model, label, route_reason, phase_title) =
+                        meta.get(&s.agent_id).cloned().unwrap_or_default();
                     DelegateAgentResult {
                         agent_id: s.agent_id.clone(),
-                        label: if label.is_empty() { s.agent_id.clone() } else { label },
+                        label: if label.is_empty() {
+                            s.agent_id.clone()
+                        } else {
+                            label
+                        },
                         // An empty spawn model means the native Claude fallback ran the worker — read the
                         // ACTUAL tier from its transcript (e.g. "claude-sonnet-4-5-…") so the row shows a
                         // real model name, not a generic placeholder.
                         model: if model.is_empty() {
-                            extract_model_from_transcript(&run_dir(&journal_dir, run_id).join(format!("agent-{}.jsonl", s.agent_id)))
-                                .unwrap_or_else(|| "claude (native)".into())
+                            extract_model_from_transcript(
+                                &run_dir(&journal_dir, run_id)
+                                    .join(format!("agent-{}.jsonl", s.agent_id)),
+                            )
+                            .unwrap_or_else(|| "claude (native)".into())
                         } else {
                             model
                         },
@@ -958,7 +1106,16 @@ impl super::Engine {
                 format!("auto-routed · {}", routed.join(" · "))
             };
             // The run shows under its caller-supplied title (or "delegate"); per-worker model + phase on each row.
-            if let Err(e) = write_summary(&journal_dir, run_id, &name, "done", Some(&summary), self.now(), &phases, &agents) {
+            if let Err(e) = write_summary(
+                &journal_dir,
+                run_id,
+                &name,
+                "done",
+                Some(&summary),
+                self.now(),
+                &phases,
+                &agents,
+            ) {
                 tracing::error!("[engine] failed to write delegate completion summary: {e}");
             }
         }
@@ -1007,10 +1164,38 @@ mod tests {
 
         // ── live phase: two workers, one finished ──
         let live_workers = vec![
-            WorkerSpec { agent_id: "w1".into(), label: "explorer 1".into(), model: "MiniMax-M3".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore X".into(), route_reason: None, phase_title: Some("Explore".into()) },
-            WorkerSpec { agent_id: "w2".into(), label: "explorer 2".into(), model: "deepseek-chat".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore Y".into(), route_reason: None, phase_title: Some("Explore".into()) },
+            WorkerSpec {
+                agent_id: "w1".into(),
+                label: "explorer 1".into(),
+                model: "MiniMax-M3".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore X".into(),
+                route_reason: None,
+                phase_title: Some("Explore".into()),
+            },
+            WorkerSpec {
+                agent_id: "w2".into(),
+                label: "explorer 2".into(),
+                model: "deepseek-chat".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore Y".into(),
+                route_reason: None,
+                phase_title: Some("Explore".into()),
+            },
         ];
-        start_live_run(&jd, run, "search batch", &[WorkflowPhase { title: "Explore".into(), detail: None }], &live_workers).unwrap();
+        start_live_run(
+            &jd,
+            run,
+            "search batch",
+            &[WorkflowPhase {
+                title: "Explore".into(),
+                detail: None,
+            }],
+            &live_workers,
+        )
+        .unwrap();
         write_agent_transcript(
             &jd,
             run,
@@ -1052,7 +1237,10 @@ mod tests {
             "done",
             Some("2 workers done"),
             1000,
-            &[WorkflowPhase { title: "Explore".into(), detail: None }],
+            &[WorkflowPhase {
+                title: "Explore".into(),
+                detail: None,
+            }],
             &[
                 DelegateAgentResult {
                     agent_id: "w1".into(),
@@ -1093,7 +1281,10 @@ mod tests {
 
         // per-worker transcript STILL readable after the summary was written
         let t = read_workflow_agent(&base, Some("uuid"), run, "w1");
-        assert!(t.contains("found 3 callsites"), "transcript lost after summary: {t}");
+        assert!(
+            t.contains("found 3 callsites"),
+            "transcript lost after summary: {t}"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1106,10 +1297,38 @@ mod tests {
 
         // A live run: two workers started, but only w1 reached its result line before the crash.
         let workers = vec![
-            WorkerSpec { agent_id: "w1".into(), label: "explorer 1".into(), model: "MiniMax-M3".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore X".into(), route_reason: None, phase_title: Some("Explore".into()) },
-            WorkerSpec { agent_id: "w2".into(), label: "explorer 2".into(), model: "deepseek-chat".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore Y".into(), route_reason: None, phase_title: Some("Explore".into()) },
+            WorkerSpec {
+                agent_id: "w1".into(),
+                label: "explorer 1".into(),
+                model: "MiniMax-M3".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore X".into(),
+                route_reason: None,
+                phase_title: Some("Explore".into()),
+            },
+            WorkerSpec {
+                agent_id: "w2".into(),
+                label: "explorer 2".into(),
+                model: "deepseek-chat".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore Y".into(),
+                route_reason: None,
+                phase_title: Some("Explore".into()),
+            },
         ];
-        start_live_run(&jd, run, "search batch", &[WorkflowPhase { title: "Explore".into(), detail: None }], &workers).unwrap();
+        start_live_run(
+            &jd,
+            run,
+            "search batch",
+            &[WorkflowPhase {
+                title: "Explore".into(),
+                detail: None,
+            }],
+            &workers,
+        )
+        .unwrap();
         mark_agent_done(&jd, run, "w1", "found 3 callsites").unwrap();
 
         // Before recovery the reader shows it RUNNING (live dir, no summary) — the phantom card.
@@ -1119,8 +1338,15 @@ mod tests {
         assert!(!is_workflow_terminal(&pre[0].status));
 
         // Recover: one orphaned run finalized, a summary file is written.
-        assert_eq!(finalize_orphaned_runs(&jd, 4242), 1, "one orphaned run finalized");
-        assert!(jd.join("workflows").join(format!("wf_{run}.json")).exists(), "summary written");
+        assert_eq!(
+            finalize_orphaned_runs(&jd, 4242),
+            1,
+            "one orphaned run finalized"
+        );
+        assert!(
+            jd.join("workflows").join(format!("wf_{run}.json")).exists(),
+            "summary written"
+        );
 
         // After recovery the summary WINS over the live dir → terminal "failed" (w2 never finished);
         // w1 stays done, w2 is marked failed, and the title/phases/timestamp are preserved.
@@ -1139,7 +1365,11 @@ mod tests {
         assert_eq!(w2.state, "failed");
 
         // Idempotent: a second pass sees the summary and does nothing.
-        assert_eq!(finalize_orphaned_runs(&jd, 9999), 0, "already-finalized run is skipped");
+        assert_eq!(
+            finalize_orphaned_runs(&jd, 9999),
+            0,
+            "already-finalized run is skipped"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1149,15 +1379,25 @@ mod tests {
         use crate::engine::workflows::list_workflows;
         let (base, jd) = journal_base();
         let run = "wfdeleg-777-1";
-        let workers = vec![
-            WorkerSpec { agent_id: "w1".into(), label: "w1".into(), model: "m".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "a".into(), route_reason: None, phase_title: None },
-        ];
+        let workers = vec![WorkerSpec {
+            agent_id: "w1".into(),
+            label: "w1".into(),
+            model: "m".into(),
+            env_overlay: HashMap::new(),
+            cwd_override: None,
+            prompt: "a".into(),
+            route_reason: None,
+            phase_title: None,
+        }];
         start_live_run(&jd, run, "batch", &[], &workers).unwrap();
         mark_agent_done(&jd, run, "w1", "ok").unwrap(); // the only worker finished before the crash
 
         assert_eq!(finalize_orphaned_runs(&jd, 1), 1);
         let runs = list_workflows(&base, Some("uuid"));
-        assert_eq!(runs[0].status, "done", "all workers done → recovered as done, not failed");
+        assert_eq!(
+            runs[0].status, "done",
+            "all workers done → recovered as done, not failed"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1174,10 +1414,39 @@ mod tests {
             .join("tests/fixtures/fake-sdk-bridge-ok.sh");
         let runner = SdkRunner::with_node("bash", fixture.to_string_lossy().into_owned());
         let workers = vec![
-            WorkerSpec { agent_id: "w1".into(), label: "explorer 1".into(), model: "MiniMax-M3".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore A".into(), route_reason: None, phase_title: None },
-            WorkerSpec { agent_id: "w2".into(), label: "explorer 2".into(), model: "MiniMax-M3".into(), env_overlay: HashMap::new(), cwd_override: None, prompt: "explore B".into(), route_reason: None, phase_title: None },
+            WorkerSpec {
+                agent_id: "w1".into(),
+                label: "explorer 1".into(),
+                model: "MiniMax-M3".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore A".into(),
+                route_reason: None,
+                phase_title: None,
+            },
+            WorkerSpec {
+                agent_id: "w2".into(),
+                label: "explorer 2".into(),
+                model: "MiniMax-M3".into(),
+                env_overlay: HashMap::new(),
+                cwd_override: None,
+                prompt: "explore B".into(),
+                route_reason: None,
+                phase_title: None,
+            },
         ];
-        let sums = run_workers(&runner, worktree.to_str().unwrap(), &jd, "wf_d", "/tmp", "delegate", &[], workers).await.unwrap();
+        let sums = run_workers(
+            &runner,
+            worktree.to_str().unwrap(),
+            &jd,
+            "wf_d",
+            "/tmp",
+            "delegate",
+            &[],
+            workers,
+        )
+        .await
+        .unwrap();
         assert_eq!(sums.len(), 2, "both workers returned a summary");
         // the fan-out shows up through the real workflow reader, scoped to this session uuid
         let runs = list_workflows(&base, Some("uuid"));
@@ -1195,13 +1464,21 @@ mod tests {
     async fn write_mode_isolates_worktree_and_returns_patch() {
         use std::process::Command;
         fn git(dir: &Path, args: &[&str]) {
-            let ok = Command::new("git").args(args).current_dir(dir).status().unwrap().success();
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success();
             assert!(ok, "git {args:?} failed in {dir:?}");
         }
         let base = std::env::temp_dir().join(format!(
             "agentic-deleg-write-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         // A repo with one commit.
         let origin = base.join("origin");
@@ -1218,7 +1495,16 @@ mod tests {
         let session_dir = base.join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
         let session_wt = session_dir.join(repo);
-        git(&origin, &["worktree", "add", session_wt.to_str().unwrap(), "-b", "agentic/sess"]);
+        git(
+            &origin,
+            &[
+                "worktree",
+                "add",
+                session_wt.to_str().unwrap(),
+                "-b",
+                "agentic/sess",
+            ],
+        );
         // Orchestrator WIP: an UNCOMMITTED edit in the session worktree.
         std::fs::write(session_wt.join("file.txt"), "line1\nWIP\nline2\n").unwrap();
 
@@ -1231,7 +1517,10 @@ mod tests {
         let worker_wt = prov.repos[0].worker_wt.clone();
 
         // The worker STARTS from the WIP snapshot (sees the uncommitted "WIP" line).
-        assert_eq!(std::fs::read_to_string(worker_wt.join("file.txt")).unwrap(), "line1\nWIP\nline2\n");
+        assert_eq!(
+            std::fs::read_to_string(worker_wt.join("file.txt")).unwrap(),
+            "line1\nWIP\nline2\n"
+        );
 
         // Simulate the worker editing a file and adding a new one.
         std::fs::write(worker_wt.join("file.txt"), "line1\nWIP\nline2\nADDED\n").unwrap();
@@ -1239,14 +1528,32 @@ mod tests {
 
         // The patch is the worker's delta over the WIP snapshot.
         let patch = collect_write_patch(&prov).await;
-        assert!(patch.contains("BEGIN PATCH"), "patch must carry the per-repo header: {patch}");
-        assert!(patch.contains("+ADDED"), "patch must contain the worker's added line: {patch}");
-        assert!(patch.contains("new.txt"), "patch must contain the new file: {patch}");
-        assert!(!patch.contains("+WIP"), "WIP is in the base snapshot, not an added line: {patch}");
+        assert!(
+            patch.contains("BEGIN PATCH"),
+            "patch must carry the per-repo header: {patch}"
+        );
+        assert!(
+            patch.contains("+ADDED"),
+            "patch must contain the worker's added line: {patch}"
+        );
+        assert!(
+            patch.contains("new.txt"),
+            "patch must contain the new file: {patch}"
+        );
+        assert!(
+            !patch.contains("+WIP"),
+            "WIP is in the base snapshot, not an added line: {patch}"
+        );
 
         // Isolation: the worker's edits never touched the session worktree.
-        assert_eq!(std::fs::read_to_string(session_wt.join("file.txt")).unwrap(), "line1\nWIP\nline2\n");
-        assert!(!session_wt.join("new.txt").exists(), "worker file must not leak into the session worktree");
+        assert_eq!(
+            std::fs::read_to_string(session_wt.join("file.txt")).unwrap(),
+            "line1\nWIP\nline2\n"
+        );
+        assert!(
+            !session_wt.join("new.txt").exists(),
+            "worker file must not leak into the session worktree"
+        );
 
         // Teardown removes the worktrees + scratch dir.
         let mut provs = HashMap::new();
@@ -1254,7 +1561,10 @@ mod tests {
         teardown_write_worktrees(&provs);
         cleanup_write_batch(&session_dir, &repos, run_id);
         assert!(!worker_wt.exists(), "worker worktree must be removed");
-        assert!(!session_dir.join(".agentic-delegate").join(run_id).exists(), "scratch dir must be cleaned up");
+        assert!(
+            !session_dir.join(".agentic-delegate").join(run_id).exists(),
+            "scratch dir must be cleaned up"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use parking_lot::Mutex;
 use agentic_dev_server::{
     api,
     api::config::Config,
@@ -8,6 +6,8 @@ use agentic_dev_server::{
     api::tls::TlsMode,
     engine::{self, providers, push, sdk_runner, store, transcript, Engine, EngineConfig},
 };
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -54,7 +54,12 @@ async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("AGENTIC_LOG_LEVEL")
         .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).with_ansi(false).compact().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(false)
+        .compact()
+        .init();
     install_panic_hook();
     let config = Arc::new(Config::load(|k| std::env::var(k).ok()));
     // Loud warning when running with the insecure defaults — these
@@ -65,31 +70,55 @@ async fn main() {
     if config.auth_secret == "dev-insecure-secret" {
         tracing::warn!("default authSecret in use — set AGENTIC_AUTH_SECRET");
     }
-    let store = Arc::new(store::Store::open(config.db_path.clone(), config.log_dir.clone()).await.expect("open store"));
+    let store = Arc::new(
+        store::Store::open(config.db_path.clone(), config.log_dir.clone())
+            .await
+            .expect("open store"),
+    );
     // Fetch Claude model IDs from the Anthropic API once at startup (non-blocking via std::thread).
     // On failure (ccswitch / no auth / network), the model list stays empty — native Claude models
     // are omitted from the model selector UI until the next restart with a valid credential.
     std::thread::spawn(providers::init_claude_models);
-    let transcript = Arc::new(transcript::TranscriptCache::new(config.transcript_cache_bytes));
+    let transcript = Arc::new(transcript::TranscriptCache::new(
+        config.transcript_cache_bytes,
+    ));
     // Phase 6: build the real push_fn closure. Load device token + creds fresh on each fire;
     // failures are swallowed inside send_push.
     let device_token_path = config.device_token_path.clone();
-    let push_fn: Option<engine::PushFn> = Some(std::sync::Arc::new(move |payload: serde_json::Value| {
-        let device_token_path = device_token_path.clone();
-        let token = push::load_device_token(&device_token_path).map(|r| r.token);
-        let creds = push::load_fcm_creds(|k| std::env::var(k).ok());
-        let pp = push::PushPayload {
-            session_id: payload.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            status: payload.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            is_error: payload.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
-            error_text: payload.get("errorText").and_then(|v| v.as_str()).map(String::from),
-            cost_usd: payload.get("costUsd").and_then(|v| v.as_f64()),
-            title: payload.get("title").and_then(|v| v.as_str()).map(String::from),
-        };
-        tokio::spawn(async move {
-            push::send_push(&pp, token.as_deref(), creds.as_ref(), None).await;
-        });
-    }));
+    let push_fn: Option<engine::PushFn> =
+        Some(std::sync::Arc::new(move |payload: serde_json::Value| {
+            let device_token_path = device_token_path.clone();
+            let token = push::load_device_token(&device_token_path).map(|r| r.token);
+            let creds = push::load_fcm_creds(|k| std::env::var(k).ok());
+            let pp = push::PushPayload {
+                session_id: payload
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                status: payload
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                is_error: payload
+                    .get("isError")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                error_text: payload
+                    .get("errorText")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                cost_usd: payload.get("costUsd").and_then(|v| v.as_f64()),
+                title: payload
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            };
+            tokio::spawn(async move {
+                push::send_push(&pp, token.as_deref(), creds.as_ref(), None).await;
+            });
+        }));
     // Preflight the Node SDK bridge so a missing `npm install` (or `node`) surfaces at boot with a
     // fix command, instead of silently failing every turn at runtime.
     let bridge_path = sdk_runner::default_bridge_path();
@@ -129,16 +158,24 @@ async fn main() {
         // queueWaitMs, ttftMs, costUsd, duration, concurrency) through tracing. Without this the
         // records are built and discarded without this hook.
         log_fn: Some(Arc::new(|rec: serde_json::Value| {
-            let evt = rec.get("evt").and_then(|v| v.as_str()).unwrap_or("event").to_string();
-            let sid = rec.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let evt = rec
+                .get("evt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("event")
+                .to_string();
+            let sid = rec
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             tracing::info!(target: "engine", evt = %evt, session_id = %sid, record = %rec);
         })),
         now_fn: None,
-        push_fn,             // Phase 6: FCM push (wired above)
-        usage_fn: None,      // auto-resume probes the real OAuth usage endpoint
-        idle_max_ms: config.idle_max_ms,   // AGENTIC_TURN_IDLE_SEC
-        wall_max_ms: config.wall_max_ms,   // AGENTIC_TURN_WALL_SEC
-        idle_ttl_ms: config.idle_ttl_ms,   // AGENTIC_IDLE_TTL_SEC
+        push_fn,                         // Phase 6: FCM push (wired above)
+        usage_fn: None,                  // auto-resume probes the real OAuth usage endpoint
+        idle_max_ms: config.idle_max_ms, // AGENTIC_TURN_IDLE_SEC
+        wall_max_ms: config.wall_max_ms, // AGENTIC_TURN_WALL_SEC
+        idle_ttl_ms: config.idle_ttl_ms, // AGENTIC_IDLE_TTL_SEC
         memory_max: config.memory_max.clone(),
         memory_high: config.memory_high.clone(),
         cpu_quota: config.cpu_quota.clone(),
@@ -168,7 +205,8 @@ async fn main() {
         usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
     };
-    let make_service = api::app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let make_service =
+        api::app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let tls_mode = TlsMode::from_config(&config);
     if TlsMode::byo_half_configured(&config) {
         tracing::warn!(
@@ -179,18 +217,26 @@ async fn main() {
     let tls_paths: Option<(std::path::PathBuf, std::path::PathBuf)> = match &tls_mode {
         TlsMode::Disabled => None,
         TlsMode::Byo { cert, key } => Some((cert.clone(), key.clone())),
-        TlsMode::SelfSigned { dir, extra_sans, regen } => {
-            match api::tls::ensure_self_signed(dir, extra_sans, *regen) {
-                Ok(paths) => Some(paths),
-                Err(e) => panic!("could not create self-signed TLS cert in {}: {e}", dir.display()),
-            }
-        }
+        TlsMode::SelfSigned {
+            dir,
+            extra_sans,
+            regen,
+        } => match api::tls::ensure_self_signed(dir, extra_sans, *regen) {
+            Ok(paths) => Some(paths),
+            Err(e) => panic!(
+                "could not create self-signed TLS cert in {}: {e}",
+                dir.display()
+            ),
+        },
     };
     tracing::info!(
         "agentic-dev-server listening on {}://{addr} (src={}, maxConcurrent={}, tls={})",
         tls_mode.scheme(),
         config.src_root.display(),
-        config.max_concurrent.map(|n| n.to_string()).unwrap_or_else(|| "unlimited".into()),
+        config
+            .max_concurrent
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unlimited".into()),
         tls_mode.is_tls(),
     );
     if let Some((cert, _)) = tls_paths.as_ref() {
@@ -200,7 +246,9 @@ async fn main() {
                 "serving HTTPS with cert {} — SHA-256 {fp} (verify this when the app asks to trust it; GET /api/tls/cert.pem to download)",
                 cert.display()
             ),
-            Err(e) => tracing::warn!(target: "tls", "could not fingerprint cert {}: {e}", cert.display()),
+            Err(e) => {
+                tracing::warn!(target: "tls", "could not fingerprint cert {}: {e}", cert.display())
+            }
         }
     }
 
@@ -219,7 +267,13 @@ async fn main() {
             let socket_addr = resolve_addr(&addr).await;
             let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
                 .await
-                .unwrap_or_else(|e| panic!("load TLS cert {} / key {}: {e}", cert.display(), key.display()));
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "load TLS cert {} / key {}: {e}",
+                        cert.display(),
+                        key.display()
+                    )
+                });
             let handle = axum_server::Handle::new();
             spawn_tls_shutdown(handle.clone(), engine_shutdown);
             axum_server::bind_rustls(socket_addr, tls)
@@ -235,7 +289,10 @@ async fn main() {
 /// tree. axum-server's `from_pem_file` and rustls-acme both build their `ServerConfig` off this
 /// process default, so it must be set before any TLS config is constructed. Idempotent.
 fn install_ring_provider() {
-    if rustls::crypto::ring::default_provider().install_default().is_err() {
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
         tracing::debug!(target: "tls", "rustls crypto provider already installed");
     }
 }

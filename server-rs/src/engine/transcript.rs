@@ -49,7 +49,10 @@ pub fn is_rendered(line: &str) -> bool {
         #[serde(default, borrow, rename = "type")]
         ty: Option<&'a str>,
     }
-    serde_json::from_str::<TypeTag>(line).ok().and_then(|t| t.ty).is_some_and(rendered_type)
+    serde_json::from_str::<TypeTag>(line)
+        .ok()
+        .and_then(|t| t.ty)
+        .is_some_and(rendered_type)
 }
 
 /// True if a rendered line is a streaming-text delta (`stream_event`) rather than a LOGICAL event
@@ -70,7 +73,10 @@ pub fn is_stream_event(line: &str) -> bool {
         #[serde(default, borrow, rename = "type")]
         ty: Option<&'a str>,
     }
-    serde_json::from_str::<TypeTag>(line).ok().and_then(|t| t.ty) == Some("stream_event")
+    serde_json::from_str::<TypeTag>(line)
+        .ok()
+        .and_then(|t| t.ty)
+        == Some("stream_event")
 }
 
 /// Convert a RAW log offset (as the engine counts log lines) into the FILTERED offset the
@@ -85,10 +91,18 @@ pub fn raw_to_rendered_offset(raw: &[String], raw_offset: usize) -> usize {
 /// Rendered view; falls back to the raw lines if filtering yields nothing.
 pub fn filter_rendered(raw: &[String]) -> Vec<String> {
     let filtered: Vec<String> = raw.iter().filter(|l| is_rendered(l)).cloned().collect();
-    if filtered.is_empty() { raw.to_vec() } else { filtered }
+    if filtered.is_empty() {
+        raw.to_vec()
+    } else {
+        filtered
+    }
 }
 
-pub struct Window { pub start: usize, pub lines: Vec<String>, pub total: usize }
+pub struct Window {
+    pub start: usize,
+    pub lines: Vec<String>,
+    pub total: usize,
+}
 
 /// Per-session append-only rendered projection with its own file byte cursor.
 ///
@@ -119,7 +133,7 @@ pub struct RenderedProjection {
     /// Partial trailing bytes of the last incomplete line (no `\n` yet). Raw bytes — decoded
     /// only when a `\n` arrives.
     carry: Vec<u8>,
-    bytes: usize,    // approx memory = sum of rendered line lengths
+    bytes: usize, // approx memory = sum of rendered line lengths
 }
 
 impl RenderedProjection {
@@ -133,11 +147,21 @@ impl RenderedProjection {
         }
     }
 
-    pub fn count(&self) -> usize { self.rendered.len() }
-    pub fn raw_count(&self) -> u64 { self.raw_count }
-    pub fn byte_offset(&self) -> u64 { self.byte_offset }
-    pub fn bytes(&self) -> usize { self.bytes }
-    pub fn rendered_clone(&self) -> Vec<String> { self.rendered.clone() }
+    pub fn count(&self) -> usize {
+        self.rendered.len()
+    }
+    pub fn raw_count(&self) -> u64 {
+        self.raw_count
+    }
+    pub fn byte_offset(&self) -> u64 {
+        self.byte_offset
+    }
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+    pub fn rendered_clone(&self) -> Vec<String> {
+        self.rendered.clone()
+    }
 
     /// Read only the new bytes `[byte_offset, EOF)` and ingest complete (newline-terminated)
     /// lines. Missing file = no-op.
@@ -173,9 +197,13 @@ impl RenderedProjection {
             let mut buf = Vec::with_capacity(to_read as usize);
             f.take(to_read).read_to_end(&mut buf)?;
             Ok(Some((buf, false)))
-        }).await.map_err(std::io::Error::other)??;
+        })
+        .await
+        .map_err(std::io::Error::other)??;
 
-        let Some((buf, rotated)) = read else { return Ok(()) };
+        let Some((buf, rotated)) = read else {
+            return Ok(());
+        };
 
         if rotated {
             // Reset projection state; re-process from scratch below.
@@ -223,7 +251,11 @@ impl RenderedProjection {
 
     pub fn window_tail(&self, limit: usize) -> Window {
         let start = self.rendered.len().saturating_sub(limit);
-        Window { start, lines: self.rendered[start..].to_vec(), total: self.rendered.len() }
+        Window {
+            start,
+            lines: self.rendered[start..].to_vec(),
+            total: self.rendered.len(),
+        }
     }
 
     /// Tail window budgeted by LOGICAL events (deltas included in suffix). Keeps streaming-text
@@ -237,15 +269,23 @@ impl RenderedProjection {
         let mut idx = n;
         while idx > 0 {
             let i = idx - 1;
-            if n - i > max_lines { break; }
+            if n - i > max_lines {
+                break;
+            }
             if !is_stream_event(&r[i]) {
-                if events >= max_events { break; }
+                if events >= max_events {
+                    break;
+                }
                 events += 1;
             }
             start = i;
             idx = i;
         }
-        Window { start, lines: r[start..].to_vec(), total: n }
+        Window {
+            start,
+            lines: r[start..].to_vec(),
+            total: n,
+        }
     }
 
     /// Tail window filtered to NON-delta events only (Discord-style sealed-event tail).
@@ -262,26 +302,40 @@ impl RenderedProjection {
         let mut idx = n;
         while idx > 0 {
             let i = idx - 1;
-            if n - i > max_lines { break; }
+            if n - i > max_lines {
+                break;
+            }
             if !is_stream_event(&r[i]) {
-                if events >= max_events { break; }
+                if events >= max_events {
+                    break;
+                }
                 events += 1;
             }
             start = i;
             idx = i;
         }
-        let filtered: Vec<String> = r[start..].iter()
+        let filtered: Vec<String> = r[start..]
+            .iter()
             .filter(|l| !is_stream_event(l))
             .take(max_events)
             .cloned()
             .collect();
-        Window { start, lines: filtered, total }
+        Window {
+            start,
+            lines: filtered,
+            total,
+        }
     }
 
     /// Filtered range: scan forward from rendered-line `start_line`, collect up to `limit`
     /// non-delta events, stop at `max_lines` total lines scanned. `start` = first event's
     /// rendered-line offset; `total` = full rendered-line count (WS-compatible cursor).
-    pub fn window_filtered_range(&self, start_line: usize, limit: usize, max_lines: usize) -> Window {
+    pub fn window_filtered_range(
+        &self,
+        start_line: usize,
+        limit: usize,
+        max_lines: usize,
+    ) -> Window {
         let r = &self.rendered;
         let total = r.len();
         let start_line = start_line.min(total);
@@ -289,20 +343,35 @@ impl RenderedProjection {
         let mut first_start = None;
         let mut scanned = 0usize;
         for (i, line) in r.iter().enumerate().skip(start_line) {
-            if scanned >= max_lines { break; }
+            if scanned >= max_lines {
+                break;
+            }
             scanned += 1;
             if !is_stream_event(line) {
-                if first_start.is_none() { first_start = Some(i); }
+                if first_start.is_none() {
+                    first_start = Some(i);
+                }
                 found.push(line.clone());
-                if found.len() >= limit { break; }
+                if found.len() >= limit {
+                    break;
+                }
             }
         }
-        Window { start: first_start.unwrap_or(start_line), lines: found, total }
+        Window {
+            start: first_start.unwrap_or(start_line),
+            lines: found,
+            total,
+        }
     }
 
     /// Filtered backward range: walk backward from `before_line`, collect up to `limit`
     /// non-delta events. `start` = rendered-line offset of the first (oldest) returned event.
-    pub fn window_filtered_before(&self, before_line: usize, limit: usize, max_lines: usize) -> Window {
+    pub fn window_filtered_before(
+        &self,
+        before_line: usize,
+        limit: usize,
+        max_lines: usize,
+    ) -> Window {
         let r = &self.rendered;
         let total = r.len();
         let end = before_line.min(total);
@@ -316,11 +385,17 @@ impl RenderedProjection {
             if !is_stream_event(&r[idx]) {
                 found.push(r[idx].clone());
                 last_start = idx;
-                if found.len() >= limit { break; }
+                if found.len() >= limit {
+                    break;
+                }
             }
         }
         found.reverse();
-        Window { start: last_start, lines: found, total }
+        Window {
+            start: last_start,
+            lines: found,
+            total,
+        }
     }
     pub fn range(&self, before: usize, limit: usize) -> &[String] {
         let before = before.min(self.rendered.len());
@@ -338,10 +413,13 @@ impl RenderedProjection {
     }
 }
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 
-struct Entry { proj: RenderedProjection, last_access: u64 }
+struct Entry {
+    proj: RenderedProjection,
+    last_access: u64,
+}
 
 /// Per-session rendered projections, LRU-evicted by a byte budget. The big cold read inside
 /// `RenderedProjection::sync` is off the executor (spawn_blocking); the map lock is only held for the
@@ -354,30 +432,58 @@ pub struct TranscriptCache {
 
 impl TranscriptCache {
     pub fn new(budget_bytes: usize) -> Self {
-        TranscriptCache { map: Mutex::new(HashMap::new()), budget: budget_bytes, tick: std::sync::atomic::AtomicU64::new(0) }
+        TranscriptCache {
+            map: Mutex::new(HashMap::new()),
+            budget: budget_bytes,
+            tick: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
-    pub fn drop_session(&self, id: &str) { self.map.lock().remove(id); }
+    pub fn drop_session(&self, id: &str) {
+        self.map.lock().remove(id);
+    }
 
     /// Sync the session's projection to current EOF, then run `f` against it and return f's result.
     /// `f` returns an owned value so the projection borrow never escapes the lock.
-    pub async fn with<R>(&self, id: &str, path: &std::path::Path, f: impl FnOnce(&RenderedProjection) -> R) -> std::io::Result<R> {
+    pub async fn with<R>(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        f: impl FnOnce(&RenderedProjection) -> R,
+    ) -> std::io::Result<R> {
         // Take the projection out (or create) so the big sync runs without holding the map lock.
         let mut proj = {
             let mut m = self.map.lock();
-            m.remove(id).map(|e| e.proj).unwrap_or_else(RenderedProjection::new)
+            m.remove(id)
+                .map(|e| e.proj)
+                .unwrap_or_else(RenderedProjection::new)
         };
         proj.sync(path).await?;
         let out = f(&proj);
         let now = self.tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut m = self.map.lock();
-        m.insert(id.to_string(), Entry { proj, last_access: now });
+        m.insert(
+            id.to_string(),
+            Entry {
+                proj,
+                last_access: now,
+            },
+        );
         // evict LRU while over budget (never evict the just-inserted id)
         let mut total: usize = m.values().map(|e| e.proj.bytes()).sum();
         while total > self.budget && m.len() > 1 {
-            if let Some(victim) = m.iter().filter(|(k, _)| k.as_str() != id).min_by_key(|(_, e)| e.last_access).map(|(k, _)| k.clone()) {
-                if let Some(e) = m.remove(&victim) { total -= e.proj.bytes(); }
-            } else { break; }
+            if let Some(victim) = m
+                .iter()
+                .filter(|(k, _)| k.as_str() != id)
+                .min_by_key(|(_, e)| e.last_access)
+                .map(|(k, _)| k.clone())
+            {
+                if let Some(e) = m.remove(&victim) {
+                    total -= e.proj.bytes();
+                }
+            } else {
+                break;
+            }
         }
         Ok(out)
     }
@@ -392,24 +498,36 @@ mod tests {
     static CTR: AtomicU64 = AtomicU64::new(0);
 
     fn write_lines(path: &std::path::Path, lines: &[&str]) {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
-        for l in lines { writeln!(f, "{l}").unwrap(); }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
     }
     fn tmpfile(name: &str) -> std::path::PathBuf {
         let n = CTR.fetch_add(1, AO::SeqCst);
         let p = std::env::temp_dir().join(format!("agentic-tx-{}-{n}-{name}", std::process::id()));
-        let _ = std::fs::remove_file(&p); p
+        let _ = std::fs::remove_file(&p);
+        p
     }
 
-    const RENDERED: [&str; 2] = ["{\"type\":\"agentic_prompt\",\"text\":\"hi\"}", "{\"type\":\"assistant\"}"];
+    const RENDERED: [&str; 2] = [
+        "{\"type\":\"agentic_prompt\",\"text\":\"hi\"}",
+        "{\"type\":\"assistant\"}",
+    ];
     const NOISE: [&str; 2] = ["{\"type\":\"tool_result\"}", "{\"type\":\"system\"}"];
 
     #[test]
     fn raw_to_rendered_offset_counts_rendered_lines_before_offset() {
         // raw[0]=rendered, raw[1]=noise, raw[2]=rendered, raw[3]=noise, raw[4]=rendered
         let raw: Vec<String> = vec![
-            RENDERED[0].to_string(), NOISE[0].to_string(),
-            RENDERED[1].to_string(), NOISE[1].to_string(),
+            RENDERED[0].to_string(),
+            NOISE[0].to_string(),
+            RENDERED[1].to_string(),
+            NOISE[1].to_string(),
             RENDERED[0].to_string(),
         ];
         // before raw index 0 → 0 rendered lines precede it
@@ -426,24 +544,40 @@ mod tests {
     fn agent_result_marker_is_rendered_but_raw_tool_result_is_not() {
         // The engine persists a compact `agent_result` marker for a spawned-agent's result; it must be
         // rendered so it survives a reopen/reconnect and the agent card's body comes back.
-        assert!(is_rendered(r#"{"type":"agent_result","toolUseId":"tu_1","text":"found it"}"#));
+        assert!(is_rendered(
+            r#"{"type":"agent_result","toolUseId":"tu_1","text":"found it"}"#
+        ));
         // The raw `user` tool_result line (every tool emits one) stays NON-rendered — we don't bloat the
         // replayable log with every Bash/Read output.
-        assert!(!is_rendered(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1"}]}}"#));
+        assert!(!is_rendered(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1"}]}}"#
+        ));
     }
 
     #[test]
     fn agentic_perm_markers_are_rendered() {
         // The bridge writes these permission-card markers (type-first via JS JSON.stringify); they MUST
         // be rendered so the live WS poke re-reads them and the app shows / resolves the perm/plan card.
-        assert!(is_rendered(r#"{"type":"agentic_perm","permKind":"perm","id":"p1","tool":"Bash","input":{}}"#));
-        assert!(is_rendered(r##"{"type":"agentic_perm","permKind":"plan","id":"p2","plan":"# do X"}"##));
-        assert!(is_rendered(r#"{"type":"agentic_perm_resolved","id":"p1","decision":"allow"}"#));
+        assert!(is_rendered(
+            r#"{"type":"agentic_perm","permKind":"perm","id":"p1","tool":"Bash","input":{}}"#
+        ));
+        assert!(is_rendered(
+            r##"{"type":"agentic_perm","permKind":"plan","id":"p2","plan":"# do X"}"##
+        ));
+        assert!(is_rendered(
+            r#"{"type":"agentic_perm_resolved","id":"p1","decision":"allow"}"#
+        ));
         // Also robust to serde's alphabetical (type-last) key order, in case a marker is ever rebuilt
         // server-side with serde_json::json!.
         let resolved = serde_json::json!({"type":"agentic_perm_resolved","id":"p1","decision":"allow","at":1i64}).to_string();
-        assert!(resolved.starts_with("{\"at\":"), "serde must put `type` last: {resolved}");
-        assert!(is_rendered(&resolved), "alphabetical-key agentic_perm_resolved must be rendered: {resolved}");
+        assert!(
+            resolved.starts_with("{\"at\":"),
+            "serde must put `type` last: {resolved}"
+        );
+        assert!(
+            is_rendered(&resolved),
+            "alphabetical-key agentic_perm_resolved must be rendered: {resolved}"
+        );
     }
 
     #[test]
@@ -454,24 +588,48 @@ mod tests {
         // drops out of the rendered projection (vanishes from the app, never replays on reseed).
         // Build them exactly as the engine does (NOT a hand-written type-first literal that hides the
         // bug) and assert the real wire bytes are type-last AND still rendered.
-        let prompt = serde_json::json!({"type":"agentic_prompt","text":"全量","at":1782044771008i64}).to_string();
-        assert!(prompt.starts_with("{\"at\":"), "serde must put `type` last: {prompt}");
-        assert!(is_rendered(&prompt), "alphabetical-key agentic_prompt must be rendered: {prompt}");
+        let prompt =
+            serde_json::json!({"type":"agentic_prompt","text":"全量","at":1782044771008i64})
+                .to_string();
+        assert!(
+            prompt.starts_with("{\"at\":"),
+            "serde must put `type` last: {prompt}"
+        );
+        assert!(
+            is_rendered(&prompt),
+            "alphabetical-key agentic_prompt must be rendered: {prompt}"
+        );
 
-        let agent = serde_json::json!({"type":"agent_result","toolUseId":"tu_1","text":"x"}).to_string();
-        assert!(agent.starts_with("{\"text\":"), "serde must put `type` last: {agent}");
-        assert!(is_rendered(&agent), "alphabetical-key agent_result must be rendered: {agent}");
+        let agent =
+            serde_json::json!({"type":"agent_result","toolUseId":"tu_1","text":"x"}).to_string();
+        assert!(
+            agent.starts_with("{\"text\":"),
+            "serde must put `type` last: {agent}"
+        );
+        assert!(
+            is_rendered(&agent),
+            "alphabetical-key agent_result must be rendered: {agent}"
+        );
 
         // And the negatives still hold (no over-matching of non-rendered lines).
         assert!(!is_rendered(r#"{"type":"user","message":{}}"#));
         assert!(!is_rendered(r#"{"type":"system","subtype":"init"}"#));
-        assert!(!is_rendered(r#"{"at":1,"text":"hi","type":"rate_limit_event"}"#));
+        assert!(!is_rendered(
+            r#"{"at":1,"text":"hi","type":"rate_limit_event"}"#
+        ));
     }
 
     #[test]
     fn filter_keeps_rendered_drops_noise_with_fallback() {
-        let all: Vec<String> = RENDERED.iter().chain(NOISE.iter()).map(|s| s.to_string()).collect();
-        assert_eq!(filter_rendered(&all), RENDERED.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let all: Vec<String> = RENDERED
+            .iter()
+            .chain(NOISE.iter())
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            filter_rendered(&all),
+            RENDERED.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
         // empty-after-filter fallback: returns the raw lines
         let only_noise: Vec<String> = NOISE.iter().map(|s| s.to_string()).collect();
         assert_eq!(filter_rendered(&only_noise), only_noise);
@@ -487,7 +645,8 @@ mod tests {
         assert_eq!(p.raw_count(), 3);
         // equivalence invariant: split on '\n', filter empty lines
         let raw_bytes = std::fs::read(&path).unwrap();
-        let whole: Vec<String> = raw_bytes.split(|&b| b == b'\n')
+        let whole: Vec<String> = raw_bytes
+            .split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
             .map(|l| String::from_utf8_lossy(l).into_owned())
             .collect();
@@ -503,15 +662,17 @@ mod tests {
     #[tokio::test]
     async fn window_range_slice_count() {
         let path = tmpfile("win");
-        let many: Vec<String> = (0..10).map(|i| format!("{{\"type\":\"assistant\",\"i\":{i}}}")).collect();
+        let many: Vec<String> = (0..10)
+            .map(|i| format!("{{\"type\":\"assistant\",\"i\":{i}}}"))
+            .collect();
         write_lines(&path, &many.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let mut p = RenderedProjection::new();
         p.sync(&path).await.unwrap();
         assert_eq!(p.count(), 10);
         let w = p.window_tail(3);
         assert_eq!((w.start, w.total, w.lines.len()), (7, 10, 3));
-        assert_eq!(p.range(7, 4).len(), 4);   // [3,7)
-        assert_eq!(p.range(2, 5).len(), 2);   // [0,2) clamped
+        assert_eq!(p.range(7, 4).len(), 4); // [3,7)
+        assert_eq!(p.range(2, 5).len(), 2); // [0,2) clamped
         assert_eq!(p.slice_from(8).len(), 2); // [8,10)
         assert_eq!(p.slice_from(100).len(), 0);
     }
@@ -525,7 +686,9 @@ mod tests {
         let mut lines: Vec<String> = Vec::new();
         lines.push("{\"type\":\"assistant\",\"i\":0}".to_string()); // event 0
         lines.push("{\"type\":\"assistant\",\"i\":1}".to_string()); // event 1
-        for k in 0..20 { lines.push(format!("{{\"type\":\"stream_event\",\"k\":{k}}}")); }
+        for k in 0..20 {
+            lines.push(format!("{{\"type\":\"stream_event\",\"k\":{k}}}"));
+        }
         lines.push("{\"type\":\"assistant\",\"i\":2}".to_string()); // event 2 (23 lines total)
         write_lines(&path, &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let mut p = RenderedProjection::new();
@@ -536,7 +699,11 @@ mod tests {
 
         // A plain last-5-LINES window reaches only into the delta flood: just 1 of 3 events survives.
         let line_win = p.window_tail(5);
-        assert_eq!(events_in(&line_win), 1, "line window drops older cards behind delta flood");
+        assert_eq!(
+            events_in(&line_win),
+            1,
+            "line window drops older cards behind delta flood"
+        );
 
         // Event budget 3 (ample line cap) keeps ALL 3 cards even across the 20-delta flood.
         let w3 = p.window_tail_events(3, 1000);
@@ -561,7 +728,9 @@ mod tests {
     #[tokio::test]
     async fn missing_file_is_empty() {
         let mut p = RenderedProjection::new();
-        p.sync(std::path::Path::new("/no/such/file.jsonl")).await.unwrap();
+        p.sync(std::path::Path::new("/no/such/file.jsonl"))
+            .await
+            .unwrap();
         assert_eq!(p.count(), 0);
     }
 
@@ -575,7 +744,11 @@ mod tests {
         let complete = "{\"type\":\"assistant\",\"text\":\"done\"}";
         let partial_prefix = "{\"type\":\"assistant\",\"text\":\"in-fli"; // no '\n'
         {
-            let mut f = std::fs::OpenOptions::new().create(true).write(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             write!(f, "{complete}\n{partial_prefix}").unwrap();
         }
         let mut p = RenderedProjection::new();
@@ -587,19 +760,26 @@ mod tests {
         // Now complete the partial line.
         let rest = "ght\"}";
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             writeln!(f, "{rest}").unwrap();
         }
         p.sync(&path).await.unwrap();
         // Both lines now complete — count must equal filter_rendered of the full file.
         assert_eq!(p.count(), 2, "after nl, both lines must be rendered");
         let raw_bytes = std::fs::read(&path).unwrap();
-        let whole: Vec<String> = raw_bytes.split(|&b| b == b'\n')
+        let whole: Vec<String> = raw_bytes
+            .split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
             .map(|l| String::from_utf8_lossy(l).into_owned())
             .collect();
-        assert_eq!(p.rendered_clone(), filter_rendered(&whole),
-            "cursor must converge: projection == filter_rendered(complete lines)");
+        assert_eq!(
+            p.rendered_clone(),
+            filter_rendered(&whole),
+            "cursor must converge: projection == filter_rendered(complete lines)"
+        );
     }
 
     /// Regression for #1/#10: a multibyte UTF-8 character split across two sync() calls must
@@ -634,16 +814,23 @@ mod tests {
 
         // Append the rest.
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(&full_bytes[split_at..]).unwrap();
         }
         p.sync(&path).await.unwrap();
         assert_eq!(p.count(), 1, "complete line must be counted after nl");
         let decoded = &p.rendered_clone()[0];
-        assert!(decoded.contains("你好"),
-            "multibyte char must decode correctly, got: {decoded:?}");
-        assert!(!decoded.contains('\u{FFFD}'),
-            "must not contain replacement char, got: {decoded:?}");
+        assert!(
+            decoded.contains("你好"),
+            "multibyte char must decode correctly, got: {decoded:?}"
+        );
+        assert!(
+            !decoded.contains('\u{FFFD}'),
+            "must not contain replacement char, got: {decoded:?}"
+        );
     }
 
     /// Regression for file rotation: if the file shrinks (rotated), projection resets and
@@ -673,24 +860,33 @@ mod tests {
 mod cache_tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering as AO};
+    use std::sync::Arc;
 
     static CTR: AtomicU64 = AtomicU64::new(0);
 
     fn tmpfile(name: &str) -> std::path::PathBuf {
         let n = CTR.fetch_add(1, AO::SeqCst);
-        let p = std::env::temp_dir().join(format!("agentic-cache-{}-{n}-{name}", std::process::id()));
-        let _ = std::fs::remove_file(&p); p
+        let p =
+            std::env::temp_dir().join(format!("agentic-cache-{}-{n}-{name}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
     }
     fn seed(path: &std::path::Path, n: usize) {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
-        for i in 0..n { writeln!(f, "{{\"type\":\"assistant\",\"i\":{i}}}").unwrap(); }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for i in 0..n {
+            writeln!(f, "{{\"type\":\"assistant\",\"i\":{i}}}").unwrap();
+        }
     }
 
     #[tokio::test]
     async fn hydrates_then_serves_count() {
-        let path = tmpfile("c1"); seed(&path, 5);
+        let path = tmpfile("c1");
+        seed(&path, 5);
         let cache = TranscriptCache::new(1_000_000);
         let total = cache.with("s1", &path, |p| p.count()).await.unwrap();
         assert_eq!(total, 5);
@@ -698,8 +894,10 @@ mod cache_tests {
 
     #[tokio::test]
     async fn evicts_lru_over_budget_then_rehydrates() {
-        let a = tmpfile("ca"); seed(&a, 50);
-        let b = tmpfile("cb"); seed(&b, 50);
+        let a = tmpfile("ca");
+        seed(&a, 50);
+        let b = tmpfile("cb");
+        seed(&b, 50);
         let cache = TranscriptCache::new(200); // tiny budget → only one fits
         let n1 = cache.with("a", &a, |p| p.count()).await.unwrap();
         let n2 = cache.with("b", &b, |p| p.count()).await.unwrap();
@@ -710,13 +908,19 @@ mod cache_tests {
 
     #[tokio::test]
     async fn concurrent_get_of_cold_session_is_consistent() {
-        let path = tmpfile("cc"); seed(&path, 20);
+        let path = tmpfile("cc");
+        seed(&path, 20);
         let cache = Arc::new(TranscriptCache::new(1_000_000));
         let mut hs = Vec::new();
         for _ in 0..8 {
-            let c = cache.clone(); let p = path.clone();
-            hs.push(tokio::spawn(async move { c.with("s", &p, |pr| pr.count()).await.unwrap() }));
+            let c = cache.clone();
+            let p = path.clone();
+            hs.push(tokio::spawn(async move {
+                c.with("s", &p, |pr| pr.count()).await.unwrap()
+            }));
         }
-        for h in hs { assert_eq!(h.await.unwrap(), 20); }
+        for h in hs {
+            assert_eq!(h.await.unwrap(), 20);
+        }
     }
 }

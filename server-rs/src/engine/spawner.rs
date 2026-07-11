@@ -1,4 +1,4 @@
-use crate::engine::runner::{RunHandle, Runner, RunSpec};
+use crate::engine::runner::{RunHandle, RunSpec, Runner};
 use crate::engine::stream::ClaudeEvent;
 use crate::engine::tailer::EventTailer;
 use std::collections::HashMap;
@@ -8,15 +8,15 @@ use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
-    pub cwd: String,                        // the worktree
+    pub cwd: String, // the worktree
     pub prompt: String,
-    pub env: HashMap<String, String>,       // overlay on top of the process env
-    pub resume_session_id: Option<String>,  // resume an existing claude session when set
-    pub claude_config_dir: Option<String>,  // per-session CLAUDE_CONFIG_DIR; None = clear it
-    pub model: Option<String>,              // SDK model option
-    pub effort: Option<String>,             // SDK effort (omitted when ultracode)
-    pub mode: Option<String>,               // "ultracode" => settings {"ultracode":true}
-    pub hidden_skills: Vec<String>,         // blacklist => settings {"skillOverrides":{<n>:"off"}}
+    pub env: HashMap<String, String>, // overlay on top of the process env
+    pub resume_session_id: Option<String>, // resume an existing claude session when set
+    pub claude_config_dir: Option<String>, // per-session CLAUDE_CONFIG_DIR; None = clear it
+    pub model: Option<String>,        // SDK model option
+    pub effort: Option<String>,       // SDK effort (omitted when ultracode)
+    pub mode: Option<String>,         // "ultracode" => settings {"ultracode":true}
+    pub hidden_skills: Vec<String>,   // blacklist => settings {"skillOverrides":{<n>:"off"}}
     /// EXPLICIT per-plugin enable map => settings {"enabledPlugins":{<id>:true|false}}. Resolved by
     /// [crate::engine::plugins::resolve_enabled_plugins] from the session's hiddenPlugins blacklist ×
     /// the installed-plugin registry; `true` entries force-enable a plugin for this session even when
@@ -32,13 +32,13 @@ pub struct SpawnOptions {
     pub forced_on_skills: Vec<String>,
     /// MCP server names forced ON (stored; no-op at spawn until global MCP disable exists).
     pub forced_on_mcp_servers: Vec<String>,
-    pub log_path: PathBuf,                  // the bridge appends stream-json here; the tailer reads it
-    pub unit: String,                       // label (agentic-<id>)
+    pub log_path: PathBuf, // the bridge appends stream-json here; the tailer reads it
+    pub unit: String,      // label (agentic-<id>)
     pub memory_max: Option<String>,
     pub memory_high: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
-    pub permission_mode: Option<String>,    // SDK permissionMode
+    pub permission_mode: Option<String>, // SDK permissionMode
     /// Tier-1 harness rules appended to Claude Code's system prompt (via `--append-system-prompt`).
     /// Set ONLY on the main session turn (see `EngineInner::spawn_opts`); worker spawns leave it
     /// `None` so a delegate worker never carries the orchestrator-only routing / fan-out rules.
@@ -125,8 +125,7 @@ impl SpawnHandle {
         let loop_run = run.clone();
         let loop_saw = saw_result.clone();
         let poll_task = tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(POLL_MS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(POLL_MS));
             let mut exit_tx = Some(exit_tx);
             loop {
                 tick.tick().await;

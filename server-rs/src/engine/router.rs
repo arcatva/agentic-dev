@@ -77,7 +77,11 @@ pub fn router_provider(reg: &ProviderRegistry) -> Option<&Provider> {
 
 /// Build the routing prompt: the catalog (each model's id / good_at / capability / price) + the
 /// tasks to route (numbered by their ORIGINAL index, 1-based), asking for a strict JSON array.
-pub fn build_route_prompt(tasks: &[DelegateTask], route_idxs: &[usize], candidates: &[&Provider]) -> String {
+pub fn build_route_prompt(
+    tasks: &[DelegateTask],
+    route_idxs: &[usize],
+    candidates: &[&Provider],
+) -> String {
     let catalog: Vec<serde_json::Value> = candidates
         .iter()
         .map(|p| {
@@ -164,7 +168,13 @@ pub fn parse_route_response(
             .chars()
             .take(80)
             .collect();
-        out.insert(idx, RouteChoice { model: model.to_string(), reason });
+        out.insert(
+            idx,
+            RouteChoice {
+                model: model.to_string(),
+                reason,
+            },
+        );
     }
     out
 }
@@ -183,7 +193,8 @@ pub(crate) fn apply_priority(
     choices
         .into_iter()
         .map(|(idx, choice)| {
-            let Some(picked) = super::providers::resolve_candidate(candidates, &choice.model) else {
+            let Some(picked) = super::providers::resolve_candidate(candidates, &choice.model)
+            else {
                 return (idx, choice);
             };
             let bar = picked.capability;
@@ -222,13 +233,27 @@ pub(crate) fn apply_priority(
             if best.name == picked.name {
                 (idx, choice)
             } else {
-                let detail = if choice.reason.is_empty() { String::new() } else { format!(" ({})", choice.reason) };
-                let kind = if (best.priority - picked.priority).abs() > EPS { "priority" } else { "cost" };
+                let detail = if choice.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", choice.reason)
+                };
+                let kind = if (best.priority - picked.priority).abs() > EPS {
+                    "priority"
+                } else {
+                    "cost"
+                };
                 let reason: String = format!("{kind} pick over {}{}", picked.model, detail)
                     .chars()
                     .take(80)
                     .collect();
-                (idx, RouteChoice { model: best.model.clone(), reason })
+                (
+                    idx,
+                    RouteChoice {
+                        model: best.model.clone(),
+                        reason,
+                    },
+                )
             }
         })
         .collect()
@@ -347,7 +372,13 @@ pub async fn route_batch(
         return route_idxs
             .into_iter()
             .map(|i| {
-                (i, RouteChoice { model: only.model.clone(), reason: "only registered model".into() })
+                (
+                    i,
+                    RouteChoice {
+                        model: only.model.clone(),
+                        reason: "only registered model".into(),
+                    },
+                )
             })
             .collect();
     }
@@ -357,7 +388,10 @@ pub async fn route_batch(
         None => http_ask(router, &prompt).await,
     };
     match text {
-        Ok(t) => apply_priority(parse_route_response(&t, &route_idxs, candidates), candidates),
+        Ok(t) => apply_priority(
+            parse_route_response(&t, &route_idxs, candidates),
+            candidates,
+        ),
         Err(e) => {
             tracing::warn!("[router] routing call failed; task(s) fall back to native Claude: {e}");
             HashMap::new()
@@ -369,7 +403,15 @@ pub async fn route_batch(
 mod tests {
     use super::*;
 
-    fn p(name: &str, model: &str, cap: f32, priority: f32, cost: f32, proto: Protocol, key: &str) -> Provider {
+    fn p(
+        name: &str,
+        model: &str,
+        cap: f32,
+        priority: f32,
+        cost: f32,
+        proto: Protocol,
+        key: &str,
+    ) -> Provider {
         Provider {
             name: name.into(),
             base_url: "https://x/anthropic".into(),
@@ -388,8 +430,24 @@ mod tests {
     fn reg() -> ProviderRegistry {
         ProviderRegistry {
             providers: vec![
-                p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk"),
-                p("deepseek", "deepseek-chat", 0.6, 0.5, 0.5, Protocol::Anthropic, "dk"),
+                p(
+                    "minimax",
+                    "MiniMax-M3",
+                    0.5,
+                    0.3,
+                    0.3,
+                    Protocol::Anthropic,
+                    "mk",
+                ),
+                p(
+                    "deepseek",
+                    "deepseek-chat",
+                    0.6,
+                    0.5,
+                    0.5,
+                    Protocol::Anthropic,
+                    "dk",
+                ),
                 p("gpt", "gpt-4o-mini", 0.7, 1.0, 0.7, Protocol::Openai, "gk"),
             ],
         }
@@ -397,9 +455,27 @@ mod tests {
 
     fn tasks() -> Vec<DelegateTask> {
         vec![
-            DelegateTask { prompt: "grep for TODO".into(), role: "explorer".into(), model: None, phase: None, write: false },
-            DelegateTask { prompt: "refactor the auth module".into(), role: "coder".into(), model: Some("deepseek".into()), phase: None, write: false },
-            DelegateTask { prompt: "summarize the long thread".into(), role: "summarizer".into(), model: None, phase: None, write: false },
+            DelegateTask {
+                prompt: "grep for TODO".into(),
+                role: "explorer".into(),
+                model: None,
+                phase: None,
+                write: false,
+            },
+            DelegateTask {
+                prompt: "refactor the auth module".into(),
+                role: "coder".into(),
+                model: Some("deepseek".into()),
+                phase: None,
+                write: false,
+            },
+            DelegateTask {
+                prompt: "summarize the long thread".into(),
+                role: "summarizer".into(),
+                model: None,
+                phase: None,
+                write: false,
+            },
         ]
     }
 
@@ -435,7 +511,15 @@ mod tests {
         let mut r = ProviderRegistry {
             providers: vec![
                 p("gpt", "gpt-4o-mini", 0.7, 0.5, 0.7, Protocol::Openai, "gk"),
-                p("deepseek", "deepseek-chat", 0.6, 0.5, 0.5, Protocol::Anthropic, "dk"),
+                p(
+                    "deepseek",
+                    "deepseek-chat",
+                    0.6,
+                    0.5,
+                    0.5,
+                    Protocol::Anthropic,
+                    "dk",
+                ),
             ],
         };
         r.providers[0].router = true;
@@ -449,12 +533,36 @@ mod tests {
         // The router (LLM) picks "opus" for a hard task, but a registered model that is at least as
         // capable AND higher-priority must win deterministically.
         let mk = |cap: f32| {
-            let mut cat = vec![p("minimax", "MiniMax-M3", cap, 1.0, 0.3, Protocol::Anthropic, "mk")];
-            cat.extend(crate::engine::providers::native_claude_candidates(&Default::default()));
+            let mut cat = vec![p(
+                "minimax",
+                "MiniMax-M3",
+                cap,
+                1.0,
+                0.3,
+                Protocol::Anthropic,
+                "mk",
+            )];
+            cat.extend(crate::engine::providers::native_claude_candidates(
+                &Default::default(),
+            ));
             cat
         };
-        let router = p("minimax", "MiniMax-M3", 1.0, 1.0, 0.3, Protocol::Anthropic, "mk");
-        let ts = vec![DelegateTask { prompt: "explore the architecture".into(), role: "explorer".into(), model: None, phase: None, write: false }];
+        let router = p(
+            "minimax",
+            "MiniMax-M3",
+            1.0,
+            1.0,
+            0.3,
+            Protocol::Anthropic,
+            "mk",
+        );
+        let ts = vec![DelegateTask {
+            prompt: "explore the architecture".into(),
+            role: "explorer".into(),
+            model: None,
+            phase: None,
+            write: false,
+        }];
         let pick_opus = |_: &str| -> Result<String, String> {
             Ok(r#"[{"task":1,"model":"opus","reason":"deep exploration"}]"#.into())
         };
@@ -463,13 +571,21 @@ mod tests {
         let cat = mk(1.0);
         let cands: Vec<&Provider> = cat.iter().collect();
         let got = route_batch(&ts, &cands, &router, Some(&pick_opus)).await;
-        assert_eq!(got.get(&0).unwrap().model, "MiniMax-M3", "priority must override the LLM's opus pick");
+        assert_eq!(
+            got.get(&0).unwrap().model,
+            "MiniMax-M3",
+            "priority must override the LLM's opus pick"
+        );
 
         // minimax capability 0.5 (< opus's 0.97) → NOT capable enough → opus stays.
         let cat2 = mk(0.5);
         let cands2: Vec<&Provider> = cat2.iter().collect();
         let got2 = route_batch(&ts, &cands2, &router, Some(&pick_opus)).await;
-        assert_eq!(got2.get(&0).unwrap().model, "opus", "a less-capable model must not override on priority alone");
+        assert_eq!(
+            got2.get(&0).unwrap().model,
+            "opus",
+            "a less-capable model must not override on priority alone"
+        );
     }
 
     #[tokio::test]
@@ -477,35 +593,87 @@ mod tests {
         // Three equally-capable models with identical priority but different cost. The router (LLM)
         // picks the expensive one, but cost tiebreaker overrides it with the cheapest eligible model.
         let cat = vec![
-            p("cheap", "cheap-model", 0.8, 0.5, 0.1, Protocol::Anthropic, "k"),
+            p(
+                "cheap",
+                "cheap-model",
+                0.8,
+                0.5,
+                0.1,
+                Protocol::Anthropic,
+                "k",
+            ),
             p("mid", "mid-model", 0.8, 0.5, 0.5, Protocol::Anthropic, "k"),
-            p("expensive", "expensive-model", 0.8, 0.5, 0.9, Protocol::Anthropic, "k"),
+            p(
+                "expensive",
+                "expensive-model",
+                0.8,
+                0.5,
+                0.9,
+                Protocol::Anthropic,
+                "k",
+            ),
         ];
         let cands: Vec<&Provider> = cat.iter().collect();
-        let ts = vec![DelegateTask { prompt: "a typical task".into(), role: "worker".into(), model: None, phase: None, write: false }];
+        let ts = vec![DelegateTask {
+            prompt: "a typical task".into(),
+            role: "worker".into(),
+            model: None,
+            phase: None,
+            write: false,
+        }];
         let router = p("mid", "mid-model", 0.5, 0.5, 0.5, Protocol::Anthropic, "k");
         // The LLM routes to "expensive-model" but cost tiebreaker should switch to the cheapest.
         let fake = |_: &str| -> Result<String, String> {
             Ok(r#"[{"task":1,"model":"expensive-model","reason":"looks good"}]"#.into())
         };
         let got = route_batch(&ts, &cands, &router, Some(&fake)).await;
-        assert_eq!(got.get(&0).unwrap().model, "cheap-model",
-            "cost tiebreaker must prefer cheapest when priorities are tied");
-        assert!(got[&0].reason.contains("cost"), "reason must mention 'cost': {}", got[&0].reason);
+        assert_eq!(
+            got.get(&0).unwrap().model,
+            "cheap-model",
+            "cost tiebreaker must prefer cheapest when priorities are tied"
+        );
+        assert!(
+            got[&0].reason.contains("cost"),
+            "reason must mention 'cost': {}",
+            got[&0].reason
+        );
 
         // When a higher-priority model exists, it wins regardless of cost.
         let cat2 = vec![
-            p("cheap", "cheap-model", 0.8, 0.3, 0.1, Protocol::Anthropic, "k"),
-            p("expensive", "expensive-model", 0.8, 0.9, 0.9, Protocol::Anthropic, "k"),
+            p(
+                "cheap",
+                "cheap-model",
+                0.8,
+                0.3,
+                0.1,
+                Protocol::Anthropic,
+                "k",
+            ),
+            p(
+                "expensive",
+                "expensive-model",
+                0.8,
+                0.9,
+                0.9,
+                Protocol::Anthropic,
+                "k",
+            ),
         ];
         let cands2: Vec<&Provider> = cat2.iter().collect();
         let fake2 = |_: &str| -> Result<String, String> {
             Ok(r#"[{"task":1,"model":"cheap-model","reason":"cheap"}]"#.into())
         };
         let got2 = route_batch(&ts, &cands2, &router, Some(&fake2)).await;
-        assert_eq!(got2.get(&0).unwrap().model, "expensive-model",
-            "higher priority must win over cheaper cost");
-        assert!(got2[&0].reason.contains("priority"), "reason must mention 'priority': {}", got2[&0].reason);
+        assert_eq!(
+            got2.get(&0).unwrap().model,
+            "expensive-model",
+            "higher priority must win over cheaper cost"
+        );
+        assert!(
+            got2[&0].reason.contains("priority"),
+            "reason must mention 'priority': {}",
+            got2[&0].reason
+        );
     }
 
     #[test]
@@ -530,7 +698,10 @@ mod tests {
         assert!(prompt.contains("MiniMax-M3") && prompt.contains("deepseek-chat"));
         assert!(prompt.contains("1. grep for TODO"));
         assert!(prompt.contains("3. summarize the long thread"));
-        assert!(!prompt.contains("2. refactor"), "pinned task must not be offered for routing");
+        assert!(
+            !prompt.contains("2. refactor"),
+            "pinned task must not be offered for routing"
+        );
     }
 
     #[test]
@@ -565,7 +736,11 @@ mod tests {
         let cands: Vec<&Provider> = r.providers.iter().collect();
         // LLM abbreviates "MiniMax-M3" → "MiniMax"; substring-tolerant matching still accepts it
         // (run_delegate's registry.find later resolves the abbreviation to the real provider).
-        let got = parse_route_response(r#"[{"task":1,"model":"MiniMax","reason":"x"}]"#, &[0], &cands);
+        let got = parse_route_response(
+            r#"[{"task":1,"model":"MiniMax","reason":"x"}]"#,
+            &[0],
+            &cands,
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(got[&0].model, "MiniMax");
     }
@@ -594,12 +769,36 @@ mod tests {
         // this test isolates transport + pinned-skipping; the priority layer is covered separately by
         // priority_overrides_the_llm_pick_when_capable_enough.
         let cat = vec![
-            p("minimax", "MiniMax-M3", 0.5, 0.5, 0.3, Protocol::Anthropic, "mk"),
-            p("deepseek", "deepseek-chat", 0.6, 0.5, 0.5, Protocol::Anthropic, "dk"),
+            p(
+                "minimax",
+                "MiniMax-M3",
+                0.5,
+                0.5,
+                0.3,
+                Protocol::Anthropic,
+                "mk",
+            ),
+            p(
+                "deepseek",
+                "deepseek-chat",
+                0.6,
+                0.5,
+                0.5,
+                Protocol::Anthropic,
+                "dk",
+            ),
         ];
         let cands: Vec<&Provider> = cat.iter().collect();
         let ts = tasks();
-        let router = p("minimax", "MiniMax-M3", 0.5, 0.5, 0.3, Protocol::Anthropic, "mk");
+        let router = p(
+            "minimax",
+            "MiniMax-M3",
+            0.5,
+            0.5,
+            0.3,
+            Protocol::Anthropic,
+            "mk",
+        );
         let fake = |prompt: &str| -> Result<String, String> {
             assert!(prompt.contains("grep for TODO"));
             Ok(r#"[{"task":1,"model":"MiniMax-M3","reason":"cheap"},{"task":3,"model":"deepseek-chat","reason":"reasoning"}]"#.to_string())
@@ -616,11 +815,35 @@ mod tests {
     async fn route_batch_can_pick_a_native_claude_model() {
         crate::engine::providers::seed_claude_models_for_tests();
         // catalog = one registered cheap model + the native Claude tiers; the router picks Claude.
-        let mut cat = vec![p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk")];
-        cat.extend(crate::engine::providers::native_claude_candidates(&Default::default()));
+        let mut cat = vec![p(
+            "minimax",
+            "MiniMax-M3",
+            0.5,
+            0.3,
+            0.3,
+            Protocol::Anthropic,
+            "mk",
+        )];
+        cat.extend(crate::engine::providers::native_claude_candidates(
+            &Default::default(),
+        ));
         let cands: Vec<&Provider> = cat.iter().collect();
-        let ts = vec![DelegateTask { prompt: "a hard architecture/reasoning task".into(), role: "".into(), model: None, phase: None, write: false }];
-        let router = p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk");
+        let ts = vec![DelegateTask {
+            prompt: "a hard architecture/reasoning task".into(),
+            role: "".into(),
+            model: None,
+            phase: None,
+            write: false,
+        }];
+        let router = p(
+            "minimax",
+            "MiniMax-M3",
+            0.5,
+            0.3,
+            0.3,
+            Protocol::Anthropic,
+            "mk",
+        );
         let fake = |_: &str| -> Result<String, String> {
             Ok(r#"[{"task":1,"model":"sonnet","reason":"needs strong reasoning"}]"#.to_string())
         };
@@ -635,14 +858,34 @@ mod tests {
         let r = reg();
         let cands: Vec<&Provider> = r.providers.iter().collect();
         let ts = tasks();
-        let router = p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk");
+        let router = p(
+            "minimax",
+            "MiniMax-M3",
+            0.5,
+            0.3,
+            0.3,
+            Protocol::Anthropic,
+            "mk",
+        );
         let fail = |_: &str| -> Result<String, String> { Err("boom".into()) };
-        assert!(route_batch(&ts, &cands, &router, Some(&fail)).await.is_empty());
+        assert!(route_batch(&ts, &cands, &router, Some(&fail))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
     async fn route_batch_single_candidate_assigns_it_without_calling_the_router() {
-        let one = ProviderRegistry { providers: vec![p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk")] };
+        let one = ProviderRegistry {
+            providers: vec![p(
+                "minimax",
+                "MiniMax-M3",
+                0.5,
+                0.3,
+                0.3,
+                Protocol::Anthropic,
+                "mk",
+            )],
+        };
         let cands: Vec<&Provider> = one.providers.iter().collect();
         let ts = tasks(); // idx 0 & 2 un-pinned, idx 1 pinned to "deepseek"
         let router = one.providers[0].clone();
@@ -659,7 +902,10 @@ mod tests {
         assert_eq!(got[&0].model, "MiniMax-M3");
         assert_eq!(got[&2].model, "MiniMax-M3");
         assert!(!got.contains_key(&1), "pinned task is left alone");
-        assert!(!called.load(std::sync::atomic::Ordering::SeqCst), "must not call the router with a single candidate");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "must not call the router with a single candidate"
+        );
     }
 
     #[tokio::test]
@@ -677,10 +923,13 @@ mod tests {
     async fn validate_router_rejects_no_array_and_transport_error() {
         let router = p("rtr", "m", 0.5, 0.5, 0.5, Protocol::Anthropic, "k");
         // A reply with no JSON array (e.g. a thinking-only truncation that yielded only prose).
-        let no_array = |_: &str| -> Result<String, String> { Ok("thought hard, produced no array".into()) };
+        let no_array =
+            |_: &str| -> Result<String, String> { Ok("thought hard, produced no array".into()) };
         assert!(validate_router(&router, Some(&no_array)).await.is_err());
         // A transport error (e.g. http_ask's "router returned no text (stop_reason=max_tokens)") propagates.
-        let boom = |_: &str| -> Result<String, String> { Err("router returned no text (stop_reason=max_tokens)".into()) };
+        let boom = |_: &str| -> Result<String, String> {
+            Err("router returned no text (stop_reason=max_tokens)".into())
+        };
         assert!(validate_router(&router, Some(&boom)).await.is_err());
     }
 

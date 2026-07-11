@@ -11,7 +11,9 @@ pub struct GlobalToggles {
 /// Read a JSON object from `path`, returning an empty map on missing OR corrupt file
 /// (best-effort — used for reads that must never fail).
 fn read_object_lossy(path: &Path) -> serde_json::Map<String, serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Default::default() };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Default::default();
+    };
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(serde_json::Value::Object(m)) => m,
         _ => Default::default(),
@@ -46,7 +48,10 @@ pub fn plugin_globally_enabled(t: &GlobalToggles, id: &str) -> bool {
 }
 
 pub fn skill_globally_enabled(t: &GlobalToggles, name: &str) -> bool {
-    t.skill_overrides.get(name.trim()).map(|v| v != "off").unwrap_or(true)
+    t.skill_overrides
+        .get(name.trim())
+        .map(|v| v != "off")
+        .unwrap_or(true)
 }
 
 /// True if the BASE file (`settings.json` only, ignoring `settings.local.json`) explicitly disables
@@ -81,14 +86,22 @@ const MAX_BACKUPS: usize = 20;
 /// Read `settings.local.json` for a WRITE: `Ok(None)` if missing, `Err(InvalidData)` if corrupt,
 /// `Ok(Some(map))` if valid. Distinguishing missing from corrupt is what lets us refuse to
 /// clobber a file we cannot parse.
-fn read_local_for_write(path: &Path) -> std::io::Result<Option<serde_json::Map<String, serde_json::Value>>> {
+fn read_local_for_write(
+    path: &Path,
+) -> std::io::Result<Option<serde_json::Map<String, serde_json::Value>>> {
     match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(serde_json::Value::Object(m)) => Ok(Some(m)),
-            Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "settings.local.json is not a JSON object")),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("settings.local.json is corrupt: {e}"))),
+            Ok(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings.local.json is not a JSON object",
+            )),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("settings.local.json is corrupt: {e}"),
+            )),
         },
     }
 }
@@ -130,7 +143,10 @@ fn backup_local(config_base: &Path) -> std::io::Result<()> {
 
 /// Read-modify-write `settings.local.json` under the process write lock, backing up first and
 /// writing atomically. `mutate` edits only the keys we own.
-fn edit_local(config_base: &Path, mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> std::io::Result<()> {
+fn edit_local(
+    config_base: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> std::io::Result<()> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_base.join(LOCAL_FILE);
     let mut map = read_local_for_write(&path)?.unwrap_or_default();
@@ -144,10 +160,17 @@ fn edit_local(config_base: &Path, mutate: impl FnOnce(&mut serde_json::Map<Strin
 
 /// Set/clear a boolean entry in a nested object key. `Some(v)` inserts; `None` removes and drops
 /// the parent object if it becomes empty.
-fn set_nested(map: &mut serde_json::Map<String, serde_json::Value>, parent: &str, key: &str, value: Option<serde_json::Value>) {
+fn set_nested(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    parent: &str,
+    key: &str,
+    value: Option<serde_json::Value>,
+) {
     match value {
         Some(v) => {
-            let entry = map.entry(parent.to_string()).or_insert_with(|| serde_json::Value::Object(Default::default()));
+            let entry = map
+                .entry(parent.to_string())
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
             if let serde_json::Value::Object(obj) = entry {
                 obj.insert(key.to_string(), v);
             } else {
@@ -201,14 +224,20 @@ pub fn set_skill_enabled(config_base: &Path, name: &str, enabled: bool) -> std::
     } else {
         Some(serde_json::Value::String("off".into()))
     };
-    edit_local(config_base, |m| set_nested(m, "skillOverrides", &name, value))
+    edit_local(config_base, |m| {
+        set_nested(m, "skillOverrides", &name, value)
+    })
 }
 
 /// The set of skills to turn OFF for a session: the union of globally-off skills
 /// (`skillOverrides == "off"`) and the session's own hidden-skill list, minus any skill in
 /// `forced_on` (which wins over both). This makes a session inherit the global skill state
 /// while still applying its own hides on top, with session force-on as the final override.
-pub fn resolve_session_hidden_skills(config_base: &Path, hidden_skills: &[String], forced_on: &[String]) -> Vec<String> {
+pub fn resolve_session_hidden_skills(
+    config_base: &Path,
+    hidden_skills: &[String],
+    forced_on: &[String],
+) -> Vec<String> {
     let toggles = read_global_toggles(config_base);
     let mut set: BTreeSet<String> = toggles
         .skill_overrides
@@ -251,7 +280,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "agentic-gs-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -263,7 +295,8 @@ mod tests {
         std::fs::write(
             dir.join("settings.json"),
             r#"{"enabledPlugins":{"a@m":false,"b@m":true},"skillOverrides":{"s1":"off"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             dir.join("settings.local.json"),
             r#"{"enabledPlugins":{"a@m":true},"skillOverrides":{"s2":"off"},"permissions":{"x":1}}"#,
@@ -299,7 +332,8 @@ mod tests {
         std::fs::write(
             dir.join("settings.local.json"),
             r#"{"permissions":{"allow":["Bash"]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         set_plugin_enabled(&dir, "gh@m", false).unwrap();
         let after = read_object_lossy(&dir.join("settings.local.json"));
@@ -309,13 +343,19 @@ mod tests {
         // settings.json must be untouched (never created by us)
         assert!(!dir.join("settings.json").exists());
         // a backup was produced
-        let backups: Vec<_> = std::fs::read_dir(dir.join("backups")).unwrap().flatten().collect();
+        let backups: Vec<_> = std::fs::read_dir(dir.join("backups"))
+            .unwrap()
+            .flatten()
+            .collect();
         assert_eq!(backups.len(), 1);
 
         // Re-enable ⇒ key removed; empty enabledPlugins map collapses away.
         set_plugin_enabled(&dir, "gh@m", true).unwrap();
         let after2 = read_object_lossy(&dir.join("settings.local.json"));
-        assert!(after2.get("enabledPlugins").and_then(|m| m.get("gh@m")).is_none());
+        assert!(after2
+            .get("enabledPlugins")
+            .and_then(|m| m.get("gh@m"))
+            .is_none());
         assert!(after2.get("permissions").is_some());
     }
 
@@ -324,7 +364,10 @@ mod tests {
         let dir = tmp(); // no settings.local.json yet
         set_skill_enabled(&dir, "rke2-ops", false).unwrap();
         let after = read_object_lossy(&dir.join("settings.local.json"));
-        assert_eq!(after["skillOverrides"]["rke2-ops"], serde_json::json!("off"));
+        assert_eq!(
+            after["skillOverrides"]["rke2-ops"],
+            serde_json::json!("off")
+        );
     }
 
     #[test]
@@ -334,14 +377,20 @@ mod tests {
         let err = set_plugin_enabled(&dir, "gh@m", false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         // file left untouched
-        assert_eq!(std::fs::read_to_string(dir.join("settings.local.json")).unwrap(), "{not json");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.local.json")).unwrap(),
+            "{not json"
+        );
     }
 
     #[test]
     fn resolve_session_hidden_skills_unions_global_off_and_session_hidden() {
         let dir = tmp();
-        std::fs::write(dir.join("settings.local.json"),
-            r#"{"skillOverrides":{"g-off":"off","on-one":"on"}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.local.json"),
+            r#"{"skillOverrides":{"g-off":"off","on-one":"on"}}"#,
+        )
+        .unwrap();
         // global off: g-off ; session hides: sess-hide
         let mut out = resolve_session_hidden_skills(&dir, &["sess-hide".into(), " ".into()], &[]);
         out.sort();
@@ -352,7 +401,11 @@ mod tests {
     fn enable_over_base_disabled_plugin_writes_true_override() {
         let dir = tmp();
         // Base file force-disables the plugin; no local file yet.
-        std::fs::write(dir.join("settings.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"enabledPlugins":{"gh@m":false}}"#,
+        )
+        .unwrap();
         set_plugin_enabled(&dir, "gh@m", true).unwrap();
         // Local override wins: an explicit `true` is written (not a delete).
         let local = read_object_lossy(&dir.join("settings.local.json"));
@@ -367,29 +420,46 @@ mod tests {
     #[test]
     fn enable_over_base_disabled_skill_writes_on_override() {
         let dir = tmp();
-        std::fs::write(dir.join("settings.json"), r#"{"skillOverrides":{"rke2-ops":"off"}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"skillOverrides":{"rke2-ops":"off"}}"#,
+        )
+        .unwrap();
         set_skill_enabled(&dir, "rke2-ops", true).unwrap();
         let local = read_object_lossy(&dir.join("settings.local.json"));
         assert_eq!(local["skillOverrides"]["rke2-ops"], serde_json::json!("on"));
-        assert!(skill_globally_enabled(&read_global_toggles(&dir), "rke2-ops"));
+        assert!(skill_globally_enabled(
+            &read_global_toggles(&dir),
+            "rke2-ops"
+        ));
     }
 
     #[test]
     fn enable_without_base_disable_deletes_local_key() {
         let dir = tmp();
         // No base settings.json; local currently disables the plugin.
-        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.local.json"),
+            r#"{"enabledPlugins":{"gh@m":false}}"#,
+        )
+        .unwrap();
         set_plugin_enabled(&dir, "gh@m", true).unwrap();
         // Base allows it → minimal behavior: local key removed (empty parent collapsed).
         let local = read_object_lossy(&dir.join("settings.local.json"));
-        assert!(local.get("enabledPlugins").and_then(|m| m.get("gh@m")).is_none());
+        assert!(local
+            .get("enabledPlugins")
+            .and_then(|m| m.get("gh@m"))
+            .is_none());
     }
 
     #[test]
     fn forced_on_removed_from_hidden_skills_off_set() {
         let dir = tmp();
-        std::fs::write(dir.join("settings.local.json"),
-            r#"{"skillOverrides":{"g-off":"off","forced-skill":"off"}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.local.json"),
+            r#"{"skillOverrides":{"g-off":"off","forced-skill":"off"}}"#,
+        )
+        .unwrap();
         // forced_on=[forced-skill]: it must be removed from the off set even though globally off.
         let mut off = resolve_session_hidden_skills(&dir, &[], &["forced-skill".to_string()]);
         off.sort();
@@ -402,15 +472,23 @@ mod tests {
     fn resolve_session_forced_on_skills_returns_globally_off_ones() {
         let dir = tmp();
         // Global disables g-off; also-off not forced on here.
-        std::fs::write(dir.join("settings.json"),
-            r#"{"skillOverrides":{"g-off":"off","also-off":"off"}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"skillOverrides":{"g-off":"off","also-off":"off"}}"#,
+        )
+        .unwrap();
         // Force on g-off (globally disabled) and always-on (globally enabled by default).
-        let forced = resolve_session_forced_on_skills(&dir, &["g-off".to_string(), "always-on".to_string()]);
+        let forced =
+            resolve_session_forced_on_skills(&dir, &["g-off".to_string(), "always-on".to_string()]);
         // g-off is globally disabled → needs explicit "on" in bridge → in returned set.
-        assert!(forced.contains(&"g-off".to_string()),
-            "globally-off forced skill must appear in forced-on set");
+        assert!(
+            forced.contains(&"g-off".to_string()),
+            "globally-off forced skill must appear in forced-on set"
+        );
         // always-on is globally enabled → no bridge "on" needed → NOT in set.
-        assert!(!forced.contains(&"always-on".to_string()),
-            "globally-on skill must NOT appear in forced-on set");
+        assert!(
+            !forced.contains(&"always-on".to_string()),
+            "globally-on skill must NOT appear in forced-on set"
+        );
     }
 }

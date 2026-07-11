@@ -53,7 +53,10 @@ async fn git_async(cwd: &Path, args: &[&str]) -> Result<String, WorktreeError> {
     // keep running orphaned.
     let out = tokio::time::timeout(
         std::time::Duration::from_millis(GIT_TIMEOUT_MS),
-        TokioCommand::new("git").args(&all_args).kill_on_drop(true).output(),
+        TokioCommand::new("git")
+            .args(&all_args)
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(|_| WorktreeError::Git("git timed out".into()))?
@@ -75,13 +78,18 @@ pub fn create_worktree(
     id: &str,
 ) -> Result<WorktreeInfo, WorktreeError> {
     let worktree_path = root.join(repo).join(id);
-    let parent = worktree_path.parent().ok_or_else(|| WorktreeError::Git("invalid worktree path — no parent dir".into()))?;
+    let parent = worktree_path
+        .parent()
+        .ok_or_else(|| WorktreeError::Git("invalid worktree path — no parent dir".into()))?;
     std::fs::create_dir_all(parent)?;
     let branch = format!("agentic/{id}");
     let rp = repo_path.to_string_lossy();
     let wp = worktree_path.to_string_lossy();
     git_sync(&["-C", &rp, "worktree", "add", &wp, "-b", &branch])?;
-    Ok(WorktreeInfo { worktree_path, branch })
+    Ok(WorktreeInfo {
+        worktree_path,
+        branch,
+    })
 }
 
 pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), WorktreeError> {
@@ -103,8 +111,7 @@ pub fn create_session_worktrees(
     for (repo, repo_path) in repo_specs {
         let worktree_path = session_dir.join(repo);
         let rp = repo_path.to_string_lossy();
-        let base_sha = git_sync(&["-C", &rp, "rev-parse", "HEAD"])
-            .map(|s| s.trim().to_string())?;
+        let base_sha = git_sync(&["-C", &rp, "rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
         let wp = worktree_path.to_string_lossy();
         git_sync(&["-C", &rp, "worktree", "add", &wp, "-b", &branch])?;
         result.push(SessionWorktree {
@@ -168,7 +175,12 @@ pub fn remove_session_worktrees(repo_specs: &[(String, PathBuf)], session_dir: &
 
 pub async fn sync_worktree(worktree_path: &Path) {
     // Resolve remote default branch. On any error, fall back to "master".
-    let base = match git_async(worktree_path, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).await {
+    let base = match git_async(
+        worktree_path,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
         Ok(s) => {
             let s = s.trim().to_string();
             s.strip_prefix("origin/").unwrap_or("master").to_string()
@@ -176,12 +188,18 @@ pub async fn sync_worktree(worktree_path: &Path) {
         Err(_) => "master".to_string(),
     };
 
-    if git_async(worktree_path, &["fetch", "origin", &base]).await.is_err() {
+    if git_async(worktree_path, &["fetch", "origin", &base])
+        .await
+        .is_err()
+    {
         return;
     }
 
     let remote = format!("origin/{base}");
-    if git_async(worktree_path, &["rebase", "--autostash", &remote]).await.is_err() {
+    if git_async(worktree_path, &["rebase", "--autostash", &remote])
+        .await
+        .is_err()
+    {
         let _ = git_async(worktree_path, &["rebase", "--abort"]).await;
     }
 }
@@ -204,7 +222,9 @@ fn git_env(worktree: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Strin
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        Err(WorktreeError::Git(String::from_utf8_lossy(&out.stderr).into_owned()))
+        Err(WorktreeError::Git(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ))
     }
 }
 
@@ -346,10 +366,7 @@ mod tests {
         // layout: <root>/<id>/<repo>
         assert_eq!(wt.worktree_path, root.join("sess1").join("repo"));
         // base_sha is a git hex sha (at least 7 hex digits)
-        assert!(
-            wt.base_sha.len() >= 7
-                && wt.base_sha.chars().all(|c| c.is_ascii_hexdigit())
-        );
+        assert!(wt.base_sha.len() >= 7 && wt.base_sha.chars().all(|c| c.is_ascii_hexdigit()));
         // the session branch exists in the repo
         let branches = String::from_utf8(
             Command::new("git")
@@ -380,7 +397,8 @@ mod tests {
     #[test]
     fn snapshot_and_restore_roundtrip_keeps_new_files() {
         let (root, repo) = temp_repo();
-        let wts = create_session_worktrees(&[("repo".into(), repo.clone())], &root, "snap1").unwrap();
+        let wts =
+            create_session_worktrees(&[("repo".into(), repo.clone())], &root, "snap1").unwrap();
         let wt = &wts[0].worktree_path;
         // State at snapshot time: modify tracked a.txt + add untracked b.txt.
         std::fs::write(wt.join("a.txt"), "one\nSNAP\n").unwrap();
@@ -389,7 +407,14 @@ mod tests {
         let sha = snapshot_worktree(wt, snap_ref).unwrap();
         assert!(sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()));
         // The ref resolves from the (shared) repo ref store.
-        assert!(git_sync(&["-C", &repo.to_string_lossy(), "rev-parse", "--verify", snap_ref]).is_ok());
+        assert!(git_sync(&[
+            "-C",
+            &repo.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            snap_ref
+        ])
+        .is_ok());
 
         // Diverge AFTER the snapshot: change a.txt, delete b.txt, create c.txt.
         std::fs::write(wt.join("a.txt"), "one\nCHANGED-LATER\n").unwrap();
@@ -398,16 +423,34 @@ mod tests {
 
         restore_worktree(wt, snap_ref).unwrap();
         // Tracked change reverted to the snapshot content.
-        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\nSNAP\n");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("a.txt")).unwrap(),
+            "one\nSNAP\n"
+        );
         // A file present in the snapshot but deleted after is recreated.
-        assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "snap-b\n");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("b.txt")).unwrap(),
+            "snap-b\n"
+        );
         // A file created AFTER the snapshot is kept (no git clean).
-        assert!(wt.join("c.txt").exists(), "files created after the snapshot must be kept");
+        assert!(
+            wt.join("c.txt").exists(),
+            "files created after the snapshot must be kept"
+        );
 
         // Cleanup removes the session's snapshot refs.
         delete_snapshot_refs(&repo, "snap1");
-        assert!(git_sync(&["-C", &repo.to_string_lossy(), "rev-parse", "--verify", snap_ref]).is_err(),
-            "snapshot ref should be gone after cleanup");
+        assert!(
+            git_sync(&[
+                "-C",
+                &repo.to_string_lossy(),
+                "rev-parse",
+                "--verify",
+                snap_ref
+            ])
+            .is_err(),
+            "snapshot ref should be gone after cleanup"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -431,7 +474,11 @@ mod tests {
     #[test]
     fn create_fork_worktrees_branches_off_supplied_base_sha() {
         let (repo, sha) = one_commit_repo("fork");
-        let root = std::env::temp_dir().join(format!("agentic-fork-root-{}-{}", std::process::id(), "fork"));
+        let root = std::env::temp_dir().join(format!(
+            "agentic-fork-root-{}-{}",
+            std::process::id(),
+            "fork"
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -443,22 +490,37 @@ mod tests {
             &root,
             "child-id",
             &base_shas,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].base_sha, sha);
         assert!(wts[0].worktree_path.join("README.md").exists());
 
         // Branch agentic/child-id exists in the repo and points at the same SHA.
-        let head = String::from_utf8(Command::new("git")
-            .args(["-C", &repo.to_string_lossy(), "rev-parse", "agentic/child-id"])
-            .output().unwrap().stdout).unwrap();
+        let head = String::from_utf8(
+            Command::new("git")
+                .args([
+                    "-C",
+                    &repo.to_string_lossy(),
+                    "rev-parse",
+                    "agentic/child-id",
+                ])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
         assert_eq!(head.trim(), sha);
     }
 
     #[test]
     fn create_fork_worktrees_missing_base_sha_returns_error() {
         let (repo, _sha) = one_commit_repo("missing");
-        let root = std::env::temp_dir().join(format!("agentic-fork-missing-{}-{}", std::process::id(), "missing"));
+        let root = std::env::temp_dir().join(format!(
+            "agentic-fork-missing-{}-{}",
+            std::process::id(),
+            "missing"
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -474,12 +536,21 @@ mod tests {
 
     /// Create a throwaway git repo with one commit, return (repo_path, commit_sha).
     fn one_commit_repo(name: &str) -> (PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!("agentic-fork-wt-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("agentic-fork-wt-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git").args(args).current_dir(&dir).output().unwrap();
-            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         run(&["init", "--initial-branch=main", "-q"]);
         run(&["config", "user.email", "t@t"]);
@@ -487,8 +558,17 @@ mod tests {
         std::fs::write(dir.join("README.md"), "first\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "-m", "first", "-q"]);
-        let sha = String::from_utf8(Command::new("git")
-            .args(["rev-parse", "HEAD"]).current_dir(&dir).output().unwrap().stdout).unwrap().trim().to_string();
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
         (dir, sha)
     }
 
@@ -497,14 +577,16 @@ mod tests {
         use tokio::process::Command as TokioCommand;
 
         // Run `sleep 10` with a 100 ms timeout — simulates a hung git.
-        let fut = TokioCommand::new("sleep").arg("10").kill_on_drop(true).output();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            fut,
-        )
-        .await;
+        let fut = TokioCommand::new("sleep")
+            .arg("10")
+            .kill_on_drop(true)
+            .output();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), fut).await;
         // The outer timeout must fire (Err(Elapsed)), NOT let the 10-second sleep finish.
-        assert!(result.is_err(), "timeout should fire before sleep completes");
+        assert!(
+            result.is_err(),
+            "timeout should fire before sleep completes"
+        );
         // After the timeout, the future (and kill_on_drop child) is dropped — no zombie.
     }
 }

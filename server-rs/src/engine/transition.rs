@@ -101,8 +101,7 @@ impl Engine {
             .get(id)
             .await?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
-        let from = SessionStatus::from_str(&cur.status)
-            .unwrap_or(SessionStatus::Failed);
+        let from = SessionStatus::from_str(&cur.status).unwrap_or(SessionStatus::Failed);
 
         // Gate: legal?
         if !from.legal_transition_to(to) {
@@ -305,10 +304,10 @@ mod tests {
         // and feed it to transition(). For now we just test the enum
         // matrix that gates the transition.
         let cases = [
-            (Running, 0i32, true /* err */, Failed),  // err + exit0 = failed
-            (Running, 0,    false,          Done),    // no err + exit0 = done
-            (Running, 1,    true,           Failed),  // err + nonzero = failed
-            (Running, 1,    false,          Failed),  // no err + nonzero = failed
+            (Running, 0i32, true /* err */, Failed), // err + exit0 = failed
+            (Running, 0, false, Done),               // no err + exit0 = done
+            (Running, 1, true, Failed),              // err + nonzero = failed
+            (Running, 1, false, Failed),             // no err + nonzero = failed
         ];
         for (from, _code, _had_err, expected_to) in cases {
             // The decision lives outside transition() in the current code;

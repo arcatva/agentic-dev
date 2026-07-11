@@ -77,8 +77,12 @@ pub(crate) fn parse_recent_messages(lines: &[String]) -> Vec<(String, String)> {
     use serde_json::Value;
     let mut parsed: Vec<(String, String)> = Vec::new();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        let Some(ty) = v.get("type").and_then(|t| t.as_str()) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(ty) = v.get("type").and_then(|t| t.as_str()) else {
+            continue;
+        };
         match ty {
             "agentic_prompt" => {
                 if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
@@ -89,8 +93,7 @@ pub(crate) fn parse_recent_messages(lines: &[String]) -> Vec<(String, String)> {
                 // Join all `text` content blocks of the full assistant frame
                 // into one coherent message (mirrors `transcript_filter`).
                 // Frames carrying only tool_use blocks yield no text → skipped.
-                let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array())
-                else {
+                let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
                     continue;
                 };
                 let mut text = String::new();
@@ -213,9 +216,8 @@ mod tests {
         // Realistic single turn: one user prompt, MANY stream_event token
         // deltas, then one full assistant frame. The deltas must be ignored
         // and the assistant turn must become exactly ONE coherent entry.
-        let mut lines = vec![
-            r#"{"type":"agentic_prompt","text":"add retry logic","at":1}"#.to_string(),
-        ];
+        let mut lines =
+            vec![r#"{"type":"agentic_prompt","text":"add retry logic","at":1}"#.to_string()];
         for i in 0..30 {
             lines.push(format!(
                 r#"{{"type":"stream_event","event":{{"delta":{{"type":"text_delta","text":"tok{i} "}}}}}}"#
@@ -229,7 +231,10 @@ mod tests {
             got,
             vec![
                 ("user".to_string(), "add retry logic".to_string()),
-                ("assistant".to_string(), "Here is the full reply".to_string()),
+                (
+                    "assistant".to_string(),
+                    "Here is the full reply".to_string()
+                ),
             ]
         );
     }
@@ -254,7 +259,11 @@ mod tests {
             ));
         }
         let got = parse_recent_messages(&lines);
-        assert_eq!(got.len(), 10, "expected 5 user + 5 assistant whole messages");
+        assert_eq!(
+            got.len(),
+            10,
+            "expected 5 user + 5 assistant whole messages"
+        );
         for (i, turn) in (0..5).enumerate() {
             assert_eq!(got[i * 2], ("user".to_string(), format!("u{turn}")));
             assert_eq!(
@@ -317,10 +326,7 @@ mod tests {
             r#"{"type":"agentic_prompt","text":"only user","at":1}"#.to_string(),
         ];
         let got = parse_recent_messages(&lines);
-        assert_eq!(
-            got,
-            vec![("user".to_string(), "only user".to_string())]
-        );
+        assert_eq!(got, vec![("user".to_string(), "only user".to_string())]);
     }
 
     // -- is_accepted_generated_title --
@@ -329,8 +335,8 @@ mod tests {
     fn accepted_title_requires_han_character() {
         assert!(is_accepted_generated_title("修复登录"));
         assert!(is_accepted_generated_title("修复 OAuth 登录")); // mixed CJK + Latin is fine
-        // Latin-only output (model ignored the Chinese-only prompt) is rejected
-        // even though it is otherwise a structurally valid title.
+                                                                 // Latin-only output (model ignored the Chinese-only prompt) is rejected
+                                                                 // even though it is otherwise a structurally valid title.
         assert!(is_valid_title("perf tuning phase"));
         assert!(!is_accepted_generated_title("perf tuning phase"));
         assert!(!is_accepted_generated_title("")); // empty fails is_valid_title first
@@ -346,8 +352,14 @@ mod tests {
                 r#"{{"type":"agentic_prompt","text":"u{i}","at":{i}}}"#
             ));
             // interleave noise the parser-cap would otherwise truncate
-            lines.push(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"r"}]}}"#.to_string());
-            lines.push(r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"x"}}}"#.to_string());
+            lines.push(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"r"}]}}"#
+                    .to_string(),
+            );
+            lines.push(
+                r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"x"}}}"#
+                    .to_string(),
+            );
         }
         // 23 agentic_prompt markers — count is the FULL history, not the 10-cap tail.
         assert_eq!(count_user_turns(&lines), 23);

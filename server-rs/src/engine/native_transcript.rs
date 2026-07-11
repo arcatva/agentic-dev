@@ -14,7 +14,10 @@ pub fn slug_for_cwd(cwd: &str) -> String {
 
 /// `<claude_config_base>/projects/<slug>/<csid>.jsonl`.
 pub fn transcript_path(config_base: &Path, cwd: &str, csid: &str) -> PathBuf {
-    config_base.join("projects").join(slug_for_cwd(cwd)).join(format!("{csid}.jsonl"))
+    config_base
+        .join("projects")
+        .join(slug_for_cwd(cwd))
+        .join(format!("{csid}.jsonl"))
 }
 
 /// Validate a `claudeSessionId` supplied over the HTTP API before it is ever interpolated
@@ -33,8 +36,7 @@ pub fn is_valid_csid(csid: &str) -> bool {
     if csid.contains('/') || csid.contains('\\') || csid.contains("..") {
         return false;
     }
-    csid
-        .chars()
+    csid.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
@@ -66,9 +68,26 @@ pub(crate) fn iso_to_ms(ts: &str) -> i64 {
 /// A command NOT in this list (e.g. a prompt-backed `/code-review` or a custom skill) is treated as
 /// a real prompt and kept — this list is deliberately conservative (unknown = keep, not drop).
 const LOCAL_UI_COMMANDS: &[&str] = &[
-    "model", "clear", "exit", "quit", "help", "login", "logout", "status", "cost", "config",
-    "doctor", "mcp", "terminal-setup", "vim", "release-notes", "upgrade", "privacy-settings",
-    "permissions", "ide", "bug",
+    "model",
+    "clear",
+    "exit",
+    "quit",
+    "help",
+    "login",
+    "logout",
+    "status",
+    "cost",
+    "config",
+    "doctor",
+    "mcp",
+    "terminal-setup",
+    "vim",
+    "release-notes",
+    "upgrade",
+    "privacy-settings",
+    "permissions",
+    "ide",
+    "bug",
 ];
 
 /// True when `text` is a Claude Code LOCAL UI command artifact: the `<local-command-caveat>`
@@ -109,16 +128,19 @@ pub(crate) fn has_real_user_input(lines: &[serde_json::Value]) -> bool {
                 let t = s.trim();
                 !t.is_empty() && !is_local_ui_command(t)
             }
-            serde_json::Value::Array(a) => a.iter().any(|b| match b.get("type").and_then(|v| v.as_str()) {
-                Some("text") => {
-                    let t = b.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
-                    !t.is_empty() && !is_local_ui_command(t)
-                }
-                // Tool output is not user input; a missing type is malformed; anything else
-                // (image, document, …) is genuine user-authored content.
-                Some("tool_result") | None => false,
-                Some(_) => true,
-            }),
+            serde_json::Value::Array(a) => {
+                a.iter()
+                    .any(|b| match b.get("type").and_then(|v| v.as_str()) {
+                        Some("text") => {
+                            let t = b.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+                            !t.is_empty() && !is_local_ui_command(t)
+                        }
+                        // Tool output is not user input; a missing type is malformed; anything else
+                        // (image, document, …) is genuine user-authored content.
+                        Some("tool_result") | None => false,
+                        Some(_) => true,
+                    })
+            }
             _ => false,
         }
     })
@@ -127,21 +149,30 @@ pub(crate) fn has_real_user_input(lines: &[serde_json::Value]) -> bool {
 /// Extract plain user text from a native `user` line's `message.content`.
 /// Returns `None` for tool-result-only / meta / sidechain / local-UI-command / non-user lines.
 pub fn user_prompt_text(line: &serde_json::Value) -> Option<String> {
-    if line.get("type").and_then(|v| v.as_str()) != Some("user") { return None; }
+    if line.get("type").and_then(|v| v.as_str()) != Some("user") {
+        return None;
+    }
     for flag in ["isMeta", "isSidechain", "isCompactSummary"] {
-        if line.get(flag).and_then(|v| v.as_bool()) == Some(true) { return None; }
+        if line.get(flag).and_then(|v| v.as_bool()) == Some(true) {
+            return None;
+        }
     }
     let content = line.pointer("/message/content")?;
     let text = if let Some(s) = content.as_str() {
         s.to_string()
     } else {
-        content.as_array()?.iter()
+        content
+            .as_array()?
+            .iter()
             .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
             .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
-            .collect::<Vec<_>>().join("\n")
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let trimmed = text.trim();
-    if trimmed.is_empty() { return None; }
+    if trimmed.is_empty() {
+        return None;
+    }
     // Suppress only LOCAL UI slash-commands (/model, /exit, /clear, …) — their transcript is a
     // command artifact, not a prompt. A prompt-backed command (/code-review, a custom skill) is a
     // real conversation and is kept (see `is_local_ui_command`).
@@ -153,8 +184,11 @@ pub fn user_prompt_text(line: &serde_json::Value) -> Option<String> {
 
 /// Read a JSONL transcript into a Vec<Value>; bad lines are skipped, missing file = empty.
 pub(crate) fn read_lines(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(raw) = std::fs::read_to_string(path) else { return vec![]; };
-    raw.lines().filter(|l| !l.trim().is_empty())
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect()
 }
@@ -183,17 +217,33 @@ pub fn scan_adoptable(
 ) -> Vec<Adoptable> {
     let root = config_base.join("projects");
     let mut out = vec![];
-    let Ok(projects) = std::fs::read_dir(&root) else { return out; };
+    let Ok(projects) = std::fs::read_dir(&root) else {
+        return out;
+    };
     for proj in projects.flatten() {
-        let Ok(files) = std::fs::read_dir(proj.path()) else { continue; };
+        let Ok(files) = std::fs::read_dir(proj.path()) else {
+            continue;
+        };
         for f in files.flatten() {
             let p = f.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
-            let Some(csid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue; };
-            if known_csids.contains(&csid) { continue; }
+            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(csid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+                continue;
+            };
+            if known_csids.contains(&csid) {
+                continue;
+            }
             let lines = read_lines(&p);
-            if lines.is_empty() { continue; }
-            let cwd = lines.iter().find_map(|l| l.get("cwd").and_then(|v| v.as_str())).unwrap_or("").to_string();
+            if lines.is_empty() {
+                continue;
+            }
+            let cwd = lines
+                .iter()
+                .find_map(|l| l.get("cwd").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
             // Skip agentic-dev's own spawned sessions: they all run in a worktree under
             // `exclude_root` (worktrees_root), so their transcripts — the main turn, retries, and
             // every workflow/subagent transcript — would otherwise flood the adopt list with rows
@@ -208,16 +258,31 @@ pub fn scan_adoptable(
             if !has_real_user_input(&lines) {
                 continue;
             }
-            let first_prompt = lines.iter().find_map(|l| user_prompt_text(l)).unwrap_or_default();
+            let first_prompt = lines
+                .iter()
+                .find_map(|l| user_prompt_text(l))
+                .unwrap_or_default();
             let resumable = super::resume_gate::transcript_is_resumable(&p);
-            let mtime_ms = f.metadata().ok()
+            let mtime_ms = f
+                .metadata()
+                .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64).unwrap_or(0);
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
             out.push(Adoptable {
                 session_id: csid,
-                slug: p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()).unwrap_or("").to_string(),
-                cwd, first_prompt, mtime_ms, resumable, line_count: lines.len() as i64,
+                slug: p
+                    .parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                cwd,
+                first_prompt,
+                mtime_ms,
+                resumable,
+                line_count: lines.len() as i64,
             });
         }
     }
@@ -236,8 +301,15 @@ pub fn translate_lines(native: &[serde_json::Value]) -> Vec<String> {
         match line.get("type").and_then(|v| v.as_str()) {
             Some("user") => {
                 if let Some(text) = user_prompt_text(line) {
-                    let at = line.get("timestamp").and_then(|v| v.as_str()).map(iso_to_ms).unwrap_or(0);
-                    out.push(serde_json::json!({"type":"agentic_prompt","text":text,"at":at}).to_string());
+                    let at = line
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(iso_to_ms)
+                        .unwrap_or(0);
+                    out.push(
+                        serde_json::json!({"type":"agentic_prompt","text":text,"at":at})
+                            .to_string(),
+                    );
                 }
             }
             Some("assistant") => {
@@ -260,7 +332,11 @@ pub fn translate_lines(native: &[serde_json::Value]) -> Vec<String> {
 pub fn translate_range(path: &Path, from_line: usize) -> (Vec<String>, usize) {
     let all = read_lines(path);
     let total = all.len();
-    let slice = if from_line >= total { &[][..] } else { &all[from_line..] };
+    let slice = if from_line >= total {
+        &[][..]
+    } else {
+        &all[from_line..]
+    };
     (translate_lines(slice), total)
 }
 
@@ -304,18 +380,33 @@ mod tests {
             "{\"type\":\"user\",\"timestamp\":\"2026-07-09T00:00:00Z\",\"cwd\":\"/home/me/proj\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n\
              {\"type\":\"assistant\",\"message\":{\"id\":\"msg_01\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\"}}\n").unwrap();
         // already adopted -> must be skipped
-        std::fs::write(projects.join("csid-known.jsonl"),
-            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n").unwrap();
+        std::fs::write(
+            projects.join("csid-known.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
+        )
+        .unwrap();
         // agentic-dev's OWN spawned session: cwd under worktrees_root -> must be skipped even
         // though it's a fresh, unknown csid with a real prompt.
-        let wt = tmp.path().join("projects").join("-w-agentic-worktrees-abc-repo");
+        let wt = tmp
+            .path()
+            .join("projects")
+            .join("-w-agentic-worktrees-abc-repo");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join("csid-own.jsonl"),
             "{\"type\":\"user\",\"cwd\":\"/w/agentic-worktrees/abc/repo\",\"message\":{\"role\":\"user\",\"content\":\"internal\"}}\n").unwrap();
 
-        let known: std::collections::HashSet<String> = ["csid-known".to_string()].into_iter().collect();
-        let got = scan_adoptable(tmp.path(), &known, std::path::Path::new("/w/agentic-worktrees"));
-        assert_eq!(got.len(), 1, "only the external session survives (known + own-worktree excluded)");
+        let known: std::collections::HashSet<String> =
+            ["csid-known".to_string()].into_iter().collect();
+        let got = scan_adoptable(
+            tmp.path(),
+            &known,
+            std::path::Path::new("/w/agentic-worktrees"),
+        );
+        assert_eq!(
+            got.len(),
+            1,
+            "only the external session survives (known + own-worktree excluded)"
+        );
         assert_eq!(got[0].session_id, "csid-A");
         assert_eq!(got[0].cwd, "/home/me/proj");
         assert_eq!(got[0].first_prompt, "hello");
@@ -347,11 +438,19 @@ mod tests {
             "{\"type\":\"user\",\"cwd\":\"/home/me\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/code-review</command-name>\\n<command-message>review</command-message>\"}}\n").unwrap();
 
         let known = std::collections::HashSet::new();
-        let got = scan_adoptable(tmp.path(), &known, std::path::Path::new("/nonexistent-wt-root"));
-        let ids: std::collections::HashSet<&str> = got.iter().map(|a| a.session_id.as_str()).collect();
+        let got = scan_adoptable(
+            tmp.path(),
+            &known,
+            std::path::Path::new("/nonexistent-wt-root"),
+        );
+        let ids: std::collections::HashSet<&str> =
+            got.iter().map(|a| a.session_id.as_str()).collect();
         assert!(ids.contains("real"), "real text session kept");
         assert!(ids.contains("img"), "multimodal image-only session kept");
-        assert!(ids.contains("pbcmd"), "prompt-backed /code-review session kept");
+        assert!(
+            ids.contains("pbcmd"),
+            "prompt-backed /code-review session kept"
+        );
         assert!(!ids.contains("cmd"), "local UI /model command skipped");
         assert!(!ids.contains("empty"), "assistant-only/empty skipped");
         assert_eq!(got.len(), 3);
@@ -367,8 +466,14 @@ mod tests {
         ].iter().map(|s| serde_json::from_str(s).unwrap()).collect();
 
         let out = translate_lines(&native);
-        let types: Vec<String> = out.iter()
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["type"].as_str().unwrap().to_string())
+        let types: Vec<String> = out
+            .iter()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         // user prompt -> agentic_prompt ; assistant -> assistant + result(end_turn) ; meta + tool_result-only user -> skipped
         assert_eq!(types, vec!["agentic_prompt", "assistant", "result"]);
@@ -403,11 +508,17 @@ mod tests {
         // (b) from_line=total -> empty vec, total unchanged, no panic.
         let (empty, total_eq) = translate_range(&path, total);
         assert!(empty.is_empty(), "from_line==total should yield empty vec");
-        assert_eq!(total_eq, total, "total must be unchanged when slice is empty");
+        assert_eq!(
+            total_eq, total,
+            "total must be unchanged when slice is empty"
+        );
 
         // (c) from_line=total+5 -> empty vec, no panic, total still unchanged.
         let (empty2, total_far) = translate_range(&path, total + 5);
         assert!(empty2.is_empty(), "from_line>total should yield empty vec");
-        assert_eq!(total_far, total, "total must be unchanged for out-of-range from_line");
+        assert_eq!(
+            total_far, total,
+            "total must be unchanged for out-of-range from_line"
+        );
     }
 }

@@ -14,9 +14,15 @@ fn tmp_dir(tag: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn store_create_get_roundtrips_through_public_api() {
     let dir = tmp_dir("store");
-    let store = Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap();
+    let store = Store::open(dir.join("db.sqlite"), dir.join("logs"))
+        .await
+        .unwrap();
     store
-        .create(CreateInput { id: "it1".into(), prompt: "hello".into(), ..Default::default() })
+        .create(CreateInput {
+            id: "it1".into(),
+            prompt: "hello".into(),
+            ..Default::default()
+        })
         .await
         .unwrap();
     let s = store.get("it1").await.unwrap().unwrap();
@@ -30,8 +36,14 @@ async fn router_builds_and_healthz_is_reachable() {
     use tower::ServiceExt;
 
     let dir = tmp_dir("router");
-    let store = std::sync::Arc::new(Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap());
-    let transcript = std::sync::Arc::new(agentic_dev_server::engine::transcript::TranscriptCache::new(8 * 1024 * 1024));
+    let store = std::sync::Arc::new(
+        Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap(),
+    );
+    let transcript = std::sync::Arc::new(
+        agentic_dev_server::engine::transcript::TranscriptCache::new(8 * 1024 * 1024),
+    );
     let cfg = agentic_dev_server::Config::for_test("s3cret", "pw");
     let engine_cfg = agentic_dev_server::EngineConfig {
         src_root: cfg.src_root.clone(),
@@ -91,7 +103,11 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
     use tower::ServiceExt;
 
     let dir = tmp_dir("patch");
-    let store = std::sync::Arc::new(Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap());
+    let store = std::sync::Arc::new(
+        Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap(),
+    );
     let transcript = std::sync::Arc::new(
         agentic_dev_server::engine::transcript::TranscriptCache::new(8 * 1024 * 1024),
     );
@@ -165,7 +181,11 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
     };
 
     // Mint a valid Bearer token for the auth gate.
-    let token = agentic_dev_server::api::auth::issue_token(&cfg.auth_secret, 3600, agentic_dev_server::util::now_secs());
+    let token = agentic_dev_server::api::auth::issue_token(
+        &cfg.auth_secret,
+        3600,
+        agentic_dev_server::util::now_secs(),
+    );
     let auth = format!("Bearer {token}");
 
     // PATCH the session.
@@ -176,10 +196,7 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
         .header("content-type", "application/json")
         .body(Body::from(r#"{"model":"claude-sonnet-4-6","effort":"high","permissionMode":"plan","autoResume":false}"#))
         .unwrap();
-    let resp = api::app(state.clone())
-        .oneshot(req)
-        .await
-        .unwrap();
+    let resp = api::app(state.clone()).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "PATCH must return 200");
 
     // GET the session and assert the fields round-tripped.
@@ -188,16 +205,21 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
-    let resp = api::app(state.clone())
-        .oneshot(req)
+    let resp = api::app(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET must return 200");
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "GET must return 200");
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(body["session"]["model"], "claude-sonnet-4-6", "model must persist");
+    assert_eq!(
+        body["session"]["model"], "claude-sonnet-4-6",
+        "model must persist"
+    );
     assert_eq!(body["session"]["effort"], "high", "effort must persist");
-    assert_eq!(body["session"]["permissionMode"], "plan", "permissionMode must persist");
+    assert_eq!(
+        body["session"]["permissionMode"], "plan",
+        "permissionMode must persist"
+    );
     assert_eq!(
         body["session"]["autoResume"],
         serde_json::json!(false),
@@ -228,14 +250,20 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
         .body(Body::from(r#"{"autoResume":true}"#))
         .unwrap();
     let resp = api::app(state.clone()).oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "PATCH autoResume:true must return 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH autoResume:true must return 200"
+    );
     let req = Request::builder()
         .uri("/api/sessions/smoke-patch")
         .header("authorization", &auth)
         .body(Body::empty())
         .unwrap();
     let resp = api::app(state).oneshot(req).await.unwrap();
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["session"]["autoResume"], serde_json::json!(true));
     assert_eq!(

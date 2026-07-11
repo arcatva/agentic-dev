@@ -15,10 +15,18 @@ pub struct PluginInfo {
 /// list), sorted by name. Entries with an empty install array are still listed — the file only
 /// contains plugins the CLI actually installed.
 pub fn list_plugins(claude_config_dir: &Path) -> Vec<PluginInfo> {
-    let path = claude_config_dir.join("plugins").join("installed_plugins.json");
-    let Ok(text) = std::fs::read_to_string(&path) else { return vec![] };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
-    let Some(map) = v.get("plugins").and_then(|p| p.as_object()) else { return vec![] };
+    let path = claude_config_dir
+        .join("plugins")
+        .join("installed_plugins.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
+    let Some(map) = v.get("plugins").and_then(|p| p.as_object()) else {
+        return vec![];
+    };
     let mut out: Vec<PluginInfo> = map
         .keys()
         .filter(|k| !k.trim().is_empty())
@@ -98,7 +106,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "agentic-plugins-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(d.join("plugins")).unwrap();
         d
@@ -209,7 +220,11 @@ mod tests {
         std::fs::write(dir.join("plugins").join("installed_plugins.json"), "{nope").unwrap();
         assert!(list_plugins(&dir).is_empty());
         // Valid JSON, wrong shape.
-        std::fs::write(dir.join("plugins").join("installed_plugins.json"), r#"{"plugins": []}"#).unwrap();
+        std::fs::write(
+            dir.join("plugins").join("installed_plugins.json"),
+            r#"{"plugins": []}"#,
+        )
+        .unwrap();
         assert!(list_plugins(&dir).is_empty());
     }
 
@@ -219,9 +234,14 @@ mod tests {
         std::fs::write(
             dir.join("plugins").join("installed_plugins.json"),
             r#"{"version":2,"plugins":{"gh@m":[{"scope":"user"}],"cf@m":[{"scope":"user"}]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Global disables gh@m via settings.local.json.
-        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.local.json"),
+            r#"{"enabledPlugins":{"gh@m":false}}"#,
+        )
+        .unwrap();
 
         // Session hides nothing → gh@m must stay false (inherited), cf@m true.
         let map = resolve_enabled_plugins(&dir, &[], &[]);
@@ -238,13 +258,22 @@ mod tests {
                 "gh@m":[{"scope":"user"}],
                 "sp@m":[{"scope":"user"}]
             }}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Global disables gh@m.
-        std::fs::write(dir.join("settings.local.json"), r#"{"enabledPlugins":{"gh@m":false}}"#).unwrap();
+        std::fs::write(
+            dir.join("settings.local.json"),
+            r#"{"enabledPlugins":{"gh@m":false}}"#,
+        )
+        .unwrap();
 
         // forced_on=[gh@m]: must emit true even though globally disabled.
         let map = resolve_enabled_plugins(&dir, &[], &["gh@m".to_string()]);
-        assert_eq!(map.get("gh@m"), Some(&true), "forced-on must override global-off");
+        assert_eq!(
+            map.get("gh@m"),
+            Some(&true),
+            "forced-on must override global-off"
+        );
         assert_eq!(map.get("sp@m"), Some(&true)); // not forced, not hidden → inherit global (on)
     }
 
@@ -254,7 +283,8 @@ mod tests {
         std::fs::write(
             dir.join("plugins").join("installed_plugins.json"),
             r#"{"version":2,"plugins":{"gh@m":[{"scope":"user"}]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // forced_on AND hidden for the same plugin: forced_on wins.
         let map = resolve_enabled_plugins(&dir, &["gh@m".to_string()], &["gh@m".to_string()]);
         assert_eq!(map.get("gh@m"), Some(&true), "forced-on must beat hidden");

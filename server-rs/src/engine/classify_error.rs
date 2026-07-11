@@ -36,23 +36,46 @@ mod tests {
 
     #[test]
     fn usage_limit_classified() {
-        assert_eq!(classify_claude_error("You've hit your session limit · resets 3:30pm (Pacific)"), "usage_limit");
+        assert_eq!(
+            classify_claude_error("You've hit your session limit · resets 3:30pm (Pacific)"),
+            "usage_limit"
+        );
         assert_eq!(classify_claude_error("usage limit reached"), "usage_limit");
-        assert_eq!(classify_claude_error("your weekly limit is exhausted"), "usage_limit");
+        assert_eq!(
+            classify_claude_error("your weekly limit is exhausted"),
+            "usage_limit"
+        );
         assert_eq!(classify_claude_error("quota exceeded"), "usage_limit");
     }
 
     #[test]
     fn rate_limited_wins_over_usage_even_with_limit_word() {
-        assert_eq!(classify_claude_error("Server is temporarily limiting requests (not your usage limit) Rate limited"), "rate_limited");
-        assert_eq!(classify_claude_error("overloaded, try again"), "rate_limited");
-        assert_eq!(classify_claude_error("HTTP 429 Too Many Requests"), "rate_limited");
-        assert_eq!(classify_claude_error("503 Service Unavailable"), "rate_limited");
+        assert_eq!(
+            classify_claude_error(
+                "Server is temporarily limiting requests (not your usage limit) Rate limited"
+            ),
+            "rate_limited"
+        );
+        assert_eq!(
+            classify_claude_error("overloaded, try again"),
+            "rate_limited"
+        );
+        assert_eq!(
+            classify_claude_error("HTTP 429 Too Many Requests"),
+            "rate_limited"
+        );
+        assert_eq!(
+            classify_claude_error("503 Service Unavailable"),
+            "rate_limited"
+        );
     }
 
     #[test]
     fn anything_else_is_generic_claude_error() {
-        assert_eq!(classify_claude_error("some random tool failure"), "claude_error");
+        assert_eq!(
+            classify_claude_error("some random tool failure"),
+            "claude_error"
+        );
         assert_eq!(classify_claude_error(""), "claude_error");
     }
 }

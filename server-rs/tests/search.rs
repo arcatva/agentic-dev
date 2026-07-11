@@ -9,16 +9,16 @@
 //!   `{ "query": "...", "results": [{ "session": {...}, "score": ..., "matches": [...] }] }`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AO};
+use std::sync::Arc;
 
 use agentic_dev_server::api;
 use agentic_dev_server::api::auth::issue_token;
 use agentic_dev_server::api::throttle::LoginThrottle;
+use agentic_dev_server::engine::store::{CreateInput, Store};
 use agentic_dev_server::engine::transcript::TranscriptCache;
 use agentic_dev_server::engine::Engine;
 use agentic_dev_server::engine::EngineConfig;
-use agentic_dev_server::engine::store::{CreateInput, Store};
 use agentic_dev_server::AppState;
 
 use axum::body::Body;
@@ -47,7 +47,11 @@ fn tmp_dir(tag: &str) -> PathBuf {
 
 async fn make_state() -> AppState {
     let dir = tmp_dir("state");
-    let store = Arc::new(Store::open(dir.join("db.sqlite"), dir.join("logs")).await.unwrap());
+    let store = Arc::new(
+        Store::open(dir.join("db.sqlite"), dir.join("logs"))
+            .await
+            .unwrap(),
+    );
     let transcript = Arc::new(TranscriptCache::new(8 * 1024 * 1024));
     let cfg = agentic_dev_server::Config::for_test("s3cret", "pw");
     let engine_cfg = EngineConfig {
@@ -75,14 +79,20 @@ async fn make_state() -> AppState {
         title_generator: std::sync::Arc::new(NoopTitleGenerator),
         retitle_enabled: false,
     };
-    let engine = Arc::new(Engine::with_store(engine_cfg, store.clone(), Some(transcript.clone())));
+    let engine = Arc::new(Engine::with_store(
+        engine_cfg,
+        store.clone(),
+        Some(transcript.clone()),
+    ));
     AppState {
         config: Arc::new(cfg),
         throttle: Arc::new(Mutex::new(LoginThrottle::default())),
         store,
         transcript,
         engine,
-        usage_cache: Arc::new(Mutex::new(agentic_dev_server::api::state::UsageCache::default())),
+        usage_cache: Arc::new(Mutex::new(
+            agentic_dev_server::api::state::UsageCache::default(),
+        )),
         usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
     }
@@ -94,7 +104,10 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
 }
 
 fn auth_header(secret: &str) -> String {
-    format!("Bearer {}", issue_token(secret, 3600, agentic_dev_server::util::now_secs()))
+    format!(
+        "Bearer {}",
+        issue_token(secret, 3600, agentic_dev_server::util::now_secs())
+    )
 }
 
 #[tokio::test]
@@ -109,7 +122,11 @@ async fn search_missing_q_returns_400() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing `q` must be 400");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "missing `q` must be 400"
+    );
     let v = body_json(resp).await;
     assert_eq!(v["error"], "missing query");
 }
@@ -126,7 +143,11 @@ async fn search_empty_q_returns_400() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "empty `q` must be 400");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "empty `q` must be 400"
+    );
     let v = body_json(resp).await;
     assert_eq!(v["error"], "missing query");
 }
@@ -172,20 +193,37 @@ async fn search_valid_q_returns_200_with_response_shape() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "valid `q` must be 200");
     let v = body_json(resp).await;
-    assert_eq!(v["query"], "routing", "response must echo the trimmed query");
+    assert_eq!(
+        v["query"], "routing",
+        "response must echo the trimmed query"
+    );
     let results = v["results"].as_array().expect("results must be an array");
-    assert!(!results.is_empty(), "session with prompt containing 'routing' must match");
+    assert!(
+        !results.is_empty(),
+        "session with prompt containing 'routing' must match"
+    );
     let hit = &results[0];
     // Each hit must have { session, score, matches[] } in that shape.
     assert!(hit["session"].is_object(), "hit.session must be an object");
-    assert_eq!(hit["session"]["id"], "s1", "hit.session.id must be the seeded session");
+    assert_eq!(
+        hit["session"]["id"], "s1",
+        "hit.session.id must be the seeded session"
+    );
     assert!(hit["score"].is_number(), "hit.score must be a number");
-    let matches = hit["matches"].as_array().expect("hit.matches must be an array");
-    assert!(!matches.is_empty(), "must surface at least one match for a Tier-A prompt hit");
+    let matches = hit["matches"]
+        .as_array()
+        .expect("hit.matches must be an array");
+    assert!(
+        !matches.is_empty(),
+        "must surface at least one match for a Tier-A prompt hit"
+    );
     let m = &matches[0];
     assert!(m["field"].is_string(), "match.field must be a string");
     assert!(m["snippet"].is_string(), "match.snippet must be a string");
-    assert!(m["lineIndex"].is_number(), "match.lineIndex must be a number");
+    assert!(
+        m["lineIndex"].is_number(),
+        "match.lineIndex must be a number"
+    );
 }
 
 /// No-op title generator for search integration tests: never produces a

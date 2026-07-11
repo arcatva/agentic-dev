@@ -41,7 +41,9 @@ pub fn native_overrides_file_path() -> PathBuf {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agentic-dev").join("native-overrides.json")
+    PathBuf::from(home)
+        .join(".agentic-dev")
+        .join("native-overrides.json")
 }
 
 /// Read the map from `path`. `Ok(empty)` when missing; `Err` when present but unreadable or invalid
@@ -117,7 +119,12 @@ mod tests {
     use super::*;
 
     fn ov(c: f32, p: f32, k: f32, d: &str) -> NativeOverride {
-        NativeOverride { capability: c, priority: p, cost: k, description: d.into() }
+        NativeOverride {
+            capability: c,
+            priority: p,
+            cost: k,
+            description: d.into(),
+        }
     }
 
     #[test]
