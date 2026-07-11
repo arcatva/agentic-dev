@@ -79,3 +79,26 @@ jobs:
         with:
           manifest-path: server-rs/Cargo.toml
           command: check advisories
+
+  # Node SDK bridge: syntax + lint (the bridge is the sole production claude transport but has no
+  # Rust test coverage of its own — this at least gates parse errors and obvious JS mistakes).
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci (bridge, with dev deps)
+        run: npm ci --no-fund --no-audit
+        working-directory: server-rs/sdk-bridge
+      - name: node --check
+        run: npm run check
+        working-directory: server-rs/sdk-bridge
+      - name: eslint
+        run: npm run lint
+        working-directory: server-rs/sdk-bridge
+
