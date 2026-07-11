@@ -1,5 +1,6 @@
-# rustfmt 团队配置（stable 选项，系统工具链即可校验）。
-# import 分组/合并等 unstable 选项需 nightly，暂不启用以保证 stable 上本地与 CI 一致。
+# Team rustfmt config — stable options only, so the system (non-nightly) toolchain can check it.
+# Import grouping/merging and similar options are unstable (nightly-only); they're left out so
+# local `cargo fmt` and CI's `cargo fmt --check` agree on stable.
 edition = "2021"
 max_width = 100
 newline_style = "Unix"
