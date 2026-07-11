@@ -181,10 +181,12 @@ impl Engine {
             ..Default::default()
         };
 
-        store
-            .create(create_input)
-            .await
-            .map_err(|e| format!("store.create: {e}"))?;
+        if let Err(e) = store.create(create_input).await {
+            // Roll back the worktrees/session dir created above so a store failure doesn't leak
+            // them on disk (mirrors fork_session's defensive cleanup on the create path).
+            self.remove_worktrees_best_effort(&repo_specs, &id);
+            return Err(format!("store.create: {e}"));
+        }
 
         // Generate a stable title for the session via the Anthropic HTTP
         // title generator. Fire-and-forget: submit_session returns immediately

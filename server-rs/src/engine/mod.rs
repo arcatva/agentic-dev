@@ -524,6 +524,10 @@ impl Engine {
         state.workflow_delegate_pending.remove(id);
         state.workflow_native_ids.remove(id);
         state.starting.remove(id);
+        // Drop the state guard before taking reconcile_locks so the two locks are never held
+        // together. Otherwise this per-session lock entry leaks as sessions are created/deleted.
+        drop(state);
+        self.0.reconcile_locks.lock().remove(id);
     }
 
     /// Count active concurrency slots (starting + running-non-parked).
