@@ -19,7 +19,7 @@ impl Store {
         if update.is_empty() {
             return Ok(None);
         }
-        let patch = Store::session_update_to_patch(&update);
+        let patch = update.to_patch();
         self.update(id, patch).await?;
         Ok(self.get(id).await?)
     }
@@ -357,80 +357,6 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_session).collect())
-    }
-
-    /// Convert a builder-style `SessionUpdate` into the legacy `SessionPatch`
-    /// so the existing `Store::update(&SessionPatch)` path can persist it.
-    /// Unset fields are dropped; Set fields become `Some(v)`; Clear fields
-    /// become `Some(None)` (the SQL-NULL write sentinel).
-    pub fn session_update_to_patch(u: &SessionUpdate) -> SessionPatch {
-        SessionPatch {
-            status: match &u.status {
-                Field::Set(s) => Some(s.as_str().to_string()),
-                _ => None,
-            },
-            claude_session_id: match &u.claude_session_id {
-                Field::Set(v) => Some(Some(v.clone())),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            cost_usd: match &u.cost_usd {
-                Field::Set(v) => Some(Some(*v)),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            exit_code: match &u.exit_code {
-                Field::Set(v) => Some(Some(*v)),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            error: match &u.error {
-                Field::Set(v) => Some(Some(v.clone())),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            error_kind: match &u.error_kind {
-                Field::Set(v) => Some(Some(v.clone())),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            started_at: match &u.started_at {
-                Field::Set(v) => Some(Some(*v)),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            ended_at: match &u.ended_at {
-                Field::Set(v) => Some(Some(*v)),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-            last_user_message_at: u.last_user_message_at,
-            prompt: u.prompt.clone(),
-            worktree_state: u.worktree_state.clone(),
-            model: u.model.clone(),
-            effort: u.effort.clone(),
-            mode: u.mode.clone(),
-            permission_mode: u.permission_mode.clone(),
-            title_pinned: u.title_pinned,
-            group_id: u
-                .group_id
-                .clone()
-                .map(|gid| {
-                    if gid.is_empty() {
-                        Some(None)
-                    } else {
-                        Some(Some(gid))
-                    }
-                })
-                .unwrap_or(None),
-            unread_event_id: u.unread_event_id,
-            auto_resume: u.auto_resume,
-            auto_resume_at: match &u.auto_resume_at {
-                Field::Set(v) => Some(Some(*v)),
-                Field::Clear => Some(None),
-                Field::Unset => None,
-            },
-        }
     }
 
     pub async fn update(&self, id: &str, patch: SessionPatch) -> Result<(), StoreError> {

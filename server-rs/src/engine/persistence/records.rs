@@ -1,4 +1,3 @@
-use crate::engine::persistence::store::Store;
 use serde::{Deserialize, Serialize};
 
 /// MCP server definition for per-session ad-hoc injection.
@@ -485,12 +484,86 @@ impl SessionUpdate {
             && self.auto_resume_at.is_unset()
     }
 
+    /// Convert a builder-style `SessionUpdate` into the legacy `SessionPatch`
+    /// so the existing `Store::update(&SessionPatch)` path can persist it.
+    /// Unset fields are dropped; Set fields become `Some(v)`; Clear fields
+    /// become `Some(None)` (the SQL-NULL write sentinel).
+    pub fn to_patch(&self) -> SessionPatch {
+        SessionPatch {
+            status: match &self.status {
+                Field::Set(s) => Some(s.as_str().to_string()),
+                _ => None,
+            },
+            claude_session_id: match &self.claude_session_id {
+                Field::Set(v) => Some(Some(v.clone())),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            cost_usd: match &self.cost_usd {
+                Field::Set(v) => Some(Some(*v)),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            exit_code: match &self.exit_code {
+                Field::Set(v) => Some(Some(*v)),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            error: match &self.error {
+                Field::Set(v) => Some(Some(v.clone())),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            error_kind: match &self.error_kind {
+                Field::Set(v) => Some(Some(v.clone())),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            started_at: match &self.started_at {
+                Field::Set(v) => Some(Some(*v)),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            ended_at: match &self.ended_at {
+                Field::Set(v) => Some(Some(*v)),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+            last_user_message_at: self.last_user_message_at,
+            prompt: self.prompt.clone(),
+            worktree_state: self.worktree_state.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            mode: self.mode.clone(),
+            permission_mode: self.permission_mode.clone(),
+            title_pinned: self.title_pinned,
+            group_id: self
+                .group_id
+                .clone()
+                .map(|gid| {
+                    if gid.is_empty() {
+                        Some(None)
+                    } else {
+                        Some(Some(gid))
+                    }
+                })
+                .unwrap_or(None),
+            unread_event_id: self.unread_event_id,
+            auto_resume: self.auto_resume,
+            auto_resume_at: match &self.auto_resume_at {
+                Field::Set(v) => Some(Some(*v)),
+                Field::Clear => Some(None),
+                Field::Unset => None,
+            },
+        }
+    }
+
     /// Convert this builder to a legacy `SessionPatch` (helper for tests +
     /// any future caller that needs the patch form without going through
     /// the engine's transition method). Most callers should use
     /// `Store::apply_update`, which goes through the conversion + persist
     /// path in one call.
     pub fn into_patch(self) -> SessionPatch {
-        Store::session_update_to_patch(&self)
+        self.to_patch()
     }
 }
