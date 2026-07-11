@@ -1,10 +1,20 @@
-# CI: run the Rust test suite (never hits real claude — tests use the fake bridge fixtures).
+# CI: run the Rust test suite (never hits real claude — tests use the fake bridge fixtures),
+# plus format / lint / supply-chain gates.
 name: ci
 
 on:
   push:
     branches: [master]
   pull_request:
+
+# Least privilege: CI only reads the repo. (release.yml keeps its own contents: write.)
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -14,10 +24,58 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to an immutable commit SHA (dtolnay/rust-toolchain master @ 2026-07) for supply-chain
+      # safety; toolchain matches server-rs/rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server-rs
       - name: cargo test
         run: cargo test
         working-directory: server-rs
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+      - name: rustfmt --check
+        run: cargo fmt --check
+        working-directory: server-rs
+      # clippy is warn-only for now (no -D): the tree has an existing backlog and clippy has no
+      # baseline mechanism. Flip to `-D warnings` once the backlog is cleared (B1b).
+      - name: clippy (warn-only)
+        run: cargo clippy --all-targets
+        working-directory: server-rs
+      - name: cargo-deny (licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: server-rs/Cargo.toml
+          command: check licenses bans sources
+
+  # Advisories run separately and never block a PR merge (continue-on-error): a new RustSec
+  # advisory must not redden unrelated PRs — it is an early-warning signal only.
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: cargo-deny (advisories, non-blocking)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: server-rs/Cargo.toml
+          command: check advisories

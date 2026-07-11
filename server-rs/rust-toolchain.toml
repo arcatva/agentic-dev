@@ -1,0 +1,6 @@
+# 钉工具链：让每个开发者 / CI / worktree 用同一编译器，并确立 MSRV 基线。
+# 有意升级时改 channel（同时更新 CI 里 dtolnay/rust-toolchain 的 toolchain 输入）。
+# 注：本机为系统 rust（无 rustup）时该文件被忽略，直接用系统工具链——版本一致即可。
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
