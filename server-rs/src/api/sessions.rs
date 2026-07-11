@@ -684,7 +684,74 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 #[derive(Deserialize, Default)]
 pub struct FileQuery { pub path: Option<String> }
 
-pub async fn file_route(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FileQuery>) -> Response {
+/// Strong ETag derived from file size + mtime — changes whenever the file is rewritten, which is
+/// what the client's If-Range needs to detect "the file changed between my first attempt and this
+/// resume" (stale resume must restart from scratch, not stitch mismatched halves).
+fn file_etag(meta: &std::fs::Metadata) -> String {
+    use std::time::UNIX_EPOCH;
+    let mt = meta.modified().ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    format!("\"{}-{}.{}\"", meta.len(), mt.as_secs(), mt.subsec_nanos())
+}
+
+/// What a `Range` header (plus optional `If-Range`) means for a file of `len` bytes.
+#[derive(Debug, PartialEq)]
+enum RangeOutcome {
+    /// No/ignored range → serve the whole file with 200.
+    Full,
+    /// Serve `start..=end` with 206.
+    Slice { start: u64, end: u64 },
+    /// Range is syntactically valid but lies past EOF → 416.
+    Unsatisfiable,
+}
+
+/// Parses a single-range `Range: bytes=…` header per RFC 9110. Malformed specs, non-bytes units,
+/// and multi-ranges are IGNORED (→ Full), not rejected — that is what the RFC prescribes and it
+/// keeps every previously-working client working. An `If-Range` that does not match the current
+/// ETag also degrades to Full: the file changed, so a resume would corrupt the client's copy.
+fn parse_range(header: Option<&str>, if_range: Option<&str>, etag: &str, len: u64) -> RangeOutcome {
+    let Some(h) = header else { return RangeOutcome::Full };
+    if let Some(ir) = if_range {
+        if ir != etag { return RangeOutcome::Full; }
+    }
+    let Some(spec) = h.strip_prefix("bytes=") else { return RangeOutcome::Full };
+    let spec = spec.trim();
+    if spec.contains(',') { return RangeOutcome::Full; } // multi-range: serve full instead
+    let Some((a, b)) = spec.split_once('-') else { return RangeOutcome::Full };
+    match (a, b) {
+        ("", "") => RangeOutcome::Full,
+        // suffix form "-N": the last N bytes
+        ("", suf) => match suf.parse::<u64>() {
+            Ok(0) => RangeOutcome::Unsatisfiable,
+            Ok(n) if len > 0 => RangeOutcome::Slice { start: len.saturating_sub(n), end: len - 1 },
+            Ok(_) => RangeOutcome::Unsatisfiable, // suffix of an empty file
+            Err(_) => RangeOutcome::Full,
+        },
+        // open form "S-": from S to EOF
+        (s, "") => match s.parse::<u64>() {
+            Ok(start) if start < len => RangeOutcome::Slice { start, end: len - 1 },
+            Ok(_) => RangeOutcome::Unsatisfiable,
+            Err(_) => RangeOutcome::Full,
+        },
+        // bounded form "S-E", end clamped to EOF
+        (s, e) => match (s.parse::<u64>(), e.parse::<u64>()) {
+            (Ok(start), Ok(end)) if start <= end && start < len =>
+                RangeOutcome::Slice { start, end: end.min(len - 1) },
+            (Ok(start), Ok(end)) if start <= end && start >= len => RangeOutcome::Unsatisfiable,
+            _ => RangeOutcome::Full, // start > end or unparsable → malformed → ignore
+        },
+    }
+}
+
+pub async fn file_route(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<FileQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use axum::body::Body;
+    use axum::http::header;
     let Some(s) = st.engine.get(&id).await else {
         return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response();
     };
@@ -700,18 +767,50 @@ pub async fn file_route(State(st): State<AppState>, Path(id): Path<String>, Quer
     if !meta.is_file() {
         return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response();
     }
-    let Ok(bytes) = tokio::fs::read(&full).await else {
+    let len = meta.len();
+    let etag = file_etag(&meta);
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let if_range = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok());
+    let (status, start, span) = match parse_range(range, if_range, &etag, len) {
+        RangeOutcome::Full => (StatusCode::OK, 0u64, len),
+        RangeOutcome::Slice { start, end } => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
+        RangeOutcome::Unsatisfiable => {
+            return match axum::response::Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(Body::empty())
+            {
+                Ok(r) => r,
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+            };
+        }
+    };
+    // Stream from disk instead of buffering the whole file: a 44 MB APK no longer costs 44 MB of
+    // RAM per in-flight download, and the first bytes hit the wire immediately.
+    let Ok(mut file) = tokio::fs::File::open(&full).await else {
         return (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response();
     };
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"seek failed"}))).into_response();
+        }
+    }
+    use tokio::io::AsyncReadExt;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(span)));
     let filename = full.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    use axum::http::header;
-    use axum::body::Body;
-    match axum::response::Response::builder()
+    let mut builder = axum::response::Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, mime_for(&full))
         .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{filename}\""))
-        .header(header::CONTENT_LENGTH, meta.len())
-        .body(Body::from(bytes))
-    {
+        .header(header::CONTENT_LENGTH, span)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, etag);
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{}/{len}", start + span - 1));
+    }
+    match builder.body(body) {
         Ok(r) => r,
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -1229,6 +1328,143 @@ mod tests {
         let (s2, _b) = oneshot_req(st.clone(), Request::get(format!("/api/sessions/{id}/file?path=../../etc/passwd"))
             .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
         assert_eq!(s2, StatusCode::NOT_FOUND);
+    }
+
+    /// Seed a session whose worktree contains one file; returns the session id.
+    async fn seed_file_session(st: &AppState, id: &str, name: &str, contents: &[u8]) -> String {
+        let wt = st.config.worktrees_root.join(id);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(name), contents).unwrap();
+        st.store.create(crate::engine::store::CreateInput {
+            id: id.into(), repos: vec![], skills: vec![], prompt: "p".into(),
+            worktree_path: Some(wt.to_string_lossy().into_owned()), branch: Some("b".into()),
+            ..Default::default()
+        }).await.unwrap();
+        id.to_string()
+    }
+
+    async fn file_req(st: &AppState, id: &str, extra: &[(&str, &str)]) -> axum::response::Response {
+        let mut req = Request::get(format!("/api/sessions/{id}/file?path=ten.bin"))
+            .header("authorization", auth(st));
+        for (k, v) in extra { req = req.header(*k, *v); }
+        crate::api::app(st.clone()).oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    /// Full (un-ranged) downloads must now advertise resumability: Accept-Ranges + a stable ETag,
+    /// alongside the existing explicit Content-Length.
+    #[tokio::test]
+    async fn file_full_download_advertises_resume_headers() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-full", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-full", &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("accept-ranges").and_then(|v| v.to_str().ok()), Some("bytes"));
+        let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string);
+        assert!(etag.is_some(), "full download must carry an ETag for later If-Range resumes");
+        assert_eq!(resp.headers().get("content-length").unwrap(), "10");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"0123456789");
+        // The ETag is stable across requests for an unchanged file.
+        let again = file_req(&st, "s-rng-full", &[]).await;
+        assert_eq!(again.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string), etag);
+    }
+
+    #[tokio::test]
+    async fn file_range_bounded_returns_206_slice() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-b", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-b", &[("range", "bytes=2-5")]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes 2-5/10"));
+        assert_eq!(resp.headers().get("content-length").unwrap(), "4");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"2345");
+    }
+
+    #[tokio::test]
+    async fn file_range_open_ended_returns_tail() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-o", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-o", &[("range", "bytes=4-")]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes 4-9/10"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"456789");
+    }
+
+    #[tokio::test]
+    async fn file_range_suffix_returns_last_n() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-s", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-s", &[("range", "bytes=-3")]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes 7-9/10"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"789");
+    }
+
+    /// A bounded range whose end runs past EOF is clamped to the last byte (not rejected).
+    #[tokio::test]
+    async fn file_range_end_clamped_to_eof() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-clamp", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-clamp", &[("range", "bytes=5-100")]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes 5-9/10"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"56789");
+    }
+
+    /// A suffix larger than the file means "the whole file" (RFC 9110), still as a 206.
+    #[tokio::test]
+    async fn file_range_suffix_larger_than_file_returns_whole() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-bigsuf", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-bigsuf", &[("range", "bytes=-100")]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes 0-9/10"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn file_range_past_eof_returns_416() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-416", "ten.bin", b"0123456789").await;
+        let resp = file_req(&st, "s-rng-416", &[("range", "bytes=10-")]).await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers().get("content-range").and_then(|v| v.to_str().ok()), Some("bytes */10"));
+    }
+
+    /// Malformed or multi-range headers are ignored per RFC 9110 — serve the full 200.
+    #[tokio::test]
+    async fn file_range_malformed_or_multi_ignored() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-bad", "ten.bin", b"0123456789").await;
+        for h in ["bytes=abc", "bytes=5-2", "bytes=0-1,3-4", "chunks=0-1", "bytes=-"] {
+            let resp = file_req(&st, "s-rng-bad", &[("range", h)]).await;
+            assert_eq!(resp.status(), StatusCode::OK, "range header {h:?} must fall back to full body");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&body[..], b"0123456789");
+        }
+    }
+
+    /// If-Range guards a resume: matching ETag → 206 slice; stale ETag (file changed since the
+    /// first attempt) → full 200 so the client can't stitch mismatched halves together.
+    #[tokio::test]
+    async fn file_if_range_match_resumes_mismatch_restarts() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-ir", "ten.bin", b"0123456789").await;
+        let etag = file_req(&st, "s-rng-ir", &[]).await
+            .headers().get("etag").and_then(|v| v.to_str().ok()).unwrap().to_string();
+        let hit = file_req(&st, "s-rng-ir", &[("range", "bytes=8-"), ("if-range", etag.as_str())]).await;
+        assert_eq!(hit.status(), StatusCode::PARTIAL_CONTENT);
+        let body = hit.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"89");
+        let miss = file_req(&st, "s-rng-ir", &[("range", "bytes=8-"), ("if-range", "\"stale\"")]).await;
+        assert_eq!(miss.status(), StatusCode::OK);
+        let body = miss.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"0123456789");
     }
 
     #[tokio::test]
