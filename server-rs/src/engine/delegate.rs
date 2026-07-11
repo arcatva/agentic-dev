@@ -793,7 +793,8 @@ impl super::Engine {
         // subscription (no overlay); registered picks run cheap via their endpoint overlay.
         // Native candidates live in a local owned Vec; registered providers stay as references (no
         // clone). `candidates` borrows both.
-        let native_candidates = crate::engine::providers::native_claude_candidates();
+        let native_overrides = crate::engine::native_overrides::load_map();
+        let native_candidates = crate::engine::providers::native_claude_candidates(&native_overrides);
         let candidates: Vec<&crate::engine::providers::Provider> = registry
             .providers
             .iter()

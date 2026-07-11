@@ -12,6 +12,7 @@
 //!     cheapest registered provider. No difficulty heuristic.
 #![allow(dead_code)]
 
+use crate::engine::native_overrides::OverrideMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -393,49 +394,88 @@ pub fn native_claude_models() -> &'static [ClaudeModel] {
     CLAUDE_MODELS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Rough routing metrics `(capability, cost)` per model family, 0..1. This is routing METADATA
-/// only, not a filter — a model from an unrecognized family still appears in the catalog and the
-/// selector, it just gets middle-of-the-road defaults.
-pub(crate) fn family_metrics(id: &str) -> (f32, f32) {
+/// Default scheduling priority for a native Claude candidate with no family override.
+pub(crate) const DEFAULT_NATIVE_PRIORITY: f32 = 0.5;
+
+/// Family bucket for a Claude model id — the single source of truth for classification.
+pub(crate) fn family_of(id: &str) -> &'static str {
     if id.contains("fable") || id.contains("mythos") {
-        (0.99, 1.0)
+        "fable"
     } else if id.contains("opus") {
-        (0.97, 0.9)
+        "opus"
     } else if id.contains("sonnet") {
-        (0.85, 0.5)
+        "sonnet"
     } else if id.contains("haiku") {
-        (0.60, 0.3)
+        "haiku"
     } else {
-        (0.85, 0.6)
+        "other"
     }
 }
 
-/// Native Claude candidates for session-model selection and delegate routing: one Provider per
-/// discovered model, full model id as both `name` and `model` (the claude CLI accepts full ids).
-/// Returns an empty vec when the Anthropic Models API is unreachable.
-pub fn native_claude_candidates() -> Vec<Provider> {
-    native_claude_models()
-        .iter()
-        .map(|m| {
-            let (capability, cost) = family_metrics(&m.id);
-            Provider {
-                name: m.id.clone(),
-                base_url: String::new(),
-                api_key: String::new(),
-                api_key_env: None,
-                model: m.id.clone(),
-                protocol: Protocol::Anthropic,
-                capability,
-                description: Some(format!(
-                    "Anthropic {} — native (subscription)",
-                    m.display_name
-                )),
-                priority: 0.5,
-                cost,
-                router: false,
+/// Default (capability, cost) for a family — the values `family_metrics` returned before.
+pub(crate) fn family_default_metrics(family: &str) -> (f32, f32) {
+    match family {
+        "fable" => (0.99, 1.0),
+        "opus" => (0.97, 0.9),
+        "sonnet" => (0.85, 0.5),
+        "haiku" => (0.60, 0.3),
+        _ => (0.85, 0.6),
+    }
+}
+
+/// Rough routing metrics `(capability, cost)` per model id. Kept for `native_model_entries`
+/// (the `/api/models` picker); now derived from the family classifier.
+pub(crate) fn family_metrics(id: &str) -> (f32, f32) {
+    family_default_metrics(family_of(id))
+}
+
+/// Native Claude candidates for delegate routing: ONE per family (the newest discovered model),
+/// with per-family override metrics layered on top of the family defaults. Injecting `overrides`
+/// (rather than reading the file here) keeps this hermetic — the only production caller
+/// (`delegate.rs`) loads the map at the call boundary; tests pass an empty map.
+pub fn native_claude_candidates(overrides: &OverrideMap) -> Vec<Provider> {
+    candidates_from(native_claude_models(), overrides)
+}
+
+/// Pure core of [native_claude_candidates] — takes the model list explicitly so tests need no
+/// global `OnceLock` or file.
+fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provider> {
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in models {
+        let fam = family_of(&m.id);
+        // One routing candidate per family: keep the newest (models are newest-first).
+        if !seen.insert(fam) {
+            continue;
+        }
+        let default_desc = format!("Anthropic {} — native (subscription)", m.display_name);
+        let (capability, priority, cost, description) = match overrides.get(fam) {
+            Some(o) => (
+                o.capability,
+                o.priority,
+                o.cost,
+                if o.description.is_empty() { default_desc } else { o.description.clone() },
+            ),
+            None => {
+                let (c, k) = family_default_metrics(fam);
+                (c, DEFAULT_NATIVE_PRIORITY, k, default_desc)
             }
-        })
-        .collect()
+        };
+        out.push(Provider {
+            name: m.id.clone(),
+            base_url: String::new(),
+            api_key: String::new(),
+            api_key_env: None,
+            model: m.id.clone(),
+            protocol: Protocol::Anthropic,
+            capability,
+            description: Some(description),
+            priority,
+            cost,
+            router: false,
+        });
+    }
+    out
 }
 
 /// True for a native Claude candidate (from `native_claude_candidates`): an empty base_url means it
@@ -586,6 +626,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn family_of_classifies_and_metrics_are_unchanged() {
+        assert_eq!(family_of("claude-opus-4-8"), "opus");
+        assert_eq!(family_of("claude-sonnet-4-6"), "sonnet");
+        assert_eq!(family_of("claude-haiku-4-5-20251001"), "haiku");
+        assert_eq!(family_of("claude-fable-5"), "fable");
+        assert_eq!(family_of("claude-mythos-1"), "fable");
+        assert_eq!(family_of("claude-3-5-something"), "other");
+        // family_metrics must return exactly what it returned before the refactor
+        assert_eq!(family_metrics("claude-opus-4-8"), (0.97, 0.9));
+        assert_eq!(family_metrics("claude-fable-5"), (0.99, 1.0));
+        assert_eq!(family_metrics("claude-sonnet-4-6"), (0.85, 0.5));
+        assert_eq!(family_metrics("claude-haiku-4-5"), (0.60, 0.3));
+        assert_eq!(family_metrics("claude-weird-9"), (0.85, 0.6));
+        assert_eq!(DEFAULT_NATIVE_PRIORITY, 0.5);
+    }
+
+    #[test]
+    fn candidates_collapse_to_newest_and_inherit_family_override() {
+        // `OverrideMap` is already in scope via `use super::*` (module-level import from Step 3);
+        // only `NativeOverride` needs importing here.
+        use crate::engine::native_overrides::NativeOverride;
+        // newest-first, two opus siblings + one haiku
+        let models = vec![
+            ClaudeModel { id: "claude-opus-4-9".into(), display_name: "Claude Opus 4.9".into() },
+            ClaudeModel { id: "claude-opus-4-8".into(), display_name: "Claude Opus 4.8".into() },
+            ClaudeModel { id: "claude-haiku-5".into(), display_name: "Claude Haiku 5".into() },
+        ];
+        let mut ov = OverrideMap::new();
+        ov.insert("opus".into(), NativeOverride { capability: 0.9, priority: 0.85, cost: 0.2, description: String::new() });
+
+        let c = candidates_from(&models, &ov);
+        // opus collapses to the NEWEST (4-9); haiku stays → 2 candidates
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().any(|p| p.model == "claude-opus-4-9"));
+        assert!(!c.iter().any(|p| p.model == "claude-opus-4-8"));
+        // the opus family override is inherited by the NEW id (family keying)
+        let opus = c.iter().find(|p| p.model == "claude-opus-4-9").unwrap();
+        assert!((opus.priority - 0.85).abs() < f32::EPSILON);
+        assert!((opus.capability - 0.9).abs() < f32::EPSILON);
+        assert!((opus.cost - 0.2).abs() < f32::EPSILON);
+        // empty override description → generated per-model description
+        assert_eq!(opus.description.as_deref(), Some("Anthropic Claude Opus 4.9 — native (subscription)"));
+        // non-overridden family keeps defaults + priority 0.5
+        let haiku = c.iter().find(|p| p.model == "claude-haiku-5").unwrap();
+        assert!((haiku.priority - DEFAULT_NATIVE_PRIORITY).abs() < f32::EPSILON);
+        assert_eq!((haiku.capability, haiku.cost), family_default_metrics("haiku"));
+    }
+
+    #[test]
     fn oauth_token_detection() {
         // Subscription OAuth tokens → Bearer path; API keys and junk → x-api-key path.
         assert!(is_oauth_token("sk-ant-oat01-abcdef"));
@@ -650,13 +739,14 @@ mod tests {
     #[test]
     fn native_claude_candidates_compete_as_routing_candidates() {
         seed_models();
-        let c = native_claude_candidates();
-        // EVERY discovered model becomes a candidate — no tier bucketing, no latest-per-family cap.
-        assert_eq!(c.len(), 5);
+        let c = native_claude_candidates(&Default::default());
+        // one candidate per family (newest): fable, opus, sonnet, haiku.
+        assert_eq!(c.len(), 4);
         // all native: no base_url / key → run on the subscription with no provider overlay
         assert!(c.iter().all(|p| is_native(p) && p.base_url.is_empty() && p.resolved_key().is_empty()));
         // full model ids, not tier keywords
         assert!(c.iter().any(|p| p.model == "claude-opus-4-8"));
+        assert!(!c.iter().any(|p| p.model == "claude-opus-4-7"));
         assert!(c.iter().any(|p| p.model == "claude-fable-5"));
         // substring-tolerant matching resolves the router's pick to a native candidate
         assert!(c.iter().any(|p| p.matches("sonnet")));
@@ -690,7 +780,7 @@ mod tests {
             api_key_env: None, model: "claude-3-5-haiku-latest".into(), protocol: Protocol::Anthropic,
             capability: 0.5, description: None, priority: 0.5, cost: 0.5, router: false,
         };
-        let native = native_claude_candidates();
+        let native = native_claude_candidates(&Default::default());
         // candidate order mirrors run_delegate: registered FIRST, then native.
         let cands: Vec<&Provider> = std::iter::once(&registered).chain(native.iter()).collect();
         // bare "haiku" → the NATIVE haiku (newest discovered), not the substring-matching registered one.

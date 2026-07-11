@@ -450,7 +450,7 @@ mod tests {
         // capable AND higher-priority must win deterministically.
         let mk = |cap: f32| {
             let mut cat = vec![p("minimax", "MiniMax-M3", cap, 1.0, 0.3, Protocol::Anthropic, "mk")];
-            cat.extend(crate::engine::providers::native_claude_candidates());
+            cat.extend(crate::engine::providers::native_claude_candidates(&Default::default()));
             cat
         };
         let router = p("minimax", "MiniMax-M3", 1.0, 1.0, 0.3, Protocol::Anthropic, "mk");
@@ -617,7 +617,7 @@ mod tests {
         crate::engine::providers::seed_claude_models_for_tests();
         // catalog = one registered cheap model + the native Claude tiers; the router picks Claude.
         let mut cat = vec![p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk")];
-        cat.extend(crate::engine::providers::native_claude_candidates());
+        cat.extend(crate::engine::providers::native_claude_candidates(&Default::default()));
         let cands: Vec<&Provider> = cat.iter().collect();
         let ts = vec![DelegateTask { prompt: "a hard architecture/reasoning task".into(), role: "".into(), model: None, phase: None, write: false }];
         let router = p("minimax", "MiniMax-M3", 0.5, 0.3, 0.3, Protocol::Anthropic, "mk");
