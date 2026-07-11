@@ -3423,33 +3423,40 @@ The new session is now active. Awaiting the user's next message.",
 // resolving — this was a behavior-preserving regroup of a previously-flat directory. The API
 // layer (`api::sessions`) reaches `native_transcript` etc. through these re-exports; the engine
 // itself stays axum-free.
-pub mod config;
-pub mod extensions;
-pub mod misc;
-pub mod model;
-pub mod persistence;
-pub mod runtime;
-pub mod session;
-pub mod streaming;
-pub mod titling;
-pub mod transcripts;
-pub mod vcs;
-pub mod workflow;
+// The grouping subdirectories are `pub(crate)` — only the flat re-exports below are the engine's
+// public surface, so the internal directory layout is not exposed as public API.
+pub(crate) mod config;
+pub(crate) mod extensions;
+pub(crate) mod misc;
+pub(crate) mod model;
+pub(crate) mod persistence;
+pub(crate) mod runtime;
+pub(crate) mod session;
+pub(crate) mod streaming;
+pub(crate) mod titling;
+pub(crate) mod transcripts;
+pub(crate) mod vcs;
+pub(crate) mod workflow;
 
 pub use config::{global_settings, session_guide, templates, user_config};
 pub use extensions::{components, plugin_cli, plugins, skill_install, skills};
-pub use misc::{classify_error, error, mentions, push, search};
+pub use misc::{classify_error, mentions, push, search};
 pub use model::{litellm, native_overrides, providers, router};
 pub use persistence::{atomic_write, store};
 pub use runtime::{runner, sdk_runner, spawner};
-pub use session::{
-    auto_resume, groups, lifecycle, recover, resume_gate, status, transition, watchdog,
-};
+pub use session::{auto_resume, groups, lifecycle, status, transition};
 pub use streaming::stream;
 pub use titling::{title, title_client};
-pub use transcripts::{native_transcript, tailer, transcript, transcript_filter, usage};
-pub use vcs::{diff, repos, structured_diff, worktree};
+pub use transcripts::{tailer, transcript, transcript_filter, usage};
+pub use vcs::{repos, structured_diff, worktree};
 pub use workflow::{delegate, workflows};
+
+// These were private / `pub(crate)` before the regroup — keep them crate-only (don't widen to the
+// public API just because they moved into a subdir).
+pub(crate) use misc::error;
+pub(crate) use session::{recover, resume_gate, watchdog};
+pub(crate) use transcripts::native_transcript;
+pub(crate) use vcs::diff;
 
 pub use misc::error::EngineError;
 
