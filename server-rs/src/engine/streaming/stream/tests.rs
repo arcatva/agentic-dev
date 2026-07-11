@@ -3,7 +3,6 @@ use serde_json::json;
 
 #[test]
 fn to_wire_emits_kind_tagged_camelcase() {
-    use serde_json::json;
     // text with no parent → parentToolUseId must be JSON null (present, not omitted).
     let ev = ClaudeEvent::Text {
         text: "hi".into(),
