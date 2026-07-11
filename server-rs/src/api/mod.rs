@@ -96,6 +96,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/models", get(misc::models_get))
         .route("/api/providers", get(misc::providers_get).post(misc::providers_post))
         .route("/api/providers/{name}", delete(misc::providers_delete))
+        .route("/api/native-models", get(misc::native_models_get))
+        .route("/api/native-models/{family}", post(misc::native_models_post).delete(misc::native_models_delete))
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(COMPRESS_MIN_BYTES)));
 
     compressed
