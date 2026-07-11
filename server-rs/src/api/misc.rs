@@ -965,8 +965,11 @@ pub async fn skills_catalog_route(
     State(st): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<CatalogQuery>,
 ) -> Response {
-    let (skills, errors) =
+    let (mut skills, errors) =
         crate::engine::skill_install::fetch_catalog(&st.config.claude_config_base, q.refresh).await;
+    // Per-request (never cached): compare each entry's content fingerprint against the
+    // installed copy's provenance metadata so the app can show Update only when one exists.
+    crate::engine::skill_install::annotate_update_available(&mut skills, &st.config.skills_dir);
     Json(json!({ "skills": skills, "errors": errors })).into_response()
 }
 

@@ -36,7 +36,22 @@ pub struct CatalogEntry {
     /// The store source (as configured) this entry came from — for display/grouping.
     #[serde(rename = "sourceRepo")]
     pub source_repo: String,
+    /// Git TREE sha of the skill's directory at scan time — the content fingerprint used for
+    /// update detection. Server-internal (compared against the installed metadata); not sent.
+    #[serde(skip)]
+    pub tree_sha: String,
+    /// Whether the store version differs from the INSTALLED one. `None` = unknown (not
+    /// installed, or installed without metadata — e.g. authored by hand / pre-metadata
+    /// installs). Filled per request by [annotate_update_available] — never cached, since it
+    /// depends on local install state.
+    #[serde(rename = "updateAvailable", skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
+
+/// Name of the provenance metadata written INSIDE an installed skill's directory. Records
+/// where the skill came from and its content fingerprint so the store can tell whether an
+/// update actually exists. A file by this name coming from the REPO itself is discarded.
+const METADATA_FILE: &str = ".agentic-source.json";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GithubRef {
@@ -395,6 +410,68 @@ pub fn write_skill_files(
     result
 }
 
+/// Map every DIRECTORY in a recursive tree listing to its git tree sha ("" = the root,
+/// whose sha is the listing's own `sha`). A directory's tree sha changes iff any content
+/// under it changes — the content fingerprint for update detection.
+fn dir_tree_shas(tree: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(root) = tree.get("sha").and_then(|s| s.as_str()) {
+        out.insert(String::new(), root.to_string());
+    }
+    if let Some(entries) = tree.get("tree").and_then(|t| t.as_array()) {
+        for e in entries {
+            if e.get("type").and_then(|t| t.as_str()) != Some("tree") {
+                continue;
+            }
+            if let (Some(p), Some(sha)) = (
+                e.get("path").and_then(|p| p.as_str()),
+                e.get("sha").and_then(|s| s.as_str()),
+            ) {
+                out.insert(p.to_string(), sha.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Serialized provenance for an installed skill (see [METADATA_FILE]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct InstallMeta {
+    source: String,
+    commit: String,
+    #[serde(rename = "treeSha", default)]
+    tree_sha: String,
+}
+
+/// Do two source strings refer to the same install target (owner/repo/path — the branch is
+/// irrelevant for identity)? False when either fails to parse.
+fn same_install_target(a: &str, b: &str) -> bool {
+    match (source_key(a), source_key(b)) {
+        (Some(x), Some(y)) => x.owner == y.owner && x.repo == y.repo && x.path == y.path,
+        _ => false,
+    }
+}
+
+/// Fill [CatalogEntry::update_available] for entries whose installed copy carries provenance
+/// metadata FOR THE SAME SOURCE: `Some(store fingerprint != installed fingerprint)`.
+/// Entries without matching metadata stay `None` — that covers not-installed, hand-authored,
+/// pre-metadata installs, AND a same-named skill listed by a DIFFERENT source (whose
+/// fingerprint would otherwise always differ and show a bogus Update).
+pub fn annotate_update_available(entries: &mut [CatalogEntry], skills_dir: &Path) {
+    for e in entries.iter_mut() {
+        if e.tree_sha.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(skills_dir.join(&e.name).join(METADATA_FILE)) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_str::<InstallMeta>(&text) else { continue };
+        if !meta.tree_sha.is_empty() && same_install_target(&meta.source, &e.source) {
+            e.update_available = Some(meta.tree_sha != e.tree_sha);
+        }
+    }
+}
+
 /// Parse `description:` out of a SKILL.md frontmatter (same forgiving rules as
 /// [crate::engine::skills::list_skills]: first match wins, missing → empty). Surrounding
 /// quotes are stripped — YAML-quoted descriptions (e.g. every openclaw skill) would
@@ -556,11 +633,21 @@ pub async fn install_from_source(
     if !update && skills_dir.join(&plan.name).exists() {
         return Err(format!("skill '{}' already exists", plan.name));
     }
-    let mut files = Vec::with_capacity(plan.files.len());
+    let mut files = Vec::with_capacity(plan.files.len() + 1);
     for f in &plan.files {
         let bytes = fetch_raw(&client, &raw_url(&gh, &f.repo_path), MAX_FILE_BYTES).await?;
         files.push((f.rel_path.clone(), bytes, f.executable));
     }
+    // Provenance metadata for update detection — a repo-provided file by the same name is
+    // discarded (it would forge the fingerprint); ours lands atomically with the install.
+    files.retain(|(rel, _, _)| rel != METADATA_FILE);
+    let meta = InstallMeta {
+        source: source.trim().to_string(),
+        commit: gh.branch.clone(), // already resolved to the pinned commit sha
+        tree_sha: dir_tree_shas(&tree).get(&gh.path).cloned().unwrap_or_default(),
+    };
+    let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?;
+    files.push((METADATA_FILE.to_string(), meta_bytes, false));
     write_skill_files(skills_dir, &plan.name, &files, update).map_err(|e| e.to_string())?;
     Ok(plan.name)
 }
@@ -752,6 +839,7 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
     }
     let Some(gh) = gh else { return Err(last_err) };
     let tree = fetch_tree(client, &gh).await?;
+    let dir_shas = dir_tree_shas(&tree);
     let tree_entries = tree
         .get("tree")
         .and_then(|t| t.as_array())
@@ -785,6 +873,7 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
             let client = &client;
             let gh = &gh;
             let src = src;
+            let dir_shas = &dir_shas;
             async move {
                 let md_path = if dir.is_empty() {
                     "SKILL.md".to_string()
@@ -809,6 +898,8 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
                         format!("{}/{}/{}", gh.owner, gh.repo, dir)
                     },
                     source_repo: src.to_string(),
+                    tree_sha: dir_shas.get(dir).cloned().unwrap_or_default(),
+                    update_available: None,
                 }
             }
         });
@@ -1095,6 +1186,71 @@ mod tests {
         assert_eq!(normalize_skill_md(&no_name, "x"), no_name);
         let no_fm = b"just markdown".to_vec();
         assert_eq!(normalize_skill_md(&no_fm, "x"), no_fm);
+    }
+
+    #[test]
+    fn dir_tree_shas_maps_root_and_directories() {
+        let tree = serde_json::json!({
+            "sha": "root-sha",
+            "tree": [
+                {"path": "skills", "type": "tree", "sha": "skills-sha"},
+                {"path": "skills/weather", "type": "tree", "sha": "weather-sha"},
+                {"path": "skills/weather/SKILL.md", "type": "blob", "sha": "blob-sha"},
+            ],
+        });
+        let m = dir_tree_shas(&tree);
+        assert_eq!(m.get(""), Some(&"root-sha".to_string()));
+        assert_eq!(m.get("skills/weather"), Some(&"weather-sha".to_string()));
+        assert!(!m.contains_key("skills/weather/SKILL.md"), "blobs are not directories");
+    }
+
+    #[test]
+    fn annotate_update_available_compares_fingerprints() {
+        let dir = tmp();
+        // Installed skill WITH metadata (fingerprint "old").
+        std::fs::create_dir_all(dir.join("tracked")).unwrap();
+        std::fs::write(
+            dir.join("tracked").join(METADATA_FILE),
+            r#"{"source":"o/r/tracked","commit":"c1","treeSha":"old"}"#,
+        ).unwrap();
+        // Installed skill WITHOUT metadata (hand-authored / pre-metadata).
+        std::fs::create_dir_all(dir.join("untracked")).unwrap();
+
+        let entry = |name: &str, sha: &str| CatalogEntry {
+            name: name.into(),
+            description: String::new(),
+            source: format!("o/r/{name}"),
+            source_repo: "o/r".into(),
+            tree_sha: sha.into(),
+            update_available: None,
+        };
+        let mut entries = vec![
+            entry("tracked", "old"),      // same fingerprint → no update
+            entry("untracked", "x"),      // no metadata → unknown
+            entry("not-installed", "y"),  // no dir → unknown
+        ];
+        annotate_update_available(&mut entries, &dir);
+        assert_eq!(entries[0].update_available, Some(false));
+        assert_eq!(entries[1].update_available, None);
+        assert_eq!(entries[2].update_available, None);
+
+        // Upstream moved: store fingerprint differs → update available.
+        let mut moved = vec![entry("tracked", "new")];
+        annotate_update_available(&mut moved, &dir);
+        assert_eq!(moved[0].update_available, Some(true));
+
+        // Same NAME from a DIFFERENT source: fingerprints are incomparable — must stay
+        // unknown, not show a bogus Update against the other source's sha.
+        let mut cross = vec![CatalogEntry {
+            name: "tracked".into(),
+            description: String::new(),
+            source: "other/repo/tracked".into(),
+            source_repo: "other/repo".into(),
+            tree_sha: "different".into(),
+            update_available: None,
+        }];
+        annotate_update_available(&mut cross, &dir);
+        assert_eq!(cross[0].update_available, None);
     }
 
     #[test]
