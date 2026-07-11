@@ -52,7 +52,7 @@ fi
 if [ -f "$HERE/agentic-dev-server" ]; then
     BIN_SRC="$HERE/agentic-dev-server"; BRIDGE_SRC="$HERE"; TPL_DIR="$HERE"
 elif [ -f "$HERE/../server-rs/target/release/agentic-dev-server" ]; then
-    BIN_SRC="$HERE/../server-rs/target/release/agentic-dev-server"; BRIDGE_SRC="$HERE/../server-rs"; TPL_DIR="$HERE"
+    BIN_SRC="$HERE/../server-rs/target/release/agentic-dev-server"; BRIDGE_SRC="$HERE/../server-rs/sdk-bridge"; TPL_DIR="$HERE"
 else
     die "agentic-dev-server binary not found next to install.sh (release tarball) or in ../server-rs/target/release (run \`make build\` first)"
 fi

@@ -10,9 +10,9 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
 
-  # Node SDK bridge (server-rs/sdk-bridge.mjs → @anthropic-ai/claude-agent-sdk).
+  # Node SDK bridge (server-rs/sdk-bridge/sdk-bridge.mjs → @anthropic-ai/claude-agent-sdk).
   - package-ecosystem: npm
-    directory: /server-rs
+    directory: /server-rs/sdk-bridge
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

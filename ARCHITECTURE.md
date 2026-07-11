@@ -33,7 +33,7 @@ UI; the only client is the [Android app](https://github.com/arcatva/agentic-dev-
 - **`server-rs/src/engine/`** — the HTTP-independent core: session lifecycle & queue, the
   sqlite + log-file store, the stream-json parser, git worktree/repo management, provider/model
   routing, workflows, and the runner. Kept free of `axum` so it stays unit-testable in isolation.
-- **`server-rs/sdk-bridge.mjs`** — the per-turn transport. The Rust `SdkRunner` spawns this Node
+- **`server-rs/sdk-bridge/sdk-bridge.mjs`** — the per-turn transport. The Rust `SdkRunner` spawns this Node
   bridge, which drives `claude` through the official Agent SDK and mirrors every SDK message back
   to the session log in stream-json shape. This is what makes in-turn pauses (AskUserQuestion)
   actually wait.

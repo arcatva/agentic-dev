@@ -6,13 +6,13 @@ the server only — the client lives in [`agentic-dev-android`](https://github.c
 ## Prerequisites
 
 - Rust (pinned via `server-rs/rust-toolchain.toml`; `rustup` honors it automatically).
-- Node.js — the per-turn transport is a Node bridge (`server-rs/sdk-bridge.mjs`) using
+- Node.js — the per-turn transport is a Node bridge (`server-rs/sdk-bridge/sdk-bridge.mjs`) using
   `@anthropic-ai/claude-agent-sdk`.
 
 ## Build & test
 
 ```bash
-make build     # runs the bridge's `npm install` (in server-rs/), then `cargo build --release`
+make build     # runs the bridge's `npm install` (in server-rs/sdk-bridge/), then `cargo build --release`
 make test      # = cd server-rs && cargo test — the whole suite (engine + api, in-crate)
 ```
 

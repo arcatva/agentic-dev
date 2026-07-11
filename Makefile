@@ -1,8 +1,8 @@
 # agentic-dev — Rust backend (single binary) + Node SDK bridge deps.
 #
-# `make build` installs the bridge's npm deps (Claude Agent SDK, in server-rs/) and produces
+# `make build` installs the bridge's npm deps (Claude Agent SDK, in server-rs/sdk-bridge/) and produces
 # target/release/agentic-dev-server. The bridge deps are a RUNTIME requirement: the server
-# spawns server-rs/sdk-bridge.mjs per turn, and preflights the SDK at boot.
+# spawns server-rs/sdk-bridge/sdk-bridge.mjs per turn, and preflights the SDK at boot.
 
 SERVER := server-rs
 BIN    := $(SERVER)/target/release/agentic-dev-server
@@ -16,9 +16,9 @@ TARGET  := $(shell rustc -vV | sed -n 's/^host: //p')
 build: bridge-deps
 	cd $(SERVER) && cargo build --release
 
-## bridge-deps: npm install the SDK bridge's runtime deps (server-rs/node_modules)
+## bridge-deps: npm install the SDK bridge's runtime deps (server-rs/sdk-bridge/node_modules)
 bridge-deps:
-	cd $(SERVER) && npm install --omit=dev --no-fund --no-audit --loglevel=error
+	cd $(SERVER)/sdk-bridge && npm install --omit=dev --no-fund --no-audit --loglevel=error
 
 ## test: run the Rust test suite (no external services, never hits real claude)
 test:

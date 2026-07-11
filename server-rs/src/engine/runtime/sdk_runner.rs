@@ -358,8 +358,8 @@ impl Runner for SdkRunner {
 }
 
 /// Default bridge path: `AGENTIC_SDK_BRIDGE` env, else `<dir-of-exe>/sdk-bridge.mjs` (packaged
-/// install: binary and bridge side by side), else `<dir-of-exe>/../../sdk-bridge.mjs`
-/// (repo layout: target/release/<bin> → server-rs/sdk-bridge.mjs).
+/// install: binary and bridge side by side), else `<dir-of-exe>/../../sdk-bridge/sdk-bridge.mjs`
+/// (repo layout: target/release/<bin> → server-rs/sdk-bridge/sdk-bridge.mjs).
 ///
 /// When nothing exists, returns the packaged-layout path anyway so the boot preflight prints an
 /// accurate "SDK bridge script missing: <path>" error (there is no machine-specific fallback).
@@ -375,7 +375,11 @@ pub fn default_bridge_path() -> String {
             }
         }
         // Repo layout: target/release/agentic-dev-server → up to server-rs/
-        if let Some(p) = exe.ancestors().nth(3).map(|d| d.join("sdk-bridge.mjs")) {
+        if let Some(p) = exe
+            .ancestors()
+            .nth(3)
+            .map(|d| d.join("sdk-bridge/sdk-bridge.mjs"))
+        {
             if p.exists() {
                 return p.to_string_lossy().into_owned();
             }
