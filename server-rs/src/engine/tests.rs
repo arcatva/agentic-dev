@@ -6745,3 +6745,20 @@ mod submit_titles_via_generator {
         );
     }
 }
+
+#[tokio::test]
+async fn forget_session_clears_reconcile_lock() {
+    // Teardown must drop the per-session reconcile lock, or reconcile_locks grows without bound
+    // as sessions are created and deleted (a memory leak).
+    let e = test_engine().await;
+    e.0.reconcile_locks.lock().insert(
+        "sess-x".to_string(),
+        std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    );
+    assert!(e.0.reconcile_locks.lock().contains_key("sess-x"));
+    e.forget_session("sess-x");
+    assert!(
+        !e.0.reconcile_locks.lock().contains_key("sess-x"),
+        "forget_session must remove the session's reconcile lock"
+    );
+}
