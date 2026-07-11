@@ -684,15 +684,27 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 #[derive(Deserialize, Default)]
 pub struct FileQuery { pub path: Option<String> }
 
-/// Strong ETag derived from file size + mtime — changes whenever the file is rewritten, which is
-/// what the client's If-Range needs to detect "the file changed between my first attempt and this
-/// resume" (stale resume must restart from scratch, not stitch mismatched halves).
+/// Strong ETag derived from device+inode+size+mtime (Apache's classic FileETag recipe) — changes
+/// whenever the file is rewritten, which is what the client's If-Range needs to detect "the file
+/// changed between my first attempt and this resume" (stale resume must restart from scratch, not
+/// stitch mismatched halves). size+mtime alone can collide when a file is REGENERATED with the
+/// same length and a preserved/coarse timestamp (cp -p, fat mtime granularity); a regenerated
+/// file virtually always gets a new inode, which closes that hole without hashing 44MB per
+/// request. In-place same-size overwrites within one mtime tick remain theoretically ambiguous —
+/// nothing in the outbox flow writes like that.
 fn file_etag(meta: &std::fs::Metadata) -> String {
     use std::time::UNIX_EPOCH;
     let mt = meta.modified().ok()
         .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
         .unwrap_or_default();
-    format!("\"{}-{}.{}\"", meta.len(), mt.as_secs(), mt.subsec_nanos())
+    #[cfg(unix)]
+    let node = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{:x}-{:x}", meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let node = String::from("0");
+    format!("\"{node}-{}-{}.{}\"", meta.len(), mt.as_secs(), mt.subsec_nanos())
 }
 
 /// What a `Range` header (plus optional `If-Range`) means for a file of `len` bytes.
@@ -1367,6 +1379,28 @@ mod tests {
         // The ETag is stable across requests for an unchanged file.
         let again = file_req(&st, "s-rng-full", &[]).await;
         assert_eq!(again.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string), etag);
+    }
+
+    /// Codex review scenario: a file REGENERATED with the same length and a preserved mtime
+    /// (cp -p / coarse timestamps) must still change its ETag — otherwise a client resuming with
+    /// If-Range would stitch old and new halves together. The inode component guarantees this.
+    #[tokio::test]
+    async fn file_etag_changes_when_file_regenerated_with_same_size_and_mtime() {
+        let st = test_state().await;
+        seed_file_session(&st, "s-rng-regen", "ten.bin", b"0123456789").await;
+        let path = st.config.worktrees_root.join("s-rng-regen").join("ten.bin");
+        let etag1 = file_req(&st, "s-rng-regen", &[]).await
+            .headers().get("etag").and_then(|v| v.to_str().ok()).unwrap().to_string();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        // Regenerate: new file, same length, mtime pinned back to the original.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"ABCDEFGHIJ").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(mtime).unwrap();
+        drop(f);
+        let etag2 = file_req(&st, "s-rng-regen", &[]).await
+            .headers().get("etag").and_then(|v| v.to_str().ok()).unwrap().to_string();
+        assert_ne!(etag1, etag2, "regenerated file (same size+mtime) must not keep its ETag");
     }
 
     #[tokio::test]
