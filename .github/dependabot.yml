@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Rust crate (server binary).
+  - package-ecosystem: cargo
+    directory: /server-rs
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  # Node SDK bridge (server-rs/sdk-bridge.mjs → @anthropic-ai/claude-agent-sdk).
+  - package-ecosystem: npm
+    directory: /server-rs
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  # GitHub Actions used by ci.yml / release.yml (keeps pinned action versions fresh).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
