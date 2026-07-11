@@ -15,17 +15,15 @@ use std::collections::BTreeSet;
 
 fn tmp_dir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("agentic-contract-{}-{tag}", std::process::id()));
-    let _ = std::fs::create_dir_all(&d);
+    std::fs::create_dir_all(&d).expect("create temp dir");
     d
 }
 
-fn sorted_keys(v: &serde_json::Value) -> Vec<String> {
-    let mut k: Vec<String> = v
-        .as_object()
+/// Top-level object keys as a set (BTreeSet iterates in sorted order, so the fixture is stable).
+fn extract_keys(v: &serde_json::Value) -> BTreeSet<String> {
+    v.as_object()
         .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default();
-    k.sort();
-    k
+        .unwrap_or_default()
 }
 
 /// Compare the top-level key set of `value` against the committed fixture `<name>.keys.json`.
@@ -33,10 +31,11 @@ fn sorted_keys(v: &serde_json::Value) -> Vec<String> {
 fn assert_contract(name: &str, value: &serde_json::Value) {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/contract");
     let path = format!("{dir}/{name}.keys.json");
-    let actual = sorted_keys(value);
+    let actual = extract_keys(value);
 
     if std::env::var("UPDATE_CONTRACT").is_ok() {
         std::fs::create_dir_all(dir).expect("create contract dir");
+        // A BTreeSet serializes as a sorted JSON array, so fixtures are deterministic.
         let body = serde_json::to_string_pretty(&actual).expect("serialize keys");
         std::fs::write(&path, format!("{body}\n")).expect("write fixture");
         return;
@@ -45,11 +44,9 @@ fn assert_contract(name: &str, value: &serde_json::Value) {
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!("missing contract fixture {path} — run `UPDATE_CONTRACT=1 cargo test --test contract`")
     });
-    let expected: Vec<String> = serde_json::from_str(&raw).expect("parse fixture");
-    let a: BTreeSet<&String> = actual.iter().collect();
-    let e: BTreeSet<&String> = expected.iter().collect();
-    let added: Vec<&&String> = a.difference(&e).collect();
-    let removed: Vec<&&String> = e.difference(&a).collect();
+    let expected: BTreeSet<String> = serde_json::from_str(&raw).expect("parse fixture");
+    let added: Vec<&String> = actual.difference(&expected).collect();
+    let removed: Vec<&String> = expected.difference(&actual).collect();
     assert!(
         added.is_empty() && removed.is_empty(),
         "{name} wire contract drift — added: {added:?}, removed: {removed:?}.\n\
