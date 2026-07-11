@@ -1,0 +1,6 @@
+# rustfmt 团队配置（stable 选项，系统工具链即可校验）。
+# import 分组/合并等 unstable 选项需 nightly，暂不启用以保证 stable 上本地与 CI 一致。
+edition = "2021"
+max_width = 100
+newline_style = "Unix"
+use_small_heuristics = "Default"

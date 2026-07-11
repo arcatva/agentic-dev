@@ -73,20 +73,16 @@ pub fn sidecar_path(log_dir: &Path, id: &str) -> PathBuf {
 impl Store {
     /// Append one lifecycle event to `<log_dir>/<id>.jsonl.state`. Same
     /// `OpenOptions::create(true).append(true)` discipline as `append_log`.
-    pub async fn append_lifecycle(
-        &self,
-        id: &str,
-        ev: &LifecycleEvent,
-    ) -> Result<(), StoreError> {
+    pub async fn append_lifecycle(&self, id: &str, ev: &LifecycleEvent) -> Result<(), StoreError> {
         // The sidecar lives next to the main log. We can't reach
         // `self.log_dir` (private) so we route through a free function
         // that takes the path explicitly. The path is exposed via
         // `self.log_path(id).parent()` (the same dir the main log lives
         // in).
         let log_path = self.log_path(id);
-        let log_dir = log_path.parent().ok_or_else(|| {
-            StoreError::Io(std::io::Error::other("log_path has no parent"))
-        })?;
+        let log_dir = log_path
+            .parent()
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("log_path has no parent")))?;
         let line = serde_json::to_string(ev).map_err(StoreError::Json)?;
         let path = sidecar_path(log_dir, id);
         let path_clone = path.clone();
@@ -142,13 +138,10 @@ pub async fn read_lifecycle(log_dir: &Path, id: &str) -> Vec<LifecycleEvent> {
 /// the sidecar is missing/empty. This is the wall-clock anchor
 /// `recover()` uses to bound the transcript scan.
 pub fn last_turn_started_at(events: &[LifecycleEvent]) -> Option<i64> {
-    events
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            LifecycleEvent::TurnStarted { at, .. } => Some(*at),
-            _ => None,
-        })
+    events.iter().rev().find_map(|e| match e {
+        LifecycleEvent::TurnStarted { at, .. } => Some(*at),
+        _ => None,
+    })
 }
 
 /// Convenience: the `at` of the most recent `TurnEnded`, or `None` if the
@@ -158,13 +151,10 @@ pub fn last_turn_started_at(events: &[LifecycleEvent]) -> Option<i64> {
 /// of being re-stamped to the restart wall-clock (which would resurrect the
 /// client's unread dot).
 pub fn last_turn_ended_at(events: &[LifecycleEvent]) -> Option<i64> {
-    events
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            LifecycleEvent::TurnEnded { at, .. } => Some(*at),
-            _ => None,
-        })
+    events.iter().rev().find_map(|e| match e {
+        LifecycleEvent::TurnEnded { at, .. } => Some(*at),
+        _ => None,
+    })
 }
 
 /// Fallback end-time source for sessions written before the lifecycle sidecar
@@ -297,7 +287,10 @@ mod tests {
         store
             .append_lifecycle(
                 "lc1",
-                &LifecycleEvent::TurnStarted { at: 100, prompt_len: 5 },
+                &LifecycleEvent::TurnStarted {
+                    at: 100,
+                    prompt_len: 5,
+                },
             )
             .await
             .unwrap();
@@ -316,8 +309,14 @@ mod tests {
 
         let events = store.read_lifecycle("lc1").await;
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], LifecycleEvent::TurnStarted { at: 100, .. }));
-        assert!(matches!(events[1], LifecycleEvent::TurnEnded { at: 200, .. }));
+        assert!(matches!(
+            events[0],
+            LifecycleEvent::TurnStarted { at: 100, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            LifecycleEvent::TurnEnded { at: 200, .. }
+        ));
     }
 
     #[tokio::test]
@@ -338,7 +337,11 @@ mod tests {
         let logs = work.join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         let path = sidecar_path(&logs, "lc2");
-        let good1 = serde_json::to_string(&LifecycleEvent::TurnStarted { at: 1, prompt_len: 0 }).unwrap();
+        let good1 = serde_json::to_string(&LifecycleEvent::TurnStarted {
+            at: 1,
+            prompt_len: 0,
+        })
+        .unwrap();
         let good2 = serde_json::to_string(&LifecycleEvent::TurnEnded {
             at: 2,
             outcome: TurnOutcome::Success,
@@ -355,10 +358,25 @@ mod tests {
     #[test]
     fn last_turn_started_at_returns_most_recent() {
         let events = vec![
-            LifecycleEvent::TurnStarted { at: 100, prompt_len: 0 },
-            LifecycleEvent::TurnEnded { at: 200, outcome: TurnOutcome::Success, cost_usd: None, duration_ms: None },
-            LifecycleEvent::TurnStarted { at: 300, prompt_len: 0 },
-            LifecycleEvent::BootRecovered { at: 400, decided: SessionStatus::Done, reason: "x".into() },
+            LifecycleEvent::TurnStarted {
+                at: 100,
+                prompt_len: 0,
+            },
+            LifecycleEvent::TurnEnded {
+                at: 200,
+                outcome: TurnOutcome::Success,
+                cost_usd: None,
+                duration_ms: None,
+            },
+            LifecycleEvent::TurnStarted {
+                at: 300,
+                prompt_len: 0,
+            },
+            LifecycleEvent::BootRecovered {
+                at: 400,
+                decided: SessionStatus::Done,
+                reason: "x".into(),
+            },
         ];
         assert_eq!(last_turn_started_at(&events), Some(300));
     }
@@ -373,7 +391,8 @@ mod tests {
         // No turn_start → legacy compat: any result in the log wins.
         let transcript = vec![
             r#"{"type":"agentic_prompt","text":"a","at":1000}"#.to_string(),
-            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.01}"#.to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.01}"#
+                .to_string(),
         ];
         let outcome = last_outcome_in_current_turn(&transcript, None);
         assert_eq!(outcome, CurrentTurnOutcome::Success);

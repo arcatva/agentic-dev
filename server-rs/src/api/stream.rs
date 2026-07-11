@@ -2,18 +2,23 @@
 /// network blip mid-stream), not a server fault — downgraded to debug so a genuine 500 still
 /// stands out. Matches on the code/message text a tungstenite/axum send error surfaces.
 pub fn is_client_disconnect(code: Option<&str>, msg: Option<&str>) -> bool {
-    matches!(code, Some("ERR_STREAM_PREMATURE_CLOSE") | Some("ECONNRESET") | Some("EPIPE"))
-        || msg == Some("Premature close")
+    matches!(
+        code,
+        Some("ERR_STREAM_PREMATURE_CLOSE") | Some("ECONNRESET") | Some("EPIPE")
+    ) || msg == Some("Premature close")
 }
 
-use axum::extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, Query, State};
-use axum::response::Response;
-use serde::Deserialize;
 use crate::api::state::AppState;
 use crate::engine::stream::parse_line;
 use crate::engine::transcript::{filter_rendered, is_stream_event};
 use crate::util::now_secs;
+use axum::extract::{
+    ws::{Message, WebSocket, WebSocketUpgrade},
+    Path, Query, State,
+};
+use axum::response::Response;
 use futures_util::stream::SplitSink;
+use serde::Deserialize;
 
 /// Outbound (send) half of the split WebSocket.
 type WsSink = SplitSink<WebSocket, Message>;
@@ -55,7 +60,9 @@ pub struct StreamQuery {
 struct UnsubGuard(Option<Box<dyn FnOnce() + Send>>);
 impl Drop for UnsubGuard {
     fn drop(&mut self) {
-        if let Some(f) = self.0.take() { f(); }
+        if let Some(f) = self.0.take() {
+            f();
+        }
     }
 }
 
@@ -73,7 +80,13 @@ pub async fn stream_session(
     ws.on_upgrade(move |socket| handle_socket(socket, st, id, q.since, authed))
 }
 
-async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: Option<String>, authed: bool) {
+async fn handle_socket(
+    socket: WebSocket,
+    st: AppState,
+    id: String,
+    since_raw: Option<String>,
+    authed: bool,
+) {
     use futures_util::{SinkExt, StreamExt};
     // Split so we can poll the INBOUND half concurrently with sending. Polling inbound is what lets
     // the WS layer answer the client's Ping with a Pong; without it OkHttp/Ktor tears the socket
@@ -81,15 +94,21 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
     let (mut sink, mut stream) = socket.split();
 
     if !authed {
-        let _ = sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
-            code: 1008, reason: "unauthorized".into(),
-        }))).await;
+        let _ = sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008,
+                reason: "unauthorized".into(),
+            })))
+            .await;
         return;
     }
     if st.engine.get(&id).await.is_none() {
-        let _ = sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
-            code: 1008, reason: "not found".into(),
-        }))).await;
+        let _ = sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008,
+                reason: "not found".into(),
+            })))
+            .await;
         return;
     }
 
@@ -127,20 +146,30 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
     //    loop processes pokes (rendered flush) and live frames in emission order.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsMsg>();
     // Held for the lifetime of the socket; its Drop unsubscribes on every exit (incl. cancellation).
-    let _unsub = UnsubGuard(Some(st.engine.subscribe(&id, Box::new(move |ev| {
-        let _ = if is_live_only(ev) {
-            tx.send(WsMsg::Live(ev.to_wire()))
-        } else {
-            tx.send(WsMsg::Poke)
-        };
-    }))));
+    let _unsub = UnsubGuard(Some(st.engine.subscribe(
+        &id,
+        Box::new(move |ev| {
+            let _ = if is_live_only(ev) {
+                tx.send(WsMsg::Live(ev.to_wire()))
+            } else {
+                tx.send(WsMsg::Poke)
+            };
+        }),
+    )));
 
     // Read rendered lines [from..) from the projection, returning (lines, total_count). On a
     // projection read error, fall back to the whole-file filtered read (still cursor-correct).
-    async fn read_from(st: &AppState, id: &str, log_path: &std::path::Path, from: usize)
-        -> (Vec<String>, usize)
-    {
-        match st.transcript.with(id, log_path, |p| (p.slice_from(from).to_vec(), p.count())).await {
+    async fn read_from(
+        st: &AppState,
+        id: &str,
+        log_path: &std::path::Path,
+        from: usize,
+    ) -> (Vec<String>, usize) {
+        match st
+            .transcript
+            .with(id, log_path, |p| (p.slice_from(from).to_vec(), p.count()))
+            .await
+        {
             Ok(out) => out,
             Err(_) => {
                 let lines = filter_rendered(&st.engine.get_log(id));
@@ -161,11 +190,18 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
     const HEARTBEAT_MS: u64 = 10_000;
     const IDLE_CLOSE_MS: u64 = 30_000;
 
-    let status0 = st.engine.get(&id).await.map(|s| s.status).unwrap_or_default();
+    let status0 = st
+        .engine
+        .get(&id)
+        .await
+        .map(|s| s.status)
+        .unwrap_or_default();
     let hello = serde_json::json!({
         "kind": "hello", "heartbeatMs": HEARTBEAT_MS, "seq": since, "status": status0,
     });
-    if send_json(&mut sink, &hello).await.is_err() { return; }
+    if send_json(&mut sink, &hello).await.is_err() {
+        return;
+    }
 
     // 2. Backfill: read rendered lines [since, total), stamping each with its post-line cursor.
     let (backfill, mut cursor) = read_from(&st, &id, &log_path, since).await;
@@ -173,7 +209,9 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
         let mut seq = since;
         for line in &backfill {
             seq += 1;
-            if send_rendered(&mut sink, line, seq).await.is_err() { return; }
+            if send_rendered(&mut sink, line, seq).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -190,14 +228,18 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
             let mut seq = cursor;
             for line in &new_lines {
                 seq += 1;
-                if send_rendered(&mut sink, line, seq).await.is_err() { return; }
+                if send_rendered(&mut sink, line, seq).await.is_err() {
+                    return;
+                }
             }
         }
         cursor = total.max(cursor);
 
         let status = match st.engine.get(&id).await {
             Some(s) => s.status,
-            None => { return; }
+            None => {
+                return;
+            }
         };
         if matches!(status.as_str(), "done" | "failed" | "killed") {
             let (tail, total) = read_from(&st, &id, &log_path, cursor).await;
@@ -205,7 +247,9 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
                 let mut seq = cursor;
                 for line in &tail {
                     seq += 1;
-                    if send_rendered(&mut sink, line, seq).await.is_err() { return; }
+                    if send_rendered(&mut sink, line, seq).await.is_err() {
+                        return;
+                    }
                 }
             }
             cursor = total.max(cursor);
@@ -214,7 +258,12 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
                 cursor,
             );
             let _ = send_json(&mut sink, &exit).await;
-            let _ = sink.send(Message::Close(Some(axum::extract::ws::CloseFrame { code: 1000, reason: "ended".into() }))).await;
+            let _ = sink
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1000,
+                    reason: "ended".into(),
+                })))
+                .await;
             return;
         }
 
@@ -248,7 +297,12 @@ async fn handle_socket(socket: WebSocket, st: AppState, id: String, since_raw: O
         }
     }
 
-    let _ = sink.send(Message::Close(Some(axum::extract::ws::CloseFrame { code: 1000, reason: "ended".into() }))).await;
+    let _ = sink
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 1000,
+            reason: "ended".into(),
+        })))
+        .await;
 }
 
 /// Send one rendered line as the client expects: parse_line→to_wire, with the raw fallback for an
@@ -259,7 +313,11 @@ async fn send_rendered(sink: &mut WsSink, line: &str, seq: usize) -> Result<(), 
     if evs.is_empty() {
         let raw: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|_| serde_json::Value::String(line.to_string()));
-        send_json(sink, &with_seq(serde_json::json!({"kind":"backfill","raw": raw}), seq)).await
+        send_json(
+            sink,
+            &with_seq(serde_json::json!({"kind":"backfill","raw": raw}), seq),
+        )
+        .await
     } else {
         // A `stream_event` source line is a STREAMING DELTA (text_delta/thinking_delta); mark its
         // frames `delta:true`. The complete `assistant` message that restates the same blocks is a
@@ -320,7 +378,10 @@ mod tests {
 
     #[test]
     fn flags_benign_client_disconnects() {
-        assert!(is_client_disconnect(Some("ERR_STREAM_PREMATURE_CLOSE"), None));
+        assert!(is_client_disconnect(
+            Some("ERR_STREAM_PREMATURE_CLOSE"),
+            None
+        ));
         assert!(is_client_disconnect(None, Some("Premature close")));
         assert!(is_client_disconnect(Some("ECONNRESET"), None));
         assert!(is_client_disconnect(Some("EPIPE"), None));
@@ -333,8 +394,8 @@ mod tests {
         assert!(!is_client_disconnect(None, None));
     }
 
-    use crate::api::test_support::test_state_with_fixture;
     use crate::api::auth::issue_token;
+    use crate::api::test_support::test_state_with_fixture;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
     use std::time::Duration;
@@ -342,34 +403,61 @@ mod tests {
     async fn serve(st: crate::api::state::AppState) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let app = crate::api::app(st)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let app = crate::api::app(st).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         port
     }
 
     async fn wait_status(st: &crate::api::state::AppState, id: &str, want: &str) {
         for _ in 0..250 {
-            if st.engine.get(id).await.map(|s| s.status) == Some(want.to_string()) { return; }
+            if st.engine.get(id).await.map(|s| s.status) == Some(want.to_string()) {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("timeout waiting for status={want}");
     }
 
     async fn spawn_live_session(st: &crate::api::state::AppState) -> (u16, String) {
-        use std::process::Command;
         use std::collections::HashMap;
+        use std::process::Command;
         // Create a temp src repo "demo".
         let dir = st.config.src_root.join("demo");
         std::fs::create_dir_all(&dir).unwrap();
-        Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap();
-        Command::new("git").args(["config", "user.email", "t@t"]).current_dir(&dir).status().unwrap();
-        Command::new("git").args(["config", "user.name", "t"]).current_dir(&dir).status().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@t"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
         std::fs::write(dir.join("README.md"), "x").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(&dir).status().unwrap();
-        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
         let port = serve(st.clone()).await;
-        let id = st.engine.submit("demo", "go", HashMap::new()).await.unwrap();
+        let id = st
+            .engine
+            .submit("demo", "go", HashMap::new())
+            .await
+            .unwrap();
         (port, id)
     }
 
@@ -377,10 +465,18 @@ mod tests {
     async fn ws_rejects_a_bad_token() {
         let st = test_state_with_fixture("fake-sdk-bridge-ok.sh").await;
         let id = "s-ws-bad";
-        st.store.create(crate::engine::store::CreateInput {
-            id: id.into(), repos: vec![], skills: vec![], prompt: "p".into(),
-            worktree_path: Some("/tmp/x".into()), branch: Some("b".into()), ..Default::default()
-        }).await.unwrap();
+        st.store
+            .create(crate::engine::store::CreateInput {
+                id: id.into(),
+                repos: vec![],
+                skills: vec![],
+                prompt: "p".into(),
+                worktree_path: Some("/tmp/x".into()),
+                branch: Some("b".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         let port = serve(st).await;
         let url = format!("ws://127.0.0.1:{port}/api/sessions/{id}/stream?token=bad");
         let res = tokio_tungstenite::connect_async(url).await;
@@ -404,8 +500,10 @@ mod tests {
                 kinds.push(v["kind"].as_str().unwrap_or("").to_string());
             }
         }
-        assert!(kinds.iter().any(|k| k == "text" || k == "result"),
-            "must deliver at least one text or result event, got {kinds:?}");
+        assert!(
+            kinds.iter().any(|k| k == "text" || k == "result"),
+            "must deliver at least one text or result event, got {kinds:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -417,7 +515,8 @@ mod tests {
         let raw_log = st.engine.get_log(&id);
         let since = filter_rendered(&raw_log).len();
         let token = issue_token(&st.config.auth_secret, 3600, super::now_secs());
-        let url = format!("ws://127.0.0.1:{port}/api/sessions/{id}/stream?token={token}&since={since}");
+        let url =
+            format!("ws://127.0.0.1:{port}/api/sessions/{id}/stream?token={token}&since={since}");
         let (mut sock, _r) = tokio_tungstenite::connect_async(url).await.unwrap();
         let mut msgs = Vec::new();
         while let Some(Ok(msg)) = sock.next().await {
@@ -426,14 +525,21 @@ mod tests {
             }
         }
         // No backfill lines (since skipped them all); only the synthetic terminal engineExit.
-        assert!(!msgs.iter().any(|m| m["kind"] == "text"),
-            "no text events expected when since covers all lines, got {msgs:?}");
-        assert!(msgs.iter().any(|m| m["kind"] == "hello"), "a HELLO frame must open the stream, got {msgs:?}");
+        assert!(
+            !msgs.iter().any(|m| m["kind"] == "text"),
+            "no text events expected when since covers all lines, got {msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m["kind"] == "hello"),
+            "a HELLO frame must open the stream, got {msgs:?}"
+        );
         // Ignore the gateway HELLO/HEARTBEAT frames; the rest must be only the terminal engineExit.
-        assert!(msgs.iter()
-            .filter(|m| m["kind"] != "hello" && m["kind"] != "heartbeat")
-            .all(|m| m["kind"] == "other" && m["raw"].get("engineExit").is_some()),
-            "only engineExit frames expected, got {msgs:?}");
+        assert!(
+            msgs.iter()
+                .filter(|m| m["kind"] != "hello" && m["kind"] != "heartbeat")
+                .all(|m| m["kind"] == "other" && m["raw"].get("engineExit").is_some()),
+            "only engineExit frames expected, got {msgs:?}"
+        );
     }
 
     /// Block until the FILTERED (rendered) log of `id` has at least `n` lines, so we can connect
@@ -441,7 +547,9 @@ mod tests {
     /// the backfill→live boundary (some lines already on disk, more arriving live).
     async fn wait_rendered_at_least(st: &crate::api::state::AppState, id: &str, n: usize) {
         for _ in 0..250 {
-            if filter_rendered(&st.engine.get_log(id)).len() >= n { return; }
+            if filter_rendered(&st.engine.get_log(id)).len() >= n {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("timeout waiting for >= {n} rendered lines");
@@ -472,7 +580,10 @@ mod tests {
         }
 
         // Exactly one terminal engineExit frame.
-        let exits = frames.iter().filter(|m| m["raw"].get("engineExit").is_some()).count();
+        let exits = frames
+            .iter()
+            .filter(|m| m["raw"].get("engineExit").is_some())
+            .count();
         assert_eq!(exits, 1, "exactly one engineExit expected, got {frames:?}");
 
         // Split delivered frames: RENDERED (cursor-delivered, incl. agentResult) vs live-only
@@ -481,22 +592,34 @@ mod tests {
         // are extra and never duplicate a rendered line (they come from non-rendered source lines).
         // Exclude live-only (init/retry) AND the gateway HELLO/HEARTBEAT frames — none of these are
         // rendered-cursor lines, so they're additive and must not be in the rendered comparison.
-        let gateway = |k: Option<&str>| matches!(k, Some("init") | Some("retry") | Some("hello") | Some("heartbeat"));
-        let delivered: Vec<Value> = frames.iter()
+        let gateway = |k: Option<&str>| {
+            matches!(
+                k,
+                Some("init") | Some("retry") | Some("hello") | Some("heartbeat")
+            )
+        };
+        let delivered: Vec<Value> = frames
+            .iter()
             .filter(|m| m["raw"].get("engineExit").is_none() && !gateway(m["kind"].as_str()))
             .map(|m| m["raw"].clone())
             .collect();
-        let expected: Vec<Value> = filter_rendered(&st.engine.get_log(&id)).iter()
+        let expected: Vec<Value> = filter_rendered(&st.engine.get_log(&id))
+            .iter()
             .map(|l| serde_json::from_str::<Value>(l).unwrap())
             .collect();
-        assert_eq!(delivered, expected,
+        assert_eq!(
+            delivered, expected,
             "rendered frames must equal the rendered log exactly (no dup, no gap, in order)\n\
-             delivered={delivered:?}\nexpected={expected:?}");
+             delivered={delivered:?}\nexpected={expected:?}"
+        );
 
         // Belt-and-suspenders: no rendered raw line appears more than once.
         for line in &expected {
             let count = delivered.iter().filter(|d| *d == line).count();
-            assert_eq!(count, 1, "rendered line delivered {count} times (expected 1): {line:?}");
+            assert_eq!(
+                count, 1,
+                "rendered line delivered {count} times (expected 1): {line:?}"
+            );
         }
         // NOTE: any live-only frames (init/retry) that arrive after subscribe are
         // additive and correctly excluded above; whether `init` lands live here is tailer-timing
@@ -508,15 +631,40 @@ mod tests {
         use crate::engine::stream::ClaudeEvent;
         use serde_json::json;
         // Live-only: produced solely from non-rendered source lines (system/init, api_retry).
-        assert!(is_live_only(&ClaudeEvent::Init { session_id: "s".into(), raw: json!({}) }));
-        assert!(is_live_only(&ClaudeEvent::Retry { attempt: 1, max_retries: 3, category: "x".into(), raw: json!({}) }));
+        assert!(is_live_only(&ClaudeEvent::Init {
+            session_id: "s".into(),
+            raw: json!({})
+        }));
+        assert!(is_live_only(&ClaudeEvent::Retry {
+            attempt: 1,
+            max_retries: 3,
+            category: "x".into(),
+            raw: json!({})
+        }));
         // Rendered (delivered via the cursor) → NOT live-only (forwarding would duplicate).
         // AgentResult is rendered now: the engine persists a `agent_result` marker that the cursor
         // carries as kind:agentResult, so forwarding the live event too would double-deliver it.
-        assert!(!is_live_only(&ClaudeEvent::AgentResult { tool_use_id: "t".into(), text: "o".into(), raw: json!({}) }));
-        assert!(!is_live_only(&ClaudeEvent::Text { text: "hi".into(), parent_tool_use_id: None, raw: json!({}) }));
-        assert!(!is_live_only(&ClaudeEvent::Result { is_error: false, cost_usd: None, text: None, raw: json!({}) }));
-        assert!(!is_live_only(&ClaudeEvent::Prompt { text: "p".into(), at: 0, raw: json!({}) }));
+        assert!(!is_live_only(&ClaudeEvent::AgentResult {
+            tool_use_id: "t".into(),
+            text: "o".into(),
+            raw: json!({})
+        }));
+        assert!(!is_live_only(&ClaudeEvent::Text {
+            text: "hi".into(),
+            parent_tool_use_id: None,
+            raw: json!({})
+        }));
+        assert!(!is_live_only(&ClaudeEvent::Result {
+            is_error: false,
+            cost_usd: None,
+            text: None,
+            raw: json!({})
+        }));
+        assert!(!is_live_only(&ClaudeEvent::Prompt {
+            text: "p".into(),
+            at: 0,
+            raw: json!({})
+        }));
         assert!(!is_live_only(&ClaudeEvent::Other { raw: json!({}) }));
     }
 
@@ -535,10 +683,15 @@ mod tests {
         while let Some(Ok(msg)) = sock.next().await {
             if let TMsg::Text(t) = msg {
                 let v: Value = serde_json::from_str(&t).unwrap();
-                if v["raw"].get("engineExit").is_some() { saw_exit = true; }
+                if v["raw"].get("engineExit").is_some() {
+                    saw_exit = true;
+                }
             }
         }
-        assert!(saw_exit, "stream must run to engineExit even after the client sent a Ping");
+        assert!(
+            saw_exit,
+            "stream must run to engineExit even after the client sent a Ping"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -558,16 +711,30 @@ mod tests {
 
         // HELLO opens the stream and announces a numeric heartbeat cadence (the gateway contract).
         let hello = frames.first().expect("at least one frame");
-        assert_eq!(hello["kind"], "hello", "first frame must be HELLO, got {frames:?}");
-        assert!(hello["heartbeatMs"].as_u64().is_some(), "HELLO must carry heartbeatMs, got {hello:?}");
+        assert_eq!(
+            hello["kind"], "hello",
+            "first frame must be HELLO, got {frames:?}"
+        );
+        assert!(
+            hello["heartbeatMs"].as_u64().is_some(),
+            "HELLO must carry heartbeatMs, got {hello:?}"
+        );
 
         // Every frame carries a numeric `seq` (the RESUME cursor), monotonically non-decreasing.
         let mut last = 0u64;
         for f in &frames {
-            let seq = f["seq"].as_u64().unwrap_or_else(|| panic!("frame missing seq: {f:?}"));
-            assert!(seq >= last, "seq must be non-decreasing: {seq} < {last} in {f:?}");
+            let seq = f["seq"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("frame missing seq: {f:?}"));
+            assert!(
+                seq >= last,
+                "seq must be non-decreasing: {seq} < {last} in {f:?}"
+            );
             last = seq;
         }
-        assert!(last > 0, "the terminal frame's seq must advance past 0, got {frames:?}");
+        assert!(
+            last > 0,
+            "the terminal frame's seq must advance past 0, got {frames:?}"
+        );
     }
 }

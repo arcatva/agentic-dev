@@ -24,8 +24,8 @@ use crate::engine::lifecycle::{
     CurrentTurnOutcome, LifecycleEvent,
 };
 use crate::engine::status::SessionStatus;
-use crate::engine::transition::TransitionReason;
 use crate::engine::store::SessionUpdate;
+use crate::engine::transition::TransitionReason;
 use std::str::FromStr;
 
 impl Engine {
@@ -35,9 +35,7 @@ impl Engine {
         let sessions = match self.0.store.list().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!(
-                    "[engine] recover: store.list failed — skipping recovery: {e}"
-                );
+                tracing::error!("[engine] recover: store.list failed — skipping recovery: {e}");
                 return;
             }
         };
@@ -54,12 +52,20 @@ impl Engine {
                         CurrentTurnOutcome::Error(_) => "Error",
                         CurrentTurnOutcome::None => "None(interrupted)",
                     };
-                    let (target, error_text, error_kind): (SessionStatus, Option<String>, Option<String>) = match &outcome {
+                    let (target, error_text, error_kind): (
+                        SessionStatus,
+                        Option<String>,
+                        Option<String>,
+                    ) = match &outcome {
                         CurrentTurnOutcome::Success => (SessionStatus::Done, None, None),
                         CurrentTurnOutcome::Error(text) => {
                             let truncated = truncate_chars(text, 500);
                             let kind = classify_claude_error(truncated).to_string();
-                            (SessionStatus::Failed, Some(truncated.to_string()), Some(kind))
+                            (
+                                SessionStatus::Failed,
+                                Some(truncated.to_string()),
+                                Some(kind),
+                            )
                         }
                         CurrentTurnOutcome::None => (
                             SessionStatus::Failed,
@@ -85,19 +91,18 @@ impl Engine {
                     let _ = self
                         .transition(&s.id, target, TransitionReason::Recover)
                         .await
-                        .map_err(|e| tracing::warn!("[engine] recover transition failed for {}: {e}", s.id));
+                        .map_err(|e| {
+                            tracing::warn!("[engine] recover transition failed for {}: {e}", s.id)
+                        });
                     let mut patch = SessionUpdate::new().ended_at(real_end);
                     if let Some(text) = error_text {
                         patch = patch
                             .error(text)
                             .error_kind(error_kind.unwrap_or_else(|| "claude_error".into()));
                     }
-                    let _ = self
-                        .0
-                        .store
-                        .apply_update(&s.id, patch)
-                        .await
-                        .map_err(|e| tracing::warn!("[engine] recover end/error patch failed for {}: {e}", s.id));
+                    let _ = self.0.store.apply_update(&s.id, patch).await.map_err(|e| {
+                        tracing::warn!("[engine] recover end/error patch failed for {}: {e}", s.id)
+                    });
                     let _ = self
                         .0
                         .store
@@ -110,17 +115,27 @@ impl Engine {
                             },
                         )
                         .await
-                        .map_err(|e| tracing::warn!("[engine] recover lifecycle append failed for {}: {e}", s.id));
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "[engine] recover lifecycle append failed for {}: {e}",
+                                s.id
+                            )
+                        });
                     tracing::info!(
                         "[engine] recover: {} {} (turn_start={:?}, reason={})",
-                        s.id, target.as_str(), turn_start, reason_str,
+                        s.id,
+                        target.as_str(),
+                        turn_start,
+                        reason_str,
                     );
                 }
                 SessionStatus::Pending => {
                     let _ = self
                         .transition(&s.id, SessionStatus::Pending, TransitionReason::ReEnqueue)
                         .await
-                        .map_err(|e| tracing::warn!("[engine] recover re-enqueue failed for {}: {e}", s.id));
+                        .map_err(|e| {
+                            tracing::warn!("[engine] recover re-enqueue failed for {}: {e}", s.id)
+                        });
                 }
                 _ => {} // terminals: nothing to do
             }

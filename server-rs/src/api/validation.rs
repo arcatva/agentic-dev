@@ -3,21 +3,34 @@
 /// not starting with `-` (blocks `--help`, `-y`, `-x`, etc.),
 /// and not an all-dots name (`.`, `..`, `...`).
 pub fn valid_component_name(s: &str) -> bool {
-    if s.is_empty() || s == "agentic" { return false; }
+    if s.is_empty() || s == "agentic" {
+        return false;
+    }
     // Reject leading dash — would be treated as a CLI flag if passed to claude.
-    if s.starts_with('-') { return false; }
+    if s.starts_with('-') {
+        return false;
+    }
     // Reject all-dots names (., .., ...) — path traversal / ambiguous.
-    if s.chars().all(|c| c == '.') { return false; }
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    if s.chars().all(|c| c == '.') {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 /// Plugin id validator: accepts `^[A-Za-z0-9._@/-]+$`, non-empty,
 /// and not starting with `-` (blocks `--help`, `-y`, `--config=...`, etc.).
 pub fn valid_plugin_id(s: &str) -> bool {
-    if s.is_empty() { return false; }
+    if s.is_empty() {
+        return false;
+    }
     // Reject leading dash — would be treated as a CLI flag when passed to claude.
-    if s.starts_with('-') { return false; }
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '@' || c == '/' || c == '-')
+    if s.starts_with('-') {
+        return false;
+    }
+    s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '@' || c == '/' || c == '-'
+    })
 }
 
 #[cfg(test)]
@@ -34,14 +47,14 @@ mod tests {
 
     #[test]
     fn valid_component_name_rejects_bad_names() {
-        assert!(!valid_component_name(""));           // empty
-        assert!(!valid_component_name("agentic"));    // reserved
-        assert!(!valid_component_name("a/b"));        // slash
-        assert!(!valid_component_name("../x"));       // traversal
-        assert!(!valid_component_name("a b"));        // space
-        assert!(!valid_component_name("/abs"));       // absolute
-        assert!(!valid_component_name("a\nb"));       // newline
-        assert!(!valid_component_name("a@b"));        // @ not in component names
+        assert!(!valid_component_name("")); // empty
+        assert!(!valid_component_name("agentic")); // reserved
+        assert!(!valid_component_name("a/b")); // slash
+        assert!(!valid_component_name("../x")); // traversal
+        assert!(!valid_component_name("a b")); // space
+        assert!(!valid_component_name("/abs")); // absolute
+        assert!(!valid_component_name("a\nb")); // newline
+        assert!(!valid_component_name("a@b")); // @ not in component names
     }
 
     #[test]

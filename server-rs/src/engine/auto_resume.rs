@@ -42,8 +42,9 @@ not redo work that already completed.";
 /// trailing `|<digits>` (e.g. `"Claude AI usage limit reached|1735246800"`). Accepts 10-digit
 /// seconds or 13-digit milliseconds; rejects other digit counts (not a plausible timestamp).
 pub fn reset_epoch_ms_from_error(text: &str) -> Option<i64> {
-    static RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\|\s*(\d{10}|\d{13})\b").expect("valid regex"));
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\|\s*(\d{10}|\d{13})\b").expect("valid regex")
+    });
     let n: i64 = RE.captures(text)?.get(1)?.as_str().parse().ok()?;
     // 10 digits = seconds, 13 = already ms.
     Some(if n < 100_000_000_000 { n * 1000 } else { n })
@@ -146,7 +147,9 @@ pub fn rfc3339_to_epoch_ms(s: &str) -> Option<i64> {
     }
     let (sec_whole, frac_ms) = match sec_str.split_once('.') {
         Some((w, f)) => {
-            let ms: u32 = format!("{:0<3}", f.chars().take(3).collect::<String>()).parse().ok()?;
+            let ms: u32 = format!("{:0<3}", f.chars().take(3).collect::<String>())
+                .parse()
+                .ok()?;
             (w, ms)
         }
         None => (sec_str, 0),
@@ -245,7 +248,10 @@ impl Engine {
                         Ok(true) => {}
                         Ok(false) => continue, // superseded while we were computing
                         Err(e) => {
-                            tracing::warn!("[engine] auto-resume schedule persist failed for {}: {e}", s.id);
+                            tracing::warn!(
+                                "[engine] auto-resume schedule persist failed for {}: {e}",
+                                s.id
+                            );
                             continue;
                         }
                     }
@@ -257,7 +263,10 @@ impl Engine {
                     }));
                     tracing::info!(
                         "[engine] auto-resume: {} scheduled at {} (source={}, in {}s)",
-                        s.id, resume_at, source, (resume_at - now) / 1000,
+                        s.id,
+                        resume_at,
+                        source,
+                        (resume_at - now) / 1000,
                     );
                 }
 
@@ -295,17 +304,26 @@ impl Engine {
                     } else {
                         AUTO_RESUME_PROMPT.to_string()
                     };
-                    match self.follow_up(&s.id, &prompt, false, None, None, None).await {
+                    match self
+                        .follow_up(&s.id, &prompt, false, None, None, None)
+                        .await
+                    {
                         Ok(_) => {
                             self.log(serde_json::json!({
                                 "evt": "auto_resume_fired",
                                 "sessionId": s.id,
                                 "scheduledAt": at,
                             }));
-                            tracing::info!("[engine] auto-resume: {} resumed (scheduled at {at})", s.id);
+                            tracing::info!(
+                                "[engine] auto-resume: {} resumed (scheduled at {at})",
+                                s.id
+                            );
                         }
                         Err(e) => {
-                            tracing::warn!("[engine] auto-resume follow_up failed for {}: {e}", s.id);
+                            tracing::warn!(
+                                "[engine] auto-resume follow_up failed for {}: {e}",
+                                s.id
+                            );
                         }
                     }
                 }
@@ -361,9 +379,15 @@ mod tests {
     #[test]
     fn rfc3339_parses_utc_and_offsets() {
         // 2026-07-09T00:00:00Z = 1783555200
-        assert_eq!(rfc3339_to_epoch_ms("2026-07-09T00:00:00Z"), Some(1_783_555_200_000));
+        assert_eq!(
+            rfc3339_to_epoch_ms("2026-07-09T00:00:00Z"),
+            Some(1_783_555_200_000)
+        );
         // Same instant expressed at +08:00.
-        assert_eq!(rfc3339_to_epoch_ms("2026-07-09T08:00:00+08:00"), Some(1_783_555_200_000));
+        assert_eq!(
+            rfc3339_to_epoch_ms("2026-07-09T08:00:00+08:00"),
+            Some(1_783_555_200_000)
+        );
         // Fractional seconds.
         assert_eq!(rfc3339_to_epoch_ms("1970-01-01T00:00:00.250Z"), Some(250));
         // Epoch itself.

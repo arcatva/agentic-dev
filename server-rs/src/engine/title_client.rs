@@ -167,8 +167,8 @@ impl AnthropicHttpTitleGenerator {
     ///
     /// Returns `TitleGeneratorError::Auth` if no token source is available.
     pub fn from_env() -> Result<Self, TitleGeneratorError> {
-        let base_url = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url =
+            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let (auth_token, auth_scheme) = resolve_auth_from_env().ok_or(TitleGeneratorError::Auth)?;
         let model = std::env::var("ANTHROPIC_DEFAULT_HAIKU_MODEL")
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
@@ -219,16 +219,13 @@ pub(crate) fn read_oauth_token() -> Option<String> {
 
 /// Pull the first `text` block out of an Anthropic `/v1/messages` response.
 pub(crate) fn extract_text(body: &serde_json::Value) -> Option<String> {
-    body.get("content")?
-        .as_array()?
-        .iter()
-        .find_map(|c| {
-            if c.get("type")?.as_str()? == "text" {
-                c.get("text")?.as_str().map(|s| s.to_string())
-            } else {
-                None
-            }
-        })
+    body.get("content")?.as_array()?.iter().find_map(|c| {
+        if c.get("type")?.as_str()? == "text" {
+            c.get("text")?.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 #[async_trait]
@@ -266,10 +263,8 @@ impl TitleGenerator for AnthropicHttpTitleGenerator {
         recent_messages: &[(String, String)],
         _cwd: &Path,
     ) -> Result<Option<String>, TitleGeneratorError> {
-        let msgs_json: Vec<serde_json::Value> = recent_messages
-            .iter()
-            .map(|(r, t)| json!([r, t]))
-            .collect();
+        let msgs_json: Vec<serde_json::Value> =
+            recent_messages.iter().map(|(r, t)| json!([r, t])).collect();
         let user_content = json!({
             "currentTitle": current_title,
             "messages": msgs_json,
@@ -343,7 +338,11 @@ pub(crate) async fn anthropic_messages(
     body: &serde_json::Value,
 ) -> Result<String, TitleGeneratorError> {
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let fresh = if oauth_reread { read_oauth_token() } else { None };
+    let fresh = if oauth_reread {
+        read_oauth_token()
+    } else {
+        None
+    };
     let token: &str = fresh.as_deref().unwrap_or(auth_token);
     let mut builder = client
         .post(&url)
@@ -356,23 +355,25 @@ pub(crate) async fn anthropic_messages(
             .header("authorization", format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20"),
     };
-    let req = builder
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                TitleGeneratorError::Timeout
-            } else {
-                TitleGeneratorError::Http(e.to_string())
-            }
-        })?;
+    let req = builder.json(body).send().await.map_err(|e| {
+        if e.is_timeout() {
+            TitleGeneratorError::Timeout
+        } else {
+            TitleGeneratorError::Http(e.to_string())
+        }
+    })?;
 
     let status = req.status();
     if !status.is_success() {
         let code = status.as_u16();
         // Consume + log the error body so a failed call has a WHY, not just a bare code.
-        let body_snippet: String = req.text().await.unwrap_or_default().chars().take(512).collect();
+        let body_snippet: String = req
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect();
         tracing::warn!(
             "[anthropic] HTTP {code} from {base_url} (scheme={auth_scheme:?}): {body_snippet}"
         );
@@ -381,7 +382,10 @@ pub(crate) async fn anthropic_messages(
         }
         return Err(TitleGeneratorError::Http(format!("status {code}")));
     }
-    let body: serde_json::Value = req.json().await.map_err(|_| TitleGeneratorError::InvalidResponse)?;
+    let body: serde_json::Value = req
+        .json()
+        .await
+        .map_err(|_| TitleGeneratorError::InvalidResponse)?;
     extract_text(&body).ok_or(TitleGeneratorError::InvalidResponse)
 }
 

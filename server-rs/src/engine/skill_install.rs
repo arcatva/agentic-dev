@@ -65,7 +65,9 @@ pub struct InstallPlan {
 }
 
 fn valid_gh_segment(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Parse a user-supplied skill source into candidate [GithubRef]s. Accepted forms:
@@ -101,7 +103,12 @@ pub fn parse_github_source(src: &str) -> Result<Vec<GithubRef>, String> {
         if !path.is_empty() && !safe_rel_path(path.trim_matches('/')) {
             return Err("path contains unsupported characters".into());
         }
-        Ok(GithubRef { owner: owner.clone(), repo: repo.clone(), branch, path: path.trim_matches('/').to_string() })
+        Ok(GithubRef {
+            owner: owner.clone(),
+            repo: repo.clone(),
+            branch,
+            path: path.trim_matches('/').to_string(),
+        })
     };
     match parts.get(2) {
         None => Ok(vec![make("HEAD".into(), &[])?]),
@@ -149,10 +156,16 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
         .ok_or("unexpected GitHub tree response")?;
     // A truncated listing could silently drop companion files of the skill — never plan from it.
     if tree.get("truncated").and_then(|t| t.as_bool()) == Some(true) {
-        return Err("repository too large to scan completely — install from a smaller repository".into());
+        return Err(
+            "repository too large to scan completely — install from a smaller repository".into(),
+        );
     }
 
-    let prefix = if gh.path.is_empty() { String::new() } else { format!("{}/", gh.path) };
+    let prefix = if gh.path.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", gh.path)
+    };
     let name = if gh.path.is_empty() {
         gh.repo.clone()
     } else {
@@ -166,8 +179,12 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
         if e.get("type").and_then(|t| t.as_str()) != Some("blob") {
             continue;
         }
-        let Some(p) = e.get("path").and_then(|p| p.as_str()) else { continue };
-        let Some(rel) = p.strip_prefix(&prefix) else { continue };
+        let Some(p) = e.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Some(rel) = p.strip_prefix(&prefix) else {
+            continue;
+        };
         if !prefix.is_empty() && rel == p {
             continue; // no common prefix (strip_prefix returned original) — defensive
         }
@@ -180,7 +197,9 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
         }
         let size = e.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
         if size > MAX_FILE_BYTES {
-            return Err(format!("file '{p}' exceeds the {MAX_FILE_BYTES}-byte per-file limit"));
+            return Err(format!(
+                "file '{p}' exceeds the {MAX_FILE_BYTES}-byte per-file limit"
+            ));
         }
         total += size;
         if rel == "SKILL.md" {
@@ -195,14 +214,23 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
     if !has_skill_md {
         return Err(format!(
             "no SKILL.md found at '{}' — the source must point at a skill directory",
-            if gh.path.is_empty() { "the repository root" } else { &gh.path },
+            if gh.path.is_empty() {
+                "the repository root"
+            } else {
+                &gh.path
+            },
         ));
     }
     if files.len() > MAX_FILES {
-        return Err(format!("skill has {} files — more than the {MAX_FILES}-file limit", files.len()));
+        return Err(format!(
+            "skill has {} files — more than the {MAX_FILES}-file limit",
+            files.len()
+        ));
     }
     if total > MAX_TOTAL_BYTES {
-        return Err(format!("skill is {total} bytes — more than the {MAX_TOTAL_BYTES}-byte limit"));
+        return Err(format!(
+            "skill is {total} bytes — more than the {MAX_TOTAL_BYTES}-byte limit"
+        ));
     }
     if !valid_name(&name) {
         return Err(format!("'{name}' is not a valid skill name"));
@@ -216,13 +244,16 @@ pub fn plan_from_tree(tree: &serde_json::Value, gh: &GithubRef) -> Result<Instal
 fn valid_name(name: &str) -> bool {
     use std::path::Component;
     let mut components = Path::new(name).components();
-    let single = matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    let single =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
     single
         && !name.is_empty()
         && name != "agentic"
         && !name.starts_with('-')
         && !name.chars().all(|c| c == '.')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 /// Ensure a downloaded SKILL.md's frontmatter `name:` matches the DIRECTORY name it installs
@@ -231,8 +262,13 @@ fn valid_name(name: &str) -> bool {
 /// component the API can list but never manage. A missing name line is fine (listing falls
 /// back to the directory name); a differing one is REWRITTEN to the directory name.
 fn normalize_skill_md(bytes: &[u8], dir_name: &str) -> Vec<u8> {
-    let Ok(text) = std::str::from_utf8(bytes) else { return bytes.to_vec() };
-    let Some(fm) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) else {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let Some(fm) = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+    else {
         return bytes.to_vec();
     };
     let fm_len = fm.0.len();
@@ -267,9 +303,17 @@ fn normalize_skill_md(bytes: &[u8], dir_name: &str) -> Vec<u8> {
 /// already exists — unless `replace` (update): then the old dir is swapped out and restored
 /// on failure. Pure filesystem — no network.
 /// `files` = (skill-relative path, bytes, executable).
-pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8>, bool)], replace: bool) -> io::Result<()> {
+pub fn write_skill_files(
+    skills_dir: &Path,
+    name: &str,
+    files: &[(String, Vec<u8>, bool)],
+    replace: bool,
+) -> io::Result<()> {
     if !valid_name(name) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("invalid skill name '{name}'")));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("invalid skill name '{name}'"),
+        ));
     }
     // Serialize the publish phase across concurrent installs/updates: without this, an update
     // racing another update (or a delete) of the SAME name could park the other call's freshly
@@ -278,21 +322,32 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
     let _guard = INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let target = skills_dir.join(name);
     if target.exists() && !replace {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("skill '{name}' already exists")));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("skill '{name}' already exists"),
+        ));
     }
     // Unique per call (pid + atomic counter) so concurrent installs of the same skill name
     // can't scribble into each other's temp dir; the loser of the final rename gets ENOTEMPTY
     // or AlreadyExists rather than corrupting the winner's files.
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = skills_dir.join(format!(".install-{}-{}-{}", name, std::process::id(), nonce));
+    let tmp = skills_dir.join(format!(
+        ".install-{}-{}-{}",
+        name,
+        std::process::id(),
+        nonce
+    ));
     if tmp.exists() {
         std::fs::remove_dir_all(&tmp)?;
     }
     let result = (|| -> io::Result<()> {
         for (rel, bytes, executable) in files {
             if !safe_rel_path(rel) {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("unsafe path '{rel}'")));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("unsafe path '{rel}'"),
+                ));
             }
             let dest = tmp.join(rel);
             if let Some(parent) = dest.parent() {
@@ -345,14 +400,18 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
 /// quotes are stripped — YAML-quoted descriptions (e.g. every openclaw skill) would
 /// otherwise display with literal quote marks in the store.
 fn frontmatter_description(text: &str) -> String {
-    let Some(fm) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) else {
+    let Some(fm) = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+    else {
         return String::new();
     };
     for line in fm.0.lines() {
         if let Some(v) = line.strip_prefix("description:") {
             let v = v.trim();
             let unquoted = v
-                .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
                 .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
                 .unwrap_or(v);
             return unquoted.to_string();
@@ -376,14 +435,23 @@ async fn fetch_tree(client: &reqwest::Client, gh: &GithubRef) -> Result<serde_js
         "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
         gh.owner, gh.repo, gh.branch,
     );
-    let resp = client.get(&url).send().await.map_err(|e| format!("GitHub unreachable: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub unreachable: {e}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(format!("{}/{} (branch {}) not found on GitHub", gh.owner, gh.repo, gh.branch));
+        return Err(format!(
+            "{}/{} (branch {}) not found on GitHub",
+            gh.owner, gh.repo, gh.branch
+        ));
     }
     if !resp.status().is_success() {
         return Err(format!("GitHub tree API returned {}", resp.status()));
     }
-    resp.json().await.map_err(|e| format!("GitHub tree response: {e}"))
+    resp.json()
+        .await
+        .map_err(|e| format!("GitHub tree response: {e}"))
 }
 
 fn raw_url(gh: &GithubRef, repo_path: &str) -> String {
@@ -394,7 +462,11 @@ fn raw_url(gh: &GithubRef, repo_path: &str) -> String {
 }
 
 async fn fetch_raw(client: &reqwest::Client, url: &str, cap: u64) -> Result<Vec<u8>, String> {
-    let mut resp = client.get(url).send().await.map_err(|e| format!("download failed: {e}"))?;
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download of {url} returned {}", resp.status()));
     }
@@ -404,7 +476,11 @@ async fn fetch_raw(client: &reqwest::Client, url: &str, cap: u64) -> Result<Vec<
         return Err(format!("{url} is larger than the {cap}-byte limit"));
     }
     let mut out: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("download of {url}: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("download of {url}: {e}"))?
+    {
         if (out.len() + chunk.len()) as u64 > cap {
             return Err(format!("{url} is larger than the {cap}-byte limit"));
         }
@@ -417,16 +493,32 @@ async fn fetch_raw(client: &reqwest::Client, url: &str, cap: u64) -> Result<Vec<
 /// download read the SAME snapshot — otherwise a push between scan and download could swap
 /// file contents (or sneak a symlink past the plan's mode check).
 async fn resolve_commit_sha(client: &reqwest::Client, gh: &GithubRef) -> Result<String, String> {
-    let url = format!("https://api.github.com/repos/{}/{}/commits/{}", gh.owner, gh.repo, gh.branch);
-    let resp = client.get(&url).send().await.map_err(|e| format!("GitHub unreachable: {e}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/commits/{}",
+        gh.owner, gh.repo, gh.branch
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub unreachable: {e}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(format!("{}/{} (branch {}) not found on GitHub", gh.owner, gh.repo, gh.branch));
+        return Err(format!(
+            "{}/{} (branch {}) not found on GitHub",
+            gh.owner, gh.repo, gh.branch
+        ));
     }
     if !resp.status().is_success() {
         return Err(format!("GitHub commits API returned {}", resp.status()));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| format!("GitHub commits response: {e}"))?;
-    let sha = v.get("sha").and_then(|s| s.as_str()).ok_or("GitHub commits response missing sha")?;
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("GitHub commits response: {e}"))?;
+    let sha = v
+        .get("sha")
+        .and_then(|s| s.as_str())
+        .ok_or("GitHub commits response missing sha")?;
     if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("GitHub returned a non-hex commit sha".into());
     }
@@ -435,7 +527,11 @@ async fn resolve_commit_sha(client: &reqwest::Client, gh: &GithubRef) -> Result<
 
 /// Install a skill from a user-supplied source. `update` replaces an existing install
 /// (atomically, restoring the old version if the swap fails). Returns the skill's name.
-pub async fn install_from_source(skills_dir: &Path, source: &str, update: bool) -> Result<String, String> {
+pub async fn install_from_source(
+    skills_dir: &Path,
+    source: &str,
+    update: bool,
+) -> Result<String, String> {
     let candidates = parse_github_source(source)?;
     let client = http_client()?;
     // Resolve the first branch/path candidate whose ref actually exists (URL branch names may
@@ -493,11 +589,18 @@ fn read_sources_for_write(config_base: &Path) -> io::Result<Option<Vec<String>>>
         Err(e) => Err(e),
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .ok()
-            .and_then(|v| v.get("sources").and_then(|s| s.as_array()).map(|a| {
-                a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect::<Vec<_>>()
-            }))
+            .and_then(|v| {
+                v.get("sources").and_then(|s| s.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+            })
             .map(Some)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "skill-sources.json is corrupt")),
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "skill-sources.json is corrupt")
+            }),
     }
 }
 
@@ -519,7 +622,11 @@ fn source_key(src: &str) -> Option<GithubRef> {
 /// hold the source under a different spelling than the one being mutated.
 fn invalidate_source_cache(source: &str) {
     let key = source_key(source);
-    if let Some(m) = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(m) = CATALOG_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
         m.retain(|k, _| k != source && (key.is_none() || source_key(k) != key));
     }
 }
@@ -565,8 +672,9 @@ pub fn remove_source(config_base: &Path, source: &str) -> Result<(Vec<String>, b
 // ── Aggregated catalog ──────────────────────────────────────────────────────
 
 /// Per-source catalog cache: source string → (fetched-at, entries).
-static CATALOG_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (Instant, Vec<CatalogEntry>)>>> =
-    std::sync::Mutex::new(None);
+static CATALOG_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, (Instant, Vec<CatalogEntry>)>>,
+> = std::sync::Mutex::new(None);
 
 /// The aggregated skill catalog across every configured store source. One broken/unreachable
 /// source degrades to an entry in `errors` instead of failing the whole store. Sources are
@@ -619,7 +727,9 @@ pub async fn fetch_catalog(config_base: &Path, refresh: bool) -> (Vec<CatalogEnt
             ScanResult::Error(src, e) => errors.push(format!("{src}: {e}")),
         }
     }
-    entries.sort_by(|a, b| (a.name.as_str(), a.source_repo.as_str()).cmp(&(b.name.as_str(), b.source_repo.as_str())));
+    entries.sort_by(|a, b| {
+        (a.name.as_str(), a.source_repo.as_str()).cmp(&(b.name.as_str(), b.source_repo.as_str()))
+    });
     (entries, errors)
 }
 
@@ -642,8 +752,15 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
     }
     let Some(gh) = gh else { return Err(last_err) };
     let tree = fetch_tree(client, &gh).await?;
-    let tree_entries = tree.get("tree").and_then(|t| t.as_array()).ok_or("unexpected GitHub tree response")?;
-    let prefix = if gh.path.is_empty() { String::new() } else { format!("{}/", gh.path) };
+    let tree_entries = tree
+        .get("tree")
+        .and_then(|t| t.as_array())
+        .ok_or("unexpected GitHub tree response")?;
+    let prefix = if gh.path.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", gh.path)
+    };
     let mut dirs: Vec<String> = tree_entries
         .iter()
         .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("blob"))
@@ -655,7 +772,8 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
             if rel == "SKILL.md" {
                 return Some(gh.path.clone());
             }
-            rel.strip_suffix("/SKILL.md").map(|d| format!("{prefix}{d}"))
+            rel.strip_suffix("/SKILL.md")
+                .map(|d| format!("{prefix}{d}"))
         })
         .collect();
     dirs.sort();
@@ -668,7 +786,11 @@ async fn scan_source(client: &reqwest::Client, src: &str) -> Result<Vec<CatalogE
             let gh = &gh;
             let src = src;
             async move {
-                let md_path = if dir.is_empty() { "SKILL.md".to_string() } else { format!("{dir}/SKILL.md") };
+                let md_path = if dir.is_empty() {
+                    "SKILL.md".to_string()
+                } else {
+                    format!("{dir}/SKILL.md")
+                };
                 let text = fetch_raw(client, &raw_url(gh, &md_path), 64 * 1024)
                     .await
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -703,7 +825,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "agentic-si-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -713,23 +838,55 @@ mod tests {
     fn parses_shorthand_and_urls() {
         assert_eq!(
             parse_github_source("anthropics/skills/document-skills/xlsx").unwrap(),
-            vec![GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "HEAD".into(), path: "document-skills/xlsx".into() }],
+            vec![GithubRef {
+                owner: "anthropics".into(),
+                repo: "skills".into(),
+                branch: "HEAD".into(),
+                path: "document-skills/xlsx".into()
+            }],
         );
         // URL: ambiguous branch/path splits, longest branch candidate first.
         assert_eq!(
-            parse_github_source("https://github.com/anthropics/skills/tree/main/artifacts-builder").unwrap(),
+            parse_github_source("https://github.com/anthropics/skills/tree/main/artifacts-builder")
+                .unwrap(),
             vec![
-                GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "main/artifacts-builder".into(), path: "".into() },
-                GithubRef { owner: "anthropics".into(), repo: "skills".into(), branch: "main".into(), path: "artifacts-builder".into() },
+                GithubRef {
+                    owner: "anthropics".into(),
+                    repo: "skills".into(),
+                    branch: "main/artifacts-builder".into(),
+                    path: "".into()
+                },
+                GithubRef {
+                    owner: "anthropics".into(),
+                    repo: "skills".into(),
+                    branch: "main".into(),
+                    path: "artifacts-builder".into()
+                },
             ],
         );
         // Slashed branch (feature/foo): the right split is among the candidates.
-        let cands = parse_github_source("https://github.com/o/r/tree/feature/foo/my-skill").unwrap();
-        assert!(cands.contains(&GithubRef { owner: "o".into(), repo: "r".into(), branch: "feature/foo".into(), path: "my-skill".into() }));
-        assert!(cands.contains(&GithubRef { owner: "o".into(), repo: "r".into(), branch: "feature".into(), path: "foo/my-skill".into() }));
+        let cands =
+            parse_github_source("https://github.com/o/r/tree/feature/foo/my-skill").unwrap();
+        assert!(cands.contains(&GithubRef {
+            owner: "o".into(),
+            repo: "r".into(),
+            branch: "feature/foo".into(),
+            path: "my-skill".into()
+        }));
+        assert!(cands.contains(&GithubRef {
+            owner: "o".into(),
+            repo: "r".into(),
+            branch: "feature".into(),
+            path: "foo/my-skill".into()
+        }));
         assert_eq!(
             parse_github_source("https://github.com/owner/repo").unwrap(),
-            vec![GithubRef { owner: "owner".into(), repo: "repo".into(), branch: "HEAD".into(), path: "".into() }],
+            vec![GithubRef {
+                owner: "owner".into(),
+                repo: "repo".into(),
+                branch: "HEAD".into(),
+                path: "".into()
+            }],
         );
         assert!(parse_github_source("").is_err());
         assert!(parse_github_source("https://gitlab.com/x/y").is_err());
@@ -749,7 +906,12 @@ mod tests {
 
     #[test]
     fn plan_selects_files_under_path_and_requires_skill_md() {
-        let gh = GithubRef { owner: "o".into(), repo: "r".into(), branch: "HEAD".into(), path: "skills/my-skill".into() };
+        let gh = GithubRef {
+            owner: "o".into(),
+            repo: "r".into(),
+            branch: "HEAD".into(),
+            path: "skills/my-skill".into(),
+        };
         let tree = tree_json(&[
             ("skills/my-skill", "tree", 0, "040000"),
             ("skills/my-skill/SKILL.md", "blob", 100, "100644"),
@@ -761,16 +923,26 @@ mod tests {
         assert_eq!(plan.name, "my-skill");
         assert_eq!(plan.files.len(), 2);
         assert!(plan.files.iter().any(|f| f.rel_path == "SKILL.md"));
-        assert!(plan.files.iter().any(|f| f.rel_path == "refs/extra.md" && f.repo_path == "skills/my-skill/refs/extra.md"));
+        assert!(plan.files.iter().any(
+            |f| f.rel_path == "refs/extra.md" && f.repo_path == "skills/my-skill/refs/extra.md"
+        ));
 
         // Missing SKILL.md → error.
-        let gh2 = GithubRef { path: "skills/other/refs".into(), ..gh.clone() };
+        let gh2 = GithubRef {
+            path: "skills/other/refs".into(),
+            ..gh.clone()
+        };
         assert!(plan_from_tree(&tree, &gh2).is_err());
     }
 
     #[test]
     fn plan_rejects_symlinks_and_oversize() {
-        let gh = GithubRef { owner: "o".into(), repo: "r".into(), branch: "HEAD".into(), path: "s".into() };
+        let gh = GithubRef {
+            owner: "o".into(),
+            repo: "r".into(),
+            branch: "HEAD".into(),
+            path: "s".into(),
+        };
         let link = tree_json(&[
             ("s/SKILL.md", "blob", 10, "100644"),
             ("s/evil", "blob", 10, "120000"),
@@ -778,18 +950,27 @@ mod tests {
         assert!(plan_from_tree(&link, &gh).unwrap_err().contains("symlink"));
 
         let big = tree_json(&[("s/SKILL.md", "blob", MAX_FILE_BYTES + 1, "100644")]);
-        assert!(plan_from_tree(&big, &gh).unwrap_err().contains("per-file limit"));
+        assert!(plan_from_tree(&big, &gh)
+            .unwrap_err()
+            .contains("per-file limit"));
     }
 
     #[test]
     fn write_skill_files_roundtrip_and_guards() {
         let dir = tmp();
         let files = vec![
-            ("SKILL.md".to_string(), b"---\nname: x\n---\nbody".to_vec(), false),
+            (
+                "SKILL.md".to_string(),
+                b"---\nname: x\n---\nbody".to_vec(),
+                false,
+            ),
             ("refs/a.md".to_string(), b"ref".to_vec(), false),
         ];
         write_skill_files(&dir, "x", &files, false).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("x/refs/a.md")).unwrap(), "ref");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("x/refs/a.md")).unwrap(),
+            "ref"
+        );
         // Existing skill → AlreadyExists; nothing overwritten.
         let err = write_skill_files(&dir, "x", &files, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
@@ -798,7 +979,10 @@ mod tests {
         let bad = vec![("../escape.md".to_string(), b"x".to_vec(), false)];
         let err = write_skill_files(&dir, "y", &bad, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(!dir.join("y").exists(), "failed install must not leave a skill dir");
+        assert!(
+            !dir.join("y").exists(),
+            "failed install must not leave a skill dir"
+        );
         assert!(!dir.parent().unwrap().join("escape.md").exists());
     }
 
@@ -808,13 +992,23 @@ mod tests {
         let files = vec![
             // Frontmatter name differs from the install dir — must be rewritten, or the
             // component lists under a name the delete/toggle routes can't resolve.
-            ("SKILL.md".to_string(), b"---\nname: other-name\ndescription: d\n---\nbody\n".to_vec(), false),
+            (
+                "SKILL.md".to_string(),
+                b"---\nname: other-name\ndescription: d\n---\nbody\n".to_vec(),
+                false,
+            ),
             ("scripts/run.sh".to_string(), b"#!/bin/sh\n".to_vec(), true),
         ];
         write_skill_files(&dir, "my-skill", &files, false).unwrap();
         let md = std::fs::read_to_string(dir.join("my-skill/SKILL.md")).unwrap();
-        assert!(md.contains("name: my-skill"), "frontmatter name must be rewritten: {md}");
-        assert!(md.contains("description: d"), "other frontmatter lines must survive");
+        assert!(
+            md.contains("name: my-skill"),
+            "frontmatter name must be rewritten: {md}"
+        );
+        assert!(
+            md.contains("description: d"),
+            "other frontmatter lines must survive"
+        );
         assert!(md.contains("body"), "body must survive");
         // list_skills resolves the component under the DIRECTORY name.
         let listed = crate::engine::skills::list_skills(&dir);
@@ -822,7 +1016,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.join("my-skill/scripts/run.sh")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.join("my-skill/scripts/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o111, 0o111, "helper script must stay executable");
         }
     }
@@ -830,18 +1027,31 @@ mod tests {
     #[test]
     fn replace_swaps_existing_skill_and_missing_target_still_works() {
         let dir = tmp();
-        let v1 = vec![("SKILL.md".to_string(), b"---\nname: x\n---\nv1".to_vec(), false)];
+        let v1 = vec![(
+            "SKILL.md".to_string(),
+            b"---\nname: x\n---\nv1".to_vec(),
+            false,
+        )];
         write_skill_files(&dir, "x", &v1, false).unwrap();
         // Update: replace=true swaps in the new version.
         let v2 = vec![
-            ("SKILL.md".to_string(), b"---\nname: x\n---\nv2".to_vec(), false),
+            (
+                "SKILL.md".to_string(),
+                b"---\nname: x\n---\nv2".to_vec(),
+                false,
+            ),
             ("refs/new.md".to_string(), b"n".to_vec(), false),
         ];
         write_skill_files(&dir, "x", &v2, true).unwrap();
-        assert!(std::fs::read_to_string(dir.join("x/SKILL.md")).unwrap().contains("v2"));
+        assert!(std::fs::read_to_string(dir.join("x/SKILL.md"))
+            .unwrap()
+            .contains("v2"));
         assert!(dir.join("x/refs/new.md").exists());
         // No leftover parked .old-* dirs.
-        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
         // replace=true with no existing target behaves like a fresh install.
         write_skill_files(&dir, "fresh", &v1, true).unwrap();
         assert!(dir.join("fresh/SKILL.md").exists());
@@ -854,8 +1064,15 @@ mod tests {
         assert_eq!(read_sources(&dir), vec![DEFAULT_SOURCE.to_string()]);
         // Add: validates syntax, dedupes, persists.
         let s = add_source(&dir, "owner/repo/skills").unwrap();
-        assert_eq!(s, vec![DEFAULT_SOURCE.to_string(), "owner/repo/skills".to_string()]);
-        assert_eq!(add_source(&dir, "owner/repo/skills").unwrap().len(), 2, "dedupe");
+        assert_eq!(
+            s,
+            vec![DEFAULT_SOURCE.to_string(), "owner/repo/skills".to_string()]
+        );
+        assert_eq!(
+            add_source(&dir, "owner/repo/skills").unwrap().len(),
+            2,
+            "dedupe"
+        );
         assert!(add_source(&dir, "not a source").is_err());
         assert!(add_source(&dir, "owner/repo/pa?th").is_err());
         // Remove: found flag; unknown → false.
@@ -891,7 +1108,10 @@ mod tests {
             frontmatter_description("---\ndescription: \"Current weather, with quotes\"\n---\n"),
             "Current weather, with quotes",
         );
-        assert_eq!(frontmatter_description("---\ndescription: 'single'\n---\n"), "single");
+        assert_eq!(
+            frontmatter_description("---\ndescription: 'single'\n---\n"),
+            "single"
+        );
         assert_eq!(frontmatter_description("no frontmatter"), "");
     }
 }

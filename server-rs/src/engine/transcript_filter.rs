@@ -10,7 +10,9 @@ fn extract_role_text(line: &str) -> Option<(&'static str, String)> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let ty = v.get("type")?.as_str()?;
     // Skip synthetic frames.
-    if ty == "agentic_prompt" || ty == "system" { return None; }
+    if ty == "agentic_prompt" || ty == "system" {
+        return None;
+    }
     // Top-level user / assistant frames carry the message in `.message.content`.
     let role = match ty {
         "user" => "USER",
@@ -23,22 +25,28 @@ fn extract_role_text(line: &str) -> Option<(&'static str, String)> {
         // Only text blocks. tool_use / tool_result / image etc. are skipped.
         if b.get("type").and_then(|t| t.as_str()) == Some("text") {
             if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                if !text.is_empty() { text.push('\n'); }
+                if !text.is_empty() {
+                    text.push('\n');
+                }
                 text.push_str(t);
             }
         }
     }
-    if text.is_empty() { return None; }
+    if text.is_empty() {
+        return None;
+    }
     Some((role, text))
 }
 
 /// Strip ASCII control characters that would break a prompt (BEL, BS, VT, FF, ESC, ...).
 /// Keeps `\n` and `\t`.
 fn strip_control_chars(s: &str) -> String {
-    s.chars().filter(|c| {
-        let cp = *c as u32;
-        cp >= 0x20 || *c == '\n' || *c == '\t'
-    }).collect()
+    s.chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            cp >= 0x20 || *c == '\n' || *c == '\t'
+        })
+        .collect()
 }
 
 /// Convert raw stream-json log contents to a plain-text transcript. See module docs.
@@ -46,10 +54,14 @@ pub fn filter_log_to_transcript(raw: &str) -> String {
     let mut out = String::new();
     for line in raw.split('\n') {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Some((role, text)) = extract_role_text(line) {
             let cleaned = strip_control_chars(&text);
-            if !out.is_empty() { out.push_str("\n\n"); }
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
             out.push_str(role);
             out.push_str(": ");
             out.push_str(&cleaned);
@@ -59,7 +71,9 @@ pub fn filter_log_to_transcript(raw: &str) -> String {
     if out.len() > MAX_TRANSCRIPT_CHARS {
         let mut cut = MAX_TRANSCRIPT_CHARS;
         // Avoid cutting mid-UTF-8-codepoint — back up to the nearest char boundary.
-        while cut > 0 && !out.is_char_boundary(cut) { cut -= 1; }
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
         out.truncate(cut);
         out.push('\n');
         out.push_str(TRUNCATION_MARKER);
@@ -88,7 +102,10 @@ mod tests {
     fn extracts_user_and_assistant_text_in_order() {
         let log = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n{\"type\":\"agentic_prompt\",\"text\":\"internal\",\"at\":1}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello there\"}]}}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"thanks\"}]}}";
         let out = filter_log_to_transcript(log);
-        assert_eq!(out, "USER: hi\n\n\nASSISTANT: hello there\n\n\nUSER: thanks\n");
+        assert_eq!(
+            out,
+            "USER: hi\n\n\nASSISTANT: hello there\n\n\nUSER: thanks\n"
+        );
     }
 
     #[test]
@@ -116,8 +133,15 @@ mod tests {
             ));
         }
         let out = filter_log_to_transcript(&log);
-        assert!(out.len() <= MAX_TRANSCRIPT_CHARS + TRUNCATION_MARKER.len() + 16, "output too long: {}", out.len());
-        assert!(out.contains(TRUNCATION_MARKER), "should contain truncation marker");
+        assert!(
+            out.len() <= MAX_TRANSCRIPT_CHARS + TRUNCATION_MARKER.len() + 16,
+            "output too long: {}",
+            out.len()
+        );
+        assert!(
+            out.contains(TRUNCATION_MARKER),
+            "should contain truncation marker"
+        );
     }
 
     #[test]

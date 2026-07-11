@@ -3,7 +3,11 @@ use std::path::Path;
 /// Run `claude <args>` with env `CLAUDE_CONFIG_DIR=<config_base>`, no shell, stdin null.
 /// Kills the child after `timeout_secs` seconds using kill -9 on the pid.
 /// Returns `Ok(stdout)` on zero exit or `Err(stderr/reason)` otherwise.
-pub fn run_plugin_command(config_base: &Path, args: &[&str], timeout_secs: u64) -> Result<String, String> {
+pub fn run_plugin_command(
+    config_base: &Path,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
     let child = Command::new("claude")
@@ -20,7 +24,9 @@ pub fn run_plugin_command(config_base: &Path, args: &[&str], timeout_secs: u64) 
     let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<std::process::Output>>();
 
     // Move the child into a thread for waiting; the main thread enforces the wall-clock timeout.
-    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
 
     match rx.recv_timeout(timeout) {
         Ok(Ok(output)) => {
@@ -34,9 +40,17 @@ pub fn run_plugin_command(config_base: &Path, args: &[&str], timeout_secs: u64) 
         Err(_) => {
             // Timeout: best-effort kill by pid so the process doesn't linger.
             #[cfg(unix)]
-            { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status(); }
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
             #[cfg(windows)]
-            { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).status(); }
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .status();
+            }
             Err(format!("plugin command timed out after {timeout_secs}s"))
         }
     }

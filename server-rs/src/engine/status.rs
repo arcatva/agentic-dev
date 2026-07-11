@@ -44,7 +44,10 @@ impl SessionStatus {
     /// transition from a terminal is to the same state via an idempotent
     /// no-op; see `legal_transition_to`).
     pub fn terminal(&self) -> bool {
-        matches!(self, SessionStatus::Done | SessionStatus::Failed | SessionStatus::Killed)
+        matches!(
+            self,
+            SessionStatus::Done | SessionStatus::Failed | SessionStatus::Killed
+        )
     }
 
     /// Authoritative transition matrix. PR6's `Engine::transition()` calls
@@ -138,9 +141,15 @@ mod tests {
     #[test]
     fn from_str_unknown_yields_failed() {
         // Defensive: a future-added status should never crash the parser.
-        assert_eq!("zombie".parse::<SessionStatus>().unwrap(), SessionStatus::Failed);
+        assert_eq!(
+            "zombie".parse::<SessionStatus>().unwrap(),
+            SessionStatus::Failed
+        );
         assert_eq!("".parse::<SessionStatus>().unwrap(), SessionStatus::Failed);
-        assert_eq!("DONE".parse::<SessionStatus>().unwrap(), SessionStatus::Failed); // case-sensitive
+        assert_eq!(
+            "DONE".parse::<SessionStatus>().unwrap(),
+            SessionStatus::Failed
+        ); // case-sensitive
     }
 
     #[test]

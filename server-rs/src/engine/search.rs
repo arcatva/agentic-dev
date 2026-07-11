@@ -2,23 +2,40 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::engine::Engine;
 use crate::engine::store::Session;
 use crate::engine::transcript::filter_rendered;
+use crate::engine::Engine;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum SearchField {
-    Title, Repo, Branch, SessionId, Status, Error,
+    Title,
+    Repo,
+    Branch,
+    SessionId,
+    Status,
+    Error,
     Prompt,
-    Notes, Answer,
-    ToolName, ToolSummary, ToolDetail,
-    SpawnDesc, SpawnResult,
-    Skill, Workflow, Ask, Plan, Perm,
+    Notes,
+    Answer,
+    ToolName,
+    ToolSummary,
+    ToolDetail,
+    SpawnDesc,
+    SpawnResult,
+    Skill,
+    Workflow,
+    Ask,
+    Plan,
+    Perm,
     Attachment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SearchTier { A, B, C }
+pub enum SearchTier {
+    A,
+    B,
+    C,
+}
 
 pub struct ClassifiedLine {
     pub field: SearchField,
@@ -27,31 +44,42 @@ pub struct ClassifiedLine {
 }
 
 pub fn derive_tool_summary(name: &str, input: &serde_json::Value) -> String {
-    fn s(v: &serde_json::Value) -> String { v.as_str().unwrap_or("").to_string() }
+    fn s(v: &serde_json::Value) -> String {
+        v.as_str().unwrap_or("").to_string()
+    }
     match name {
         "Read" | "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => {
-            std::path::Path::new(&s(&input["file_path"])).file_name()
-                .and_then(|x| x.to_str()).unwrap_or("").to_string()
-        }
-        "Bash" => {
-            s(&input["command"])
-                .lines()
-                .find(|l| !l.trim().is_empty())
+            std::path::Path::new(&s(&input["file_path"]))
+                .file_name()
+                .and_then(|x| x.to_str())
                 .unwrap_or("")
-                .trim()
-                .chars()
-                .take(64)
-                .collect()
+                .to_string()
         }
+        "Bash" => s(&input["command"])
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(64)
+            .collect(),
         "Glob" | "Grep" => s(&input["pattern"]),
         "WebFetch" | "WebSearch" => {
             let url = s(&input["url"]);
-            if !url.is_empty() { url } else { s(&input["query"]) }
+            if !url.is_empty() {
+                url
+            } else {
+                s(&input["query"])
+            }
         }
         "TaskCreate" => s(&input["subject"]),
         "TaskUpdate" => {
             let status = s(&input["status"]);
-            if status.is_empty() { s(&input["taskId"]) } else { status }
+            if status.is_empty() {
+                s(&input["taskId"])
+            } else {
+                status
+            }
         }
         "ToolSearch" => s(&input["query"]),
         _ => String::new(),
@@ -59,12 +87,20 @@ pub fn derive_tool_summary(name: &str, input: &serde_json::Value) -> String {
 }
 
 pub fn derive_tool_detail(name: &str, input: &serde_json::Value) -> String {
-    fn s(v: &serde_json::Value) -> String { v.as_str().unwrap_or("").to_string() }
+    fn s(v: &serde_json::Value) -> String {
+        v.as_str().unwrap_or("").to_string()
+    }
     match name {
         "Bash" => s(&input["command"]),
-        "Edit" | "MultiEdit" => format!("- {}\n\n+ {}", s(&input["old_string"]), s(&input["new_string"])),
+        "Edit" | "MultiEdit" => format!(
+            "- {}\n\n+ {}",
+            s(&input["old_string"]),
+            s(&input["new_string"])
+        ),
         "Write" => {
-            let body = input.get("contents").and_then(|v| v.as_str())
+            let body = input
+                .get("contents")
+                .and_then(|v| v.as_str())
                 .or_else(|| input.get("content").and_then(|v| v.as_str()))
                 .unwrap_or("");
             body.chars().take(4000).collect()
@@ -92,8 +128,16 @@ pub fn classify_rendered_line(line: &str) -> Option<ClassifiedLine> {
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match ty {
         "agentic_prompt" => {
-            let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
-            Some(ClassifiedLine { field: SearchField::Prompt, tier: SearchTier::A, text })
+            let text = v
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(ClassifiedLine {
+                field: SearchField::Prompt,
+                tier: SearchTier::A,
+                text,
+            })
         }
         "stream_event" => {
             let delta = v.get("event").and_then(|e| e.get("delta"));
@@ -101,57 +145,125 @@ pub fn classify_rendered_line(line: &str) -> Option<ClassifiedLine> {
                 Some("text_delta") => Some(ClassifiedLine {
                     field: SearchField::Notes,
                     tier: SearchTier::C,
-                    text: delta.and_then(|d| d.get("text")).and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                    text: delta
+                        .and_then(|d| d.get("text"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 }),
                 Some("thinking_delta") => None, // excluded by spec
                 _ => None,
             }
         }
         "assistant" => {
-            let content = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array());
+            let content = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array());
             let Some(content) = content else { return None };
             // Pick the first tool_use block; if none, drop.
             for blk in content {
-                if blk.get("type").and_then(|t| t.as_str()) != Some("tool_use") { continue; }
+                if blk.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                    continue;
+                }
                 let name = blk.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let input = blk.get("input").cloned().unwrap_or(serde_json::Value::Null);
                 let (field, text) = match name {
-                    "Skill" => (SearchField::Skill, input.get("skill").and_then(|s| s.as_str()).unwrap_or("").to_string()),
-                    "Workflow" => (SearchField::Workflow, input.get("name").and_then(|s| s.as_str())
-                        .or_else(|| input.get("title").and_then(|s| s.as_str()))
-                        .unwrap_or("").to_string()),
-                    "AskUserQuestion" => (SearchField::Ask, serde_json::to_string(input.get("questions").unwrap_or(&serde_json::Value::Null)).unwrap_or_default()),
-                    "Agent" | "Task" => (SearchField::SpawnDesc, input.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string()),
+                    "Skill" => (
+                        SearchField::Skill,
+                        input
+                            .get("skill")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    "Workflow" => (
+                        SearchField::Workflow,
+                        input
+                            .get("name")
+                            .and_then(|s| s.as_str())
+                            .or_else(|| input.get("title").and_then(|s| s.as_str()))
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    "AskUserQuestion" => (
+                        SearchField::Ask,
+                        serde_json::to_string(
+                            input.get("questions").unwrap_or(&serde_json::Value::Null),
+                        )
+                        .unwrap_or_default(),
+                    ),
+                    "Agent" | "Task" => (
+                        SearchField::SpawnDesc,
+                        input
+                            .get("description")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
                     other => (SearchField::ToolName, derive_tool_summary(other, &input)),
                 };
-                return Some(ClassifiedLine { field, tier: SearchTier::C, text });
+                return Some(ClassifiedLine {
+                    field,
+                    tier: SearchTier::C,
+                    text,
+                });
             }
             None
         }
         "result" => {
-            let text = v.get("result").and_then(|s| s.as_str())
+            let text = v
+                .get("result")
+                .and_then(|s| s.as_str())
                 .or_else(|| v.get("error").and_then(|s| s.as_str()))
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            if text.is_empty() { None } else { Some(ClassifiedLine { field: SearchField::Answer, tier: SearchTier::C, text }) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(ClassifiedLine {
+                    field: SearchField::Answer,
+                    tier: SearchTier::C,
+                    text,
+                })
+            }
         }
         "agent_result" => Some(ClassifiedLine {
             field: SearchField::SpawnResult,
             tier: SearchTier::C,
-            text: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            text: v
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
         }),
         "agentic_perm" => {
             let kind = v.get("permKind").and_then(|s| s.as_str()).unwrap_or("perm");
-            let field = if kind == "plan" { SearchField::Plan } else { SearchField::Perm };
-            let text = v.get("plan").and_then(|s| s.as_str())
+            let field = if kind == "plan" {
+                SearchField::Plan
+            } else {
+                SearchField::Perm
+            };
+            let text = v
+                .get("plan")
+                .and_then(|s| s.as_str())
                 .or_else(|| v.get("tool").and_then(|s| s.as_str()))
-                .unwrap_or("").to_string();
-            Some(ClassifiedLine { field, tier: SearchTier::C, text })
+                .unwrap_or("")
+                .to_string();
+            Some(ClassifiedLine {
+                field,
+                tier: SearchTier::C,
+                text,
+            })
         }
         "agentic_file" => Some(ClassifiedLine {
             field: SearchField::Attachment,
             tier: SearchTier::C,
-            text: v.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            text: v
+                .get("path")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
         }),
         _ => None,
     }
@@ -171,23 +283,40 @@ const TOTAL_RESULTS_CAP: usize = 50;
 pub struct SearchMatch {
     pub field: SearchField,
     pub snippet: String,
-    #[serde(rename = "lineIndex")] pub line_index: usize,
+    #[serde(rename = "lineIndex")]
+    pub line_index: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub struct SearchHit { pub session: Session, pub score: f32, pub matches: Vec<SearchMatch> }
+pub struct SearchHit {
+    pub session: Session,
+    pub score: f32,
+    pub matches: Vec<SearchMatch>,
+}
 
 #[derive(Debug, Serialize)]
-pub struct SearchResponse { pub query: String, pub results: Vec<SearchHit> }
+pub struct SearchResponse {
+    pub query: String,
+    pub results: Vec<SearchHit>,
+}
 
-pub struct SearchService { pub engine: Arc<Engine> }
+pub struct SearchService {
+    pub engine: Arc<Engine>,
+}
 
 impl SearchService {
-    pub fn new(engine: Arc<Engine>) -> Self { Self { engine } }
+    pub fn new(engine: Arc<Engine>) -> Self {
+        Self { engine }
+    }
     pub async fn search(&self, q: &str, limit: usize) -> SearchResponse {
         let query = q.trim();
-        let mut resp = SearchResponse { query: query.to_string(), results: vec![] };
-        if query.chars().count() < QUERY_MIN_LEN { return resp; }
+        let mut resp = SearchResponse {
+            query: query.to_string(),
+            results: vec![],
+        };
+        if query.chars().count() < QUERY_MIN_LEN {
+            return resp;
+        }
         let needle = query.to_lowercase();
         let limit = limit.clamp(1, TOTAL_RESULTS_CAP);
         let sessions = self.engine.list().await;
@@ -201,15 +330,25 @@ impl SearchService {
             }
             // Tier B
             for repo in &session.repos {
-                if let Some(m) = metadata_match(SearchField::Repo, repo, &needle) { matches.push(m); }
+                if let Some(m) = metadata_match(SearchField::Repo, repo, &needle) {
+                    matches.push(m);
+                }
             }
             if let Some(branch) = &session.branch {
-                if let Some(m) = metadata_match(SearchField::Branch, branch, &needle) { matches.push(m); }
+                if let Some(m) = metadata_match(SearchField::Branch, branch, &needle) {
+                    matches.push(m);
+                }
             }
-            if let Some(m) = metadata_match(SearchField::SessionId, &session.id, &needle) { matches.push(m); }
-            if let Some(m) = metadata_match(SearchField::Status, &session.status, &needle) { matches.push(m); }
+            if let Some(m) = metadata_match(SearchField::SessionId, &session.id, &needle) {
+                matches.push(m);
+            }
+            if let Some(m) = metadata_match(SearchField::Status, &session.status, &needle) {
+                matches.push(m);
+            }
             if let Some(err) = &session.error {
-                if let Some(m) = metadata_match(SearchField::Error, err, &needle) { matches.push(m); }
+                if let Some(m) = metadata_match(SearchField::Error, err, &needle) {
+                    matches.push(m);
+                }
             }
 
             // Tier C — scan rendered projection
@@ -232,32 +371,65 @@ impl SearchService {
                                 if let Some(tool_name) = tool_name_from_line(line) {
                                     let tool_matches = match_tool(&tool_name, &input, query, i);
                                     for m in tool_matches {
-                                        if matches.len() >= PER_SESSION_MATCH_CAP { break; }
+                                        if matches.len() >= PER_SESSION_MATCH_CAP {
+                                            break;
+                                        }
                                         matches.push(m);
                                     }
                                 }
                             }
                         }
-                        if matches.len() >= PER_SESSION_MATCH_CAP { break; }
+                        if matches.len() >= PER_SESSION_MATCH_CAP {
+                            break;
+                        }
                     }
                 }
             }
 
-            if matches.is_empty() { continue; }
+            if matches.is_empty() {
+                continue;
+            }
 
             // Tier: A=0, B=1, C=2
-            let tier = if matches.iter().any(|m| matches!(m.field, SearchField::Prompt | SearchField::Title)) { 0 }
-                       else if matches.iter().any(|m| matches!(m.field, SearchField::Repo | SearchField::Branch | SearchField::SessionId | SearchField::Status | SearchField::Error)) { 1 }
-                       else { 2 };
+            let tier = if matches
+                .iter()
+                .any(|m| matches!(m.field, SearchField::Prompt | SearchField::Title))
+            {
+                0
+            } else if matches.iter().any(|m| {
+                matches!(
+                    m.field,
+                    SearchField::Repo
+                        | SearchField::Branch
+                        | SearchField::SessionId
+                        | SearchField::Status
+                        | SearchField::Error
+                )
+            }) {
+                1
+            } else {
+                2
+            };
             let score = (matches.len() as f32) - (tier as f32) * 0.1;
-            hits.push((tier, -score, SearchHit { session, score, matches }));
+            hits.push((
+                tier,
+                -score,
+                SearchHit {
+                    session,
+                    score,
+                    matches,
+                },
+            ));
         }
 
         hits.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .then_with(|| b.2.session.last_user_message_at
-                    .cmp(&a.2.session.last_user_message_at))
+                .then_with(|| {
+                    b.2.session
+                        .last_user_message_at
+                        .cmp(&a.2.session.last_user_message_at)
+                })
         });
         resp.results = hits.into_iter().take(limit).map(|(_, _, h)| h).collect();
         resp
@@ -286,7 +458,10 @@ fn tool_name_from_line(line: &str) -> Option<String> {
     let arr = v.get("message")?.get("content")?.as_array()?;
     for blk in arr {
         if blk.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-            return blk.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+            return blk
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string());
         }
     }
     None
@@ -295,15 +470,23 @@ fn tool_name_from_line(line: &str) -> Option<String> {
 /// Extract the tool input from a rendered `assistant` line.
 fn tool_input_from_line(line: &str) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    v.get("message")?.get("content")?.as_array()?
+    v.get("message")?
+        .get("content")?
+        .as_array()?
         .iter()
         .find(|blk| blk.get("type").and_then(|t| t.as_str()) == Some("tool_use"))?
-        .get("input").cloned()
+        .get("input")
+        .cloned()
 }
 
 /// 0-2 matches: ToolSummary and/or ToolDetail when their derived strings contain the needle.
 /// Caller is responsible for ToolName.
-fn match_tool(name: &str, input: &serde_json::Value, query: &str, line_index: usize) -> Vec<SearchMatch> {
+fn match_tool(
+    name: &str,
+    input: &serde_json::Value,
+    query: &str,
+    line_index: usize,
+) -> Vec<SearchMatch> {
     let mut out = Vec::new();
     let needle = query.to_lowercase();
     let summary = derive_tool_summary(name, input);
@@ -326,7 +509,9 @@ fn match_tool(name: &str, input: &serde_json::Value, query: &str, line_index: us
 }
 
 pub fn extract_snippet(text: &str, query: &str) -> String {
-    if text.chars().count() <= SNIPPET_MAX { return text.to_string(); }
+    if text.chars().count() <= SNIPPET_MAX {
+        return text.to_string();
+    }
     let lower = text.to_lowercase();
     let needle = query.to_lowercase();
     // `str::find` returns a BYTE offset, but the windowing below counts in CHARS (and slices `text`
@@ -334,29 +519,43 @@ pub fn extract_snippet(text: &str, query: &str) -> String {
     // (CJK is 3 bytes/char, emoji 4) centres the window several chars-per-byte too far to the right,
     // which for a long field drops the matched term out of the snippet entirely (it then has nothing
     // to highlight). For ASCII byte offset == char index, so this is a no-op there.
-    let center = lower.find(&needle).map_or(0, |byte| lower[..byte].chars().count());
+    let center = lower
+        .find(&needle)
+        .map_or(0, |byte| lower[..byte].chars().count());
     // chars() is used for all length math (the snippet cap is 200 *chars*); byte offsets are derived
     // only for the final slice, since `&str[..]` indexes in bytes.
     let half = SNIPPET_MAX / 2;
     let start_char = center.saturating_sub(half);
     let end_char = (start_char + SNIPPET_MAX).min(text.chars().count());
     let start_char = end_char.saturating_sub(SNIPPET_MAX);
-    let start_byte = text.char_indices().nth(start_char).map(|(i, _)| i).unwrap_or(text.len());
-    let end_byte = text.char_indices().nth(end_char).map(|(i, _)| i).unwrap_or(text.len());
+    let start_byte = text
+        .char_indices()
+        .nth(start_char)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let end_byte = text
+        .char_indices()
+        .nth(end_char)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
     let window = &text[start_byte..end_byte];
     let mut out = String::with_capacity(SNIPPET_MAX + 6);
-    if start_char > 0 { out.push_str("..."); }
+    if start_char > 0 {
+        out.push_str("...");
+    }
     out.push_str(window);
-    if end_char < text.chars().count() { out.push_str("..."); }
+    if end_char < text.chars().count() {
+        out.push_str("...");
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::title_client::{TitleGenerator, TitleGeneratorError};
     use crate::engine::Engine;
     use crate::engine::EngineConfig;
-    use crate::engine::title_client::{TitleGenerator, TitleGeneratorError};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -386,11 +585,10 @@ mod tests {
     /// doesn't need the rest of that module's helpers; the engine is fully booted (open store,
     /// recover, reconcile) so SearchService::search has a real `Engine` to call.
     async fn make_test_engine() -> Engine {
-        static CTR: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = CTR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir()
-            .join(format!("agentic-search-test-{}-{n}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("agentic-search-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         let cfg = EngineConfig {
@@ -447,15 +645,23 @@ mod tests {
         // truncated snippet must end with "..." and stay under 200 + ellipsis chars.
         let text: String = (0..300).map(|i| (b'a' + (i % 26) as u8) as char).collect();
         let s = extract_snippet(&text, "needle");
-        assert!(s.len() <= 203, "snippet must be ≤ 200 chars + \"...\"; got len={}", s.len());
-        assert!(s.ends_with("..."), "cut at trailing edge must append \"...\"; got: {s}");
+        assert!(
+            s.len() <= 203,
+            "snippet must be ≤ 200 chars + \"...\"; got len={}",
+            s.len()
+        );
+        assert!(
+            s.ends_with("..."),
+            "cut at trailing edge must append \"...\"; got: {s}"
+        );
     }
 
     #[test]
     fn snippet_prefers_query_window() {
         // 86-char text with "build failed" near the end. Spec cap is 200, so no truncation
         // needed — the query window IS the whole text. The snippet must contain the query.
-        let text = "lorem ipsum dolor sit amet, consectetur adipiscing elit, build failed here somewhere";
+        let text =
+            "lorem ipsum dolor sit amet, consectetur adipiscing elit, build failed here somewhere";
         let s = extract_snippet(text, "build failed");
         assert!(s.contains("build failed"), "snippet must contain the query");
     }
@@ -470,22 +676,29 @@ mod tests {
         let text = format!("{}{}{}", "啊".repeat(60), needle, "吧".repeat(250));
         assert_eq!(text.chars().count(), 312);
         let s = extract_snippet(&text, needle);
-        assert!(s.contains(needle), "CJK snippet must contain the matched needle; got: {s}");
+        assert!(
+            s.contains(needle),
+            "CJK snippet must contain the matched needle; got: {s}"
+        );
     }
 
     #[test]
     fn classifies_prompt_and_text_lines() {
         let prompt = r#"{"type":"agentic_prompt","text":"hi","at":1}"#;
-        let text = r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"hello"}}}"#;
+        let text =
+            r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"hello"}}}"#;
         let thinking = r#"{"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"..."}}}"#;
         let tool_bash = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls","description":"list"}}]}}"#;
-        let result_text = r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.01}"#;
+        let result_text =
+            r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.01}"#;
         let ask = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"Q?","options":[]}]}}]}}"#;
-        let perm = r#"{"type":"agentic_perm","permKind":"perm","id":"p1","tool":"Bash","input":{}}"#;
+        let perm =
+            r#"{"type":"agentic_perm","permKind":"perm","id":"p1","tool":"Bash","input":{}}"#;
         let plan = r#"{"type":"agentic_perm","permKind":"plan","id":"pl1","plan":"x"}"#;
         let att = r#"{"type":"agentic_file","path":"a.png","at":1}"#;
         let sys = r#"{"type":"system","subtype":"init"}"#;
-        let user_tr = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#;
+        let user_tr =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#;
         let agent_res = r#"{"type":"agent_result","toolUseId":"tu_1","text":"found it"}"#;
 
         let cases = vec![
@@ -500,11 +713,19 @@ mod tests {
             (att, Some(SearchField::Attachment), Some(SearchTier::C)),
             (sys, None, None),
             (user_tr, None, None),
-            (agent_res, Some(SearchField::SpawnResult), Some(SearchTier::C)),
+            (
+                agent_res,
+                Some(SearchField::SpawnResult),
+                Some(SearchTier::C),
+            ),
         ];
         for (line, expected_field, expected_tier) in cases {
             let got = classify_rendered_line(line);
-            assert_eq!(got.as_ref().map(|c| c.field.clone()), expected_field, "line: {line}");
+            assert_eq!(
+                got.as_ref().map(|c| c.field.clone()),
+                expected_field,
+                "line: {line}"
+            );
             assert_eq!(got.as_ref().map(|c| c.tier), expected_tier, "line: {line}");
         }
     }

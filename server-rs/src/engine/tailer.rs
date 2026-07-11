@@ -126,9 +126,7 @@ mod tests {
         );
         assert!(t.poll().is_empty()); // nothing new
         append(&p, &format!("{TEXT}\n"));
-        assert!(
-            matches!(t.poll().as_slice(), [ClaudeEvent::Text { text, .. }] if text == "hi")
-        );
+        assert!(matches!(t.poll().as_slice(), [ClaudeEvent::Text { text, .. }] if text == "hi"));
     }
 
     #[test]
@@ -162,8 +160,6 @@ mod tests {
         let mut t = EventTailer::new(&p, start);
         assert!(t.poll().is_empty()); // skip what was already there
         append(&p, &format!("{TEXT}\n"));
-        assert!(
-            matches!(t.poll().as_slice(), [ClaudeEvent::Text { text, .. }] if text == "hi")
-        );
+        assert!(matches!(t.poll().as_slice(), [ClaudeEvent::Text { text, .. }] if text == "hi"));
     }
 }

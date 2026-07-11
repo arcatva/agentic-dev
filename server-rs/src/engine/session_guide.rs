@@ -60,12 +60,19 @@ pub fn build_session_guide(repos: &[(String, Option<String>)], skills: &[String]
 }
 
 /// Write the orientation CLAUDE.md into the session dir. Callers gate on multi-repo. Best-effort.
-pub fn write_session_guide(session_dir: &Path, repo_worktrees: &[(String, PathBuf)], skills: &[String]) {
+pub fn write_session_guide(
+    session_dir: &Path,
+    repo_worktrees: &[(String, PathBuf)],
+    skills: &[String],
+) {
     let repos: Vec<(String, Option<String>)> = repo_worktrees
         .iter()
         .map(|(repo, wt)| (repo.clone(), summarize_repo(wt)))
         .collect();
-    let _ = std::fs::write(session_dir.join("CLAUDE.md"), build_session_guide(&repos, skills));
+    let _ = std::fs::write(
+        session_dir.join("CLAUDE.md"),
+        build_session_guide(&repos, skills),
+    );
 }
 
 /// Tier-1 "harness operating rules" — the model-routing rule. Injected into the MAIN session as an
@@ -165,15 +172,25 @@ mod tests {
 
     fn tmp() -> PathBuf {
         static C: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!("sg-{}-{}", std::process::id(), C.fetch_add(1, Ordering::SeqCst)));
+        let p = std::env::temp_dir().join(format!(
+            "sg-{}-{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::SeqCst)
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
 
     #[test]
     fn first_line_strips_heading_and_trims() {
-        assert_eq!(first_meaningful_line("## My Repo\n\nbody"), Some("My Repo".into()));
-        assert_eq!(first_meaningful_line("\n\n  hello  \nx"), Some("hello".into()));
+        assert_eq!(
+            first_meaningful_line("## My Repo\n\nbody"),
+            Some("My Repo".into())
+        );
+        assert_eq!(
+            first_meaningful_line("\n\n  hello  \nx"),
+            Some("hello".into())
+        );
         assert_eq!(first_meaningful_line("\n  \n"), None);
         let long = "#".to_string() + &"a".repeat(150);
         assert!(first_meaningful_line(&long).unwrap().ends_with('…'));
@@ -194,7 +211,10 @@ mod tests {
     #[test]
     fn guide_lists_repos_with_summaries_and_skills() {
         let g = build_session_guide(
-            &[("api".into(), Some("the backend".into())), ("web".into(), None)],
+            &[
+                ("api".into(), Some("the backend".into())),
+                ("web".into(), None),
+            ],
             &["rust".into(), "tdd".into()],
         );
         assert!(g.contains("# agentic-dev multi-repo session"));
@@ -207,7 +227,8 @@ mod tests {
     #[test]
     fn write_guide_creates_claude_md_in_session_dir() {
         let sess = tmp();
-        let r1 = tmp(); std::fs::write(r1.join("CLAUDE.md"), "# repo one").unwrap();
+        let r1 = tmp();
+        std::fs::write(r1.join("CLAUDE.md"), "# repo one").unwrap();
         write_session_guide(&sess, &[("one".into(), r1)], &[]);
         let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
         assert!(content.contains("- `one/` — repo one"));
@@ -220,7 +241,10 @@ mod tests {
         let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
         assert!(content.contains("# Guide\nbody"));
         assert!(content.contains("Run tests first."));
-        assert!(content.contains("\n---\n"), "sections must be separated by a horizontal rule");
+        assert!(
+            content.contains("\n---\n"),
+            "sections must be separated by a horizontal rule"
+        );
         assert!(content.ends_with('\n'));
     }
 
@@ -238,12 +262,18 @@ mod tests {
         // A blank section among real ones is dropped (no leading/trailing separator).
         let sess = tmp();
         write_session_claude_md(&sess, &["".into(), "  \n ".into(), "real".into()]);
-        assert_eq!(std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap(), "real\n");
+        assert_eq!(
+            std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap(),
+            "real\n"
+        );
 
         // All-empty (the single-repo, no-custom-guidance case) writes no file at all.
         let sess2 = tmp();
         write_session_claude_md(&sess2, &["".into(), "   ".into()]);
-        assert!(!sess2.join("CLAUDE.md").exists(), "no CLAUDE.md should be written when every section is blank");
+        assert!(
+            !sess2.join("CLAUDE.md").exists(),
+            "no CLAUDE.md should be written when every section is blank"
+        );
 
         // Empty slice is a no-op too.
         let sess3 = tmp();
@@ -254,7 +284,8 @@ mod tests {
     #[test]
     fn worktree_setup_guide_present_and_composed_into_claude_md() {
         // The const carries its heading and the actionable verbs.
-        assert!(WORKTREE_SETUP_GUIDE.contains("## Build environment — inherit it from the main checkout"));
+        assert!(WORKTREE_SETUP_GUIDE
+            .contains("## Build environment — inherit it from the main checkout"));
         assert!(WORKTREE_SETUP_GUIDE.contains("symlink the pieces the build needs"));
         // Tier-2 CLAUDE.md carries the build-env guide, NOT the routing guide (which moved to the
         // Tier-1 append-system-prompt via `harness_rules`).
@@ -263,7 +294,10 @@ mod tests {
         let content = std::fs::read_to_string(sess.join("CLAUDE.md")).unwrap();
         assert!(content.contains("Build environment — inherit it from the main checkout"));
         assert!(content.contains("Do NOT link build OUTPUT"));
-        assert!(!content.contains("Model routing"), "routing guide must NOT be in the session CLAUDE.md");
+        assert!(
+            !content.contains("Model routing"),
+            "routing guide must NOT be in the session CLAUDE.md"
+        );
     }
 
     #[test]

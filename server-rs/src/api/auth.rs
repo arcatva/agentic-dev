@@ -7,7 +7,8 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 fn sign(secret: &str, payload: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC takes a key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC takes a key of any size");
     mac.update(payload.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
@@ -21,12 +22,24 @@ pub fn issue_token(secret: &str, ttl_seconds: u64, now_secs: u64) -> String {
 }
 
 pub fn verify_token(secret: &str, token: &str, now_secs: u64) -> bool {
-    let Some((payload, sig_b64)) = token.split_once('.') else { return false };
-    let Ok(provided) = URL_SAFE_NO_PAD.decode(sig_b64) else { return false };
-    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) { Ok(m) => m, Err(_) => return false };
+    let Some((payload, sig_b64)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(provided) = URL_SAFE_NO_PAD.decode(sig_b64) else {
+        return false;
+    };
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
     mac.update(payload.as_bytes());
-    if mac.verify_slice(&provided).is_err() { return false; } // constant-time
-    match payload.parse::<u64>() { Ok(exp) => exp > now_secs, Err(_) => false }
+    if mac.verify_slice(&provided).is_err() {
+        return false;
+    } // constant-time
+    match payload.parse::<u64>() {
+        Ok(exp) => exp > now_secs,
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -56,16 +69,19 @@ mod tests {
         let last = tampered.pop().unwrap();
         let replacement = if last == 'A' { 'B' } else { 'A' };
         tampered.push(replacement);
-        assert!(!verify_token("test-secret", &tampered, 1_000), "tampered signature must be rejected");
+        assert!(
+            !verify_token("test-secret", &tampered, 1_000),
+            "tampered signature must be rejected"
+        );
     }
 
     #[test]
     fn rejects_expired_tampered_and_wrong_secret() {
         let t = issue_token("s3cret", 3600, 1_000);
         assert!(!verify_token("s3cret", &t, 1_000 + 3601)); // expired
-        assert!(!verify_token("wrong", &t, 1_000));          // wrong secret
+        assert!(!verify_token("wrong", &t, 1_000)); // wrong secret
         assert!(!verify_token("s3cret", "9999999999.bm90YXNpZw", 1_000)); // bad sig
-        assert!(!verify_token("s3cret", "nodot", 1_000));    // malformed
+        assert!(!verify_token("s3cret", "nodot", 1_000)); // malformed
         assert!(!verify_token("s3cret", "notanumber.sig", 1_000)); // non-numeric exp
     }
 }

@@ -24,7 +24,11 @@ pub enum TlsMode {
     /// Terminate TLS with an operator-supplied PEM cert chain + key ("bring your own").
     Byo { cert: PathBuf, key: PathBuf },
     /// Terminate TLS with a self-signed cert generated + persisted under `dir`.
-    SelfSigned { dir: PathBuf, extra_sans: Vec<String>, regen: bool },
+    SelfSigned {
+        dir: PathBuf,
+        extra_sans: Vec<String>,
+        regen: bool,
+    },
 }
 
 impl TlsMode {
@@ -35,7 +39,10 @@ impl TlsMode {
             return TlsMode::Disabled;
         }
         match (c.tls_cert.as_ref(), c.tls_key.as_ref()) {
-            (Some(cert), Some(key)) => TlsMode::Byo { cert: cert.clone(), key: key.clone() },
+            (Some(cert), Some(key)) => TlsMode::Byo {
+                cert: cert.clone(),
+                key: key.clone(),
+            },
             _ => TlsMode::SelfSigned {
                 dir: c.tls_dir.clone(),
                 extra_sans: c.tls_extra_sans.clone(),
@@ -51,7 +58,11 @@ impl TlsMode {
 
     /// URL scheme this mode serves.
     pub fn scheme(&self) -> &'static str {
-        if self.is_tls() { "https" } else { "http" }
+        if self.is_tls() {
+            "https"
+        } else {
+            "http"
+        }
     }
 
     /// True when TLS is enabled but exactly one of cert/key is set — a misconfiguration that
@@ -69,7 +80,11 @@ impl TlsMode {
 /// loudly in the latter case. Writes go through temp files + rename so a crash never leaves a
 /// half-written file. (Two instances sharing one `dir` is out of scope — the sqlite store already
 /// assumes a single instance per data dir.)
-pub fn ensure_self_signed(dir: &Path, extra_sans: &[String], regen: bool) -> io::Result<(PathBuf, PathBuf)> {
+pub fn ensure_self_signed(
+    dir: &Path,
+    extra_sans: &[String],
+    regen: bool,
+) -> io::Result<(PathBuf, PathBuf)> {
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
     let (cert_there, key_there) = (cert_path.exists(), key_path.exists());
@@ -86,8 +101,8 @@ pub fn ensure_self_signed(dir: &Path, extra_sans: &[String], regen: bool) -> io:
     }
     std::fs::create_dir_all(dir)?;
     let sans = build_sans(extra_sans);
-    let (cert_pem, key_pem) =
-        generate_self_signed(&sans).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("rcgen: {e}")))?;
+    let (cert_pem, key_pem) = generate_self_signed(&sans)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("rcgen: {e}")))?;
     // Key first (tight perms), then the public cert. Each write is atomic (temp file + rename).
     write_atomic(&key_path, key_pem.as_bytes(), /* private */ true)?;
     write_atomic(&cert_path, cert_pem.as_bytes(), /* private */ false)?;
@@ -97,7 +112,11 @@ pub fn ensure_self_signed(dir: &Path, extra_sans: &[String], regen: bool) -> io:
 /// Build the SAN list for the self-signed cert: always localhost + loopback, plus every non-loopback
 /// local interface IP, plus any operator-supplied `extra_sans`. De-duplicated, order preserved.
 pub fn build_sans(extra_sans: &[String]) -> Vec<String> {
-    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    let mut sans = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
     match if_addrs::get_if_addrs() {
         Ok(ifaces) => {
             for iface in ifaces {
@@ -107,7 +126,9 @@ pub fn build_sans(extra_sans: &[String]) -> Vec<String> {
                 }
             }
         }
-        Err(e) => tracing::warn!(target: "tls", "could not enumerate interface IPs for cert SANs: {e}"),
+        Err(e) => {
+            tracing::warn!(target: "tls", "could not enumerate interface IPs for cert SANs: {e}")
+        }
     }
     sans.extend(extra_sans.iter().cloned());
     let mut seen = std::collections::HashSet::new();
@@ -199,15 +220,24 @@ fn first_cert_der(pem: &[u8]) -> Option<Vec<u8>> {
     const END: &str = "-----END CERTIFICATE-----";
     let start = text.find(BEGIN)? + BEGIN.len();
     let stop = text[start..].find(END)? + start;
-    let b64: String = text[start..stop].chars().filter(|c| !c.is_whitespace()).collect();
+    let b64: String = text[start..stop]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()
 }
 
 fn sha256_hex_colon(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
+    digest
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 #[cfg(test)]
@@ -245,7 +275,10 @@ mod tests {
         c.tls_key = Some(PathBuf::from("/k.pem"));
         assert_eq!(
             TlsMode::from_config(&c),
-            TlsMode::Byo { cert: "/c.pem".into(), key: "/k.pem".into() }
+            TlsMode::Byo {
+                cert: "/c.pem".into(),
+                key: "/k.pem".into()
+            }
         );
         assert!(!TlsMode::byo_half_configured(&c));
     }
@@ -254,13 +287,20 @@ mod tests {
     fn half_byo_falls_back_to_self_signed_and_is_flagged() {
         let mut c = cfg();
         c.tls_cert = Some(PathBuf::from("/c.pem")); // key missing
-        assert!(matches!(TlsMode::from_config(&c), TlsMode::SelfSigned { .. }));
+        assert!(matches!(
+            TlsMode::from_config(&c),
+            TlsMode::SelfSigned { .. }
+        ));
         assert!(TlsMode::byo_half_configured(&c));
     }
 
     #[test]
     fn build_sans_includes_loopback_extra_and_dedups() {
-        let sans = build_sans(&["10.0.0.5".to_string(), "agentic.lan".to_string(), "127.0.0.1".to_string()]);
+        let sans = build_sans(&[
+            "10.0.0.5".to_string(),
+            "agentic.lan".to_string(),
+            "127.0.0.1".to_string(),
+        ]);
         assert!(sans.contains(&"localhost".to_string()));
         assert!(sans.contains(&"127.0.0.1".to_string()));
         assert!(sans.contains(&"::1".to_string()));
@@ -281,7 +321,8 @@ mod tests {
     #[test]
     fn ensure_self_signed_generates_reuses_and_regens() {
         let dir = tempfile::tempdir().unwrap();
-        let (cert, key) = ensure_self_signed(dir.path(), &["192.168.1.50".to_string()], false).unwrap();
+        let (cert, key) =
+            ensure_self_signed(dir.path(), &["192.168.1.50".to_string()], false).unwrap();
         assert!(cert.exists() && key.exists());
         let fp1 = cert_fingerprint_sha256(&cert).unwrap();
         assert_eq!(fp1.split(':').count(), 32);
@@ -321,7 +362,10 @@ mod tests {
         assert!(!out.contains("PRIVATE KEY"), "private key must be stripped");
         assert!(!out.contains("SECRET"));
         // No certificate blocks → empty (handler turns this into a 404).
-        assert!(certs_only_pem(b"-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----\n").is_empty());
+        assert!(
+            certs_only_pem(b"-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----\n")
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]

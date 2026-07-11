@@ -1,7 +1,12 @@
-use axum::{extract::State, http::{StatusCode, HeaderMap}, response::{IntoResponse, Response}, Json};
-use serde_json::json;
 use crate::api::state::AppState;
 use crate::util::now_ms;
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
 
 const USAGE_FRESH_MS: i64 = 60_000;
 const USAGE_STALE_MAX_MS: i64 = 10 * 60_000;
@@ -12,7 +17,9 @@ pub async fn usage_route(State(st): State<AppState>) -> Response {
     {
         let c = st.usage_cache.lock();
         if let Some(ref data) = c.data {
-            if now - c.at < USAGE_FRESH_MS { return Json(data.clone()).into_response(); }
+            if now - c.at < USAGE_FRESH_MS {
+                return Json(data.clone()).into_response();
+            }
         }
     }
     // Coalesce concurrent misses behind the inflight async lock (single-flight).
@@ -27,7 +34,9 @@ pub async fn usage_route(State(st): State<AppState>) -> Response {
         let c = st.usage_cache.lock();
         let t = now_ms();
         if let Some(ref data) = c.data {
-            if t - c.at < USAGE_FRESH_MS { return Json(data.clone()).into_response(); }
+            if t - c.at < USAGE_FRESH_MS {
+                return Json(data.clone()).into_response();
+            }
         }
         // If the holder just attempted (and failed) within the fresh window, serve stale or 503
         // rather than re-firing the upstream call.
@@ -41,12 +50,18 @@ pub async fn usage_route(State(st): State<AppState>) -> Response {
             }
             // Return the real upstream error from the holder's failed fetch,
             // falling back to a generic message before any attempt has failed.
-            let err = c.last_error.clone().unwrap_or_else(|| "usage fetch failed".to_string());
+            let err = c
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "usage fetch failed".to_string());
             return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": err}))).into_response();
         }
     }
     // Record attempt time BEFORE firing so late-arriving waiters (who acquire after us) skip.
-    { let mut c = st.usage_cache.lock(); c.last_attempt_at = now_ms(); }
+    {
+        let mut c = st.usage_cache.lock();
+        c.last_attempt_at = now_ms();
+    }
     let base = st.config.claude_config_base.clone();
     let fetched = match &st.usage_fn {
         Some(f) => f().await,
@@ -54,7 +69,12 @@ pub async fn usage_route(State(st): State<AppState>) -> Response {
     };
     match fetched {
         Ok(data) => {
-            { let mut c = st.usage_cache.lock(); c.at = now_ms(); c.data = Some(data.clone()); c.last_error = None; }
+            {
+                let mut c = st.usage_cache.lock();
+                c.at = now_ms();
+                c.data = Some(data.clone());
+                c.last_error = None;
+            }
             Json(data).into_response()
         }
         Err(e) => {
@@ -69,7 +89,11 @@ pub async fn usage_route(State(st): State<AppState>) -> Response {
                     return (headers, Json(data.clone())).into_response();
                 }
             }
-            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": e.to_string()}))).into_response()
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
         }
     }
 }
@@ -89,11 +113,15 @@ pub async fn skills_route(State(st): State<AppState>) -> impl axum::response::In
 /// this is exactly the plugin set a new session would load. Same shape philosophy as
 /// [skills_route]: a plain JSON array of `{name}` objects.
 pub async fn plugins_route(State(st): State<AppState>) -> impl axum::response::IntoResponse {
-    Json(crate::engine::plugins::list_plugins(&st.config.claude_config_base))
+    Json(crate::engine::plugins::list_plugins(
+        &st.config.claude_config_base,
+    ))
 }
 
 /// GET /api/global-settings — unified skill+plugin components with their global on/off state.
-pub async fn global_settings_route(State(st): State<AppState>) -> impl axum::response::IntoResponse {
+pub async fn global_settings_route(
+    State(st): State<AppState>,
+) -> impl axum::response::IntoResponse {
     Json(crate::engine::components::list_components(
         &st.config.claude_config_base,
         &st.config.skills_dir,
@@ -119,14 +147,25 @@ pub async fn global_settings_toggle_route(
     // on must succeed — we only reject ids that are not installed at all.
     match req.kind.as_str() {
         "plugin" | "skill" | "mcp" => {
-            let components = crate::engine::components::list_components(base, &st.config.skills_dir);
-            let known = components.iter().any(|c| c.kind == req.kind && c.id == req.id);
+            let components =
+                crate::engine::components::list_components(base, &st.config.skills_dir);
+            let known = components
+                .iter()
+                .any(|c| c.kind == req.kind && c.id == req.id);
             if !known {
-                return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown {} id: {}", req.kind, req.id)}))).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("unknown {} id: {}", req.kind, req.id)})),
+                )
+                    .into_response();
             }
         }
         other => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown kind: {other}")}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("unknown kind: {other}")})),
+            )
+                .into_response();
         }
     }
 
@@ -136,21 +175,38 @@ pub async fn global_settings_toggle_route(
         // MCP: move the definition between mcpServers and the disabled parking key in
         // .claude.json. list_components enumerates both sides, so the id is known-valid
         // here; a concurrent external edit could still make it vanish → surface as an error.
-        "mcp" => crate::engine::user_config::set_mcp_server_enabled(base, &req.id, req.enabled).and_then(|found| {
-            if found { Ok(()) } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("unknown mcp id: {}", req.id)))
-            }
-        }),
+        "mcp" => crate::engine::user_config::set_mcp_server_enabled(base, &req.id, req.enabled)
+            .and_then(|found| {
+                if found {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("unknown mcp id: {}", req.id),
+                    ))
+                }
+            }),
         // Unreachable: the match above already validated kind.
         _ => unreachable!(),
     };
     match res {
-        Ok(()) => Json(crate::engine::components::list_components(base, &st.config.skills_dir)).into_response(),
+        Ok(()) => Json(crate::engine::components::list_components(
+            base,
+            &st.config.skills_dir,
+        ))
+        .into_response(),
         // NotFound = the id vanished between the known-check and the mutate (external edit
         // race) — same logical class as the pre-check's "unknown id", so same 400, not a 500.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-            (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -159,7 +215,11 @@ pub async fn global_settings_toggle_route(
 pub async fn groups_list(State(st): State<AppState>) -> Response {
     match st.store.list_groups().await {
         Ok(groups) => Json(json!({ "groups": groups })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -170,14 +230,25 @@ pub struct CreateGroupBody {
 }
 
 pub async fn groups_create(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
-    let b: CreateGroupBody = if body.is_empty() { Default::default() }
-        else { serde_json::from_slice(&body).unwrap_or_default() };
+    let b: CreateGroupBody = if body.is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
     let Some(name) = b.name.filter(|n| !n.trim().is_empty()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"name required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"name required"})),
+        )
+            .into_response();
     };
     match st.store.create_group(name.trim(), b.icon.as_deref()).await {
         Ok(group) => Json(json!({ "group": group })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -187,35 +258,71 @@ pub struct UpdateGroupBody {
     pub icon: Option<String>,
 }
 
-pub async fn groups_update(State(st): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>, body: axum::body::Bytes) -> Response {
-    let b: UpdateGroupBody = if body.is_empty() { Default::default() }
-        else { serde_json::from_slice(&body).unwrap_or_default() };
-    match st.store.update_group(&id, b.name.as_deref(), b.icon.as_deref()).await {
+pub async fn groups_update(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let b: UpdateGroupBody = if body.is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
+    match st
+        .store
+        .update_group(&id, b.name.as_deref(), b.icon.as_deref())
+        .await
+    {
         Ok(Some(group)) => Json(json!({ "group": group })).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error":"group not found"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"group not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn groups_delete(State(st): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+pub async fn groups_delete(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
     match st.store.delete_group(&id).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 pub async fn templates_get(State(st): State<AppState>) -> impl axum::response::IntoResponse {
-    Json(crate::engine::templates::list_templates(&st.config.templates_path))
+    Json(crate::engine::templates::list_templates(
+        &st.config.templates_path,
+    ))
 }
 
 pub async fn templates_put(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     if !v.is_array() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"array of templates required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"array of templates required"})),
+        )
+            .into_response();
     }
     match crate::engine::templates::save_templates(&st.config.templates_path, &v) {
         Ok(t) => Json(t).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -229,16 +336,28 @@ pub struct TemplateStartBody {
 }
 
 pub async fn templates_start(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
-    let b: TemplateStartBody = if body.is_empty() { Default::default() }
-        else { serde_json::from_slice(&body).unwrap_or_default() };
+    let b: TemplateStartBody = if body.is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
     let Some(name) = b.name.filter(|n| !n.is_empty()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"name required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"name required"})),
+        )
+            .into_response();
     };
     let templates = crate::engine::templates::list_templates(&st.config.templates_path);
     let Some(tpl) = templates.into_iter().find(|t| t.name == name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": format!("template '{name}' not found")}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("template '{name}' not found")})),
+        )
+            .into_response();
     };
-    let prompt = crate::engine::templates::resolve_prompt(&tpl.prompt_body, &b.vars.unwrap_or_default());
+    let prompt =
+        crate::engine::templates::resolve_prompt(&tpl.prompt_body, &b.vars.unwrap_or_default());
     let meta = crate::engine::SubmitMeta {
         model: b.model.or(tpl.model),
         effort: b.effort.or(tpl.effort),
@@ -248,32 +367,55 @@ pub async fn templates_start(State(st): State<AppState>, body: axum::body::Bytes
         hidden_plugins: Vec::new(), // templates don't carry a plugin blacklist (yet)
         hidden_mcp_servers: Vec::new(), // templates don't carry an MCP blacklist (yet)
         extra_mcp_servers: Vec::new(), // templates don't carry extra MCP servers (yet)
-        claude_md: None, // templates don't carry session-scoped CLAUDE.md (yet)
+        claude_md: None,       // templates don't carry session-scoped CLAUDE.md (yet)
         staged_uploads: Vec::new(), // templates don't carry pre-session attachments
         forced_on_plugins: Vec::new(), // templates don't carry forced-on overrides (yet)
         forced_on_skills: Vec::new(),
         forced_on_mcp_servers: Vec::new(),
     };
-    match st.engine.submit_session(tpl.repos, tpl.skills, prompt, std::collections::HashMap::new(), meta).await {
+    match st
+        .engine
+        .submit_session(
+            tpl.repos,
+            tpl.skills,
+            prompt,
+            std::collections::HashMap::new(),
+            meta,
+        )
+        .await
+    {
         Ok(id) => Json(json!({ "id": id })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     }
 }
 
 #[derive(serde::Deserialize, Default)]
-pub struct DeviceBody { pub token: Option<String> }
+pub struct DeviceBody {
+    pub token: Option<String>,
+}
 
 pub async fn devices_post(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
-    let b: DeviceBody = if body.is_empty() { Default::default() }
-        else { serde_json::from_slice(&body).unwrap_or_default() };
+    let b: DeviceBody = if body.is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
     let token = b.token.unwrap_or_default();
     let token = token.trim().to_string();
     if token.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"token required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"token required"})),
+        )
+            .into_response();
     }
     match crate::engine::push::save_device_token(&st.config.device_token_path, &token) {
         Ok(rec) => Json(json!({ "ok": true, "registeredAt": rec.registered_at })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -311,8 +453,10 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
 
 /// GET /api/providers — list registered providers, keys masked (api_key is never returned).
 pub async fn providers_get() -> Response {
-    let views: Vec<ProviderView> =
-        crate::engine::providers::load_list().iter().map(provider_view).collect();
+    let views: Vec<ProviderView> = crate::engine::providers::load_list()
+        .iter()
+        .map(provider_view)
+        .collect();
     Json(json!({ "providers": views })).into_response()
 }
 
@@ -323,7 +467,13 @@ pub async fn providers_get() -> Response {
 pub async fn providers_post(body: axum::body::Bytes) -> Response {
     let mut p: crate::engine::providers::Provider = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid provider: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid provider: {e}")})),
+            )
+                .into_response()
+        }
     };
     // Trim before saving: routing/deletion use exact (case-insensitive) name equality, so a stored
     // " minimax " could never be matched/deleted by "minimax".
@@ -332,21 +482,37 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
     p.model = p.model.trim().to_string();
     // Capability is the routing axis (0–1): reject NaN (clamp panics on NaN) then clamp.
     if p.capability.is_nan() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"capability cannot be NaN"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"capability cannot be NaN"})),
+        )
+            .into_response();
     }
     p.capability = p.capability.clamp(0.0, 1.0);
     // Priority is the routing-preference axis (0–1): reject NaN (clamp panics on NaN) then clamp.
     if p.priority.is_nan() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"priority cannot be NaN"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"priority cannot be NaN"})),
+        )
+            .into_response();
     }
     p.priority = p.priority.clamp(0.0, 1.0);
     // Cost is the routing-cost axis (0–1): reject NaN (clamp panics on NaN) then clamp.
     if p.cost.is_nan() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"cost cannot be NaN"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"cost cannot be NaN"})),
+        )
+            .into_response();
     }
     p.cost = p.cost.clamp(0.0, 1.0);
     if p.name.is_empty() || p.base_url.is_empty() || p.model.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"name, base_url, model are required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"name, base_url, model are required"})),
+        )
+            .into_response();
     }
     // Validate the ROUTER relationship at set time: a provider flagged as the router that can't produce
     // a usable routing reply would silently make every later delegate fan-out fall back to native
@@ -365,7 +531,11 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
             }
         }
         if let Err(e) = crate::engine::router::validate_router(&probe, None).await {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("router validation failed: {e}")}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("router validation failed: {e}")})),
+            )
+                .into_response();
         }
     }
     match crate::engine::providers::upsert(p) {
@@ -374,7 +544,11 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -385,8 +559,16 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error":"no such provider"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"no such provider"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -436,15 +618,21 @@ fn family_label(family: &str) -> &'static str {
 
 /// GET /api/native-models — native Claude families with effective routing metrics + override state.
 pub async fn native_models_get() -> Response {
-    use crate::engine::providers::{family_default_metrics, family_of, native_claude_models, DEFAULT_NATIVE_PRIORITY};
+    use crate::engine::providers::{
+        family_default_metrics, family_of, native_claude_models, DEFAULT_NATIVE_PRIORITY,
+    };
     let overrides = crate::engine::native_overrides::load_map();
 
     // Group discovered models by family, first-seen (newest-first) order.
     let mut order: Vec<&'static str> = Vec::new();
-    let mut groups: std::collections::HashMap<&'static str, Vec<NativeModelRef>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<&'static str, Vec<NativeModelRef>> =
+        std::collections::HashMap::new();
     for m in native_claude_models() {
         let fam = family_of(&m.id);
-        groups.entry(fam).or_default().push(NativeModelRef { id: m.id.clone(), display_name: m.display_name.clone() });
+        groups.entry(fam).or_default().push(NativeModelRef {
+            id: m.id.clone(),
+            display_name: m.display_name.clone(),
+        });
         if !order.contains(&fam) {
             order.push(fam);
         }
@@ -455,7 +643,13 @@ pub async fn native_models_get() -> Response {
         .map(|fam| {
             let (dc, dk) = family_default_metrics(fam);
             let (capability, priority, cost, description, customized) = match overrides.get(fam) {
-                Some(o) => (o.capability, o.priority, o.cost, o.description.clone(), true),
+                Some(o) => (
+                    o.capability,
+                    o.priority,
+                    o.cost,
+                    o.description.clone(),
+                    true,
+                ),
                 None => (dc, DEFAULT_NATIVE_PRIORITY, dk, String::new(), false),
             };
             NativeFamilyView {
@@ -472,7 +666,11 @@ pub async fn native_models_get() -> Response {
         })
         .collect();
     // cheap → capable, family-name tiebreak (matches the /api/models ordering contract).
-    views.sort_by(|a, b| a.capability.total_cmp(&b.capability).then_with(|| a.family.cmp(&b.family)));
+    views.sort_by(|a, b| {
+        a.capability
+            .total_cmp(&b.capability)
+            .then_with(|| a.family.cmp(&b.family))
+    });
 
     Json(json!({ "families": views })).into_response()
 }
@@ -484,15 +682,33 @@ pub async fn native_models_post(
 ) -> Response {
     let family = family.trim().to_lowercase();
     if !is_editable_family(&family) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("not an editable family: {family}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("not an editable family: {family}")})),
+        )
+            .into_response();
     }
     let req: NativeOverrideReq = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid override: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid override: {e}")})),
+            )
+                .into_response()
+        }
     };
-    for (name, v) in [("capability", req.capability), ("priority", req.priority), ("cost", req.cost)] {
+    for (name, v) in [
+        ("capability", req.capability),
+        ("priority", req.priority),
+        ("cost", req.cost),
+    ] {
         if v.is_nan() {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{name} cannot be NaN")}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("{name} cannot be NaN")})),
+            )
+                .into_response();
         }
     }
     let ov = crate::engine::native_overrides::NativeOverride {
@@ -503,19 +719,33 @@ pub async fn native_models_post(
     };
     match crate::engine::native_overrides::upsert(&family, ov) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 /// DELETE /api/native-models/{family} — reset a family to defaults (idempotent).
-pub async fn native_models_delete(axum::extract::Path(family): axum::extract::Path<String>) -> Response {
+pub async fn native_models_delete(
+    axum::extract::Path(family): axum::extract::Path<String>,
+) -> Response {
     let family = family.trim().to_lowercase();
     if !is_editable_family(&family) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("not an editable family: {family}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("not an editable family: {family}")})),
+        )
+            .into_response();
     }
     match crate::engine::native_overrides::remove(&family) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -523,12 +753,12 @@ pub async fn native_models_delete(axum::extract::Path(family): axum::extract::Pa
 
 #[derive(serde::Serialize)]
 struct ModelEntry {
-    key: String,        // "claude-opus-4-8"
-    label: String,      // "Opus 4.8"
-    native: bool,       // true for subscription tiers
-    default: bool,      // true for the strongest native Claude
-    capability: f32,    // 0..1, for ordering
-    cost: f32,          // 0..1 (lower = cheaper), for the UI cost indicator
+    key: String,     // "claude-opus-4-8"
+    label: String,   // "Opus 4.8"
+    native: bool,    // true for subscription tiers
+    default: bool,   // true for the strongest native Claude
+    capability: f32, // 0..1, for ordering
+    cost: f32,       // 0..1 (lower = cheaper), for the UI cost indicator
 }
 
 #[derive(serde::Deserialize)]
@@ -567,7 +797,11 @@ fn native_model_entries() -> Vec<ModelEntry> {
     // Opus 4.5…4.8, Fable 5), so the whole slider is monotonically "stronger going right".
     // Cross-generation legacy ids (claude-3-5-* vs claude-3-*) or a two-digit minor ("…-4-10")
     // would read out of order — cosmetic only: same capability tier, key-based selection unaffected.
-    entries.sort_by(|a, b| a.capability.total_cmp(&b.capability).then_with(|| a.key.cmp(&b.key)));
+    entries.sort_by(|a, b| {
+        a.capability
+            .total_cmp(&b.capability)
+            .then_with(|| a.key.cmp(&b.key))
+    });
     entries
 }
 
@@ -585,7 +819,11 @@ fn full_model_entries() -> Vec<ModelEntry> {
     }
     // Same ordering contract as native_model_entries: cheap → capable, id as the deterministic
     // tiebreaker (within a Claude family that reads oldest → newest).
-    entries.sort_by(|a, b| a.capability.total_cmp(&b.capability).then_with(|| a.key.cmp(&b.key)));
+    entries.sort_by(|a, b| {
+        a.capability
+            .total_cmp(&b.capability)
+            .then_with(|| a.key.cmp(&b.key))
+    });
     entries
 }
 
@@ -613,16 +851,30 @@ pub async fn models_get(axum::extract::Query(q): axum::extract::Query<ModelsQuer
 pub async fn mcp_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let def: crate::engine::store::McpServerDef = match serde_json::from_slice(&body) {
         Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response()
+        }
     };
     if !crate::api::validation::valid_component_name(&def.name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid or reserved MCP name: {:?}", def.name)}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid or reserved MCP name: {:?}", def.name)})),
+        )
+            .into_response();
     }
     let base = st.config.claude_config_base.clone();
     let skills = st.config.skills_dir.clone();
     match crate::engine::user_config::add_mcp_server(&base, &def) {
         Ok(()) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -631,14 +883,28 @@ pub async fn mcp_delete_route(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
     if !crate::api::validation::valid_component_name(&name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid MCP name: {name:?}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid MCP name: {name:?}")})),
+        )
+            .into_response();
     }
     let base = st.config.claude_config_base.clone();
     let skills = st.config.skills_dir.clone();
     match crate::engine::user_config::delete_mcp_server(&base, &name) {
-        Ok(true) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("MCP server '{name}' not found")}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(true) => {
+            Json(crate::engine::components::list_components(&base, &skills)).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("MCP server '{name}' not found")})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -655,18 +921,35 @@ pub struct AddSkillBody {
 pub async fn skills_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let b: AddSkillBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response()
+        }
     };
     if !crate::api::validation::valid_component_name(&b.name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill name: {:?}", b.name)}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid skill name: {:?}", b.name)})),
+        )
+            .into_response();
     }
     let skills = st.config.skills_dir.clone();
     let base = st.config.claude_config_base.clone();
     match crate::engine::skills::add_skill(&skills, &b.name, &b.description, &b.instructions) {
         Ok(()) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists =>
-            (StatusCode::BAD_REQUEST, Json(json!({"error": format!("skill '{}' already exists", b.name)}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("skill '{}' already exists", b.name)})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -693,13 +976,24 @@ pub async fn skills_sources_route(State(st): State<AppState>) -> Response {
 }
 
 #[derive(serde::Deserialize)]
-pub struct SkillSourceBody { pub source: String }
+pub struct SkillSourceBody {
+    pub source: String,
+}
 
 /// POST /api/skills/sources — add a store source (owner/repo[/path] or github.com URL).
-pub async fn skills_sources_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+pub async fn skills_sources_add_route(
+    State(st): State<AppState>,
+    body: axum::body::Bytes,
+) -> Response {
     let b: SkillSourceBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response()
+        }
     };
     // Caller-fault (bad syntax) → 400 up front; anything add_source itself fails on afterwards
     // is a server-side write problem → 500 (consistent with the DELETE route).
@@ -713,7 +1007,9 @@ pub async fn skills_sources_add_route(State(st): State<AppState>, body: axum::bo
 }
 
 #[derive(serde::Deserialize)]
-pub struct SkillSourceQuery { pub source: String }
+pub struct SkillSourceQuery {
+    pub source: String,
+}
 
 /// DELETE /api/skills/sources?source=… — remove a store source (query param: sources contain
 /// slashes, which a path segment would mangle).
@@ -723,7 +1019,11 @@ pub async fn skills_sources_delete_route(
 ) -> Response {
     match crate::engine::skill_install::remove_source(&st.config.claude_config_base, &q.source) {
         Ok((sources, true)) => Json(json!({ "sources": sources })).into_response(),
-        Ok((_, false)) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("unknown source: {}", q.source)}))).into_response(),
+        Ok((_, false)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("unknown source: {}", q.source)})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
@@ -741,7 +1041,13 @@ pub struct InstallSkillBody {
 pub async fn skills_install_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let b: InstallSkillBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response()
+        }
     };
     // Parse errors are the caller's fault (400) BEFORE any network is touched.
     if let Err(e) = crate::engine::skill_install::parse_github_source(&b.source) {
@@ -750,7 +1056,9 @@ pub async fn skills_install_route(State(st): State<AppState>, body: axum::body::
     let skills = st.config.skills_dir.clone();
     let base = st.config.claude_config_base.clone();
     match crate::engine::skill_install::install_from_source(&skills, &b.source, b.update).await {
-        Ok(_name) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
+        Ok(_name) => {
+            Json(crate::engine::components::list_components(&base, &skills)).into_response()
+        }
         // Everything else mixes remote and local causes; BAD_GATEWAY for remote-ish messages
         // would be guesswork — a 400 with the human-readable reason serves the app either way.
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
@@ -762,38 +1070,73 @@ pub async fn skills_delete_route(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
     if !crate::api::validation::valid_component_name(&name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill name: {name:?}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid skill name: {name:?}")})),
+        )
+            .into_response();
     }
     let skills = st.config.skills_dir.clone();
     let base = st.config.claude_config_base.clone();
     match crate::engine::skills::delete_skill(&skills, &name) {
-        Ok(true) => Json(crate::engine::components::list_components(&base, &skills)).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": format!("skill '{name}' not found")}))).into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied =>
-            (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid skill path: {e}")}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(true) => {
+            Json(crate::engine::components::list_components(&base, &skills)).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("skill '{name}' not found")})),
+        )
+            .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid skill path: {e}")})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 #[derive(serde::Deserialize)]
-pub struct AddPluginBody { pub id: String }
+pub struct AddPluginBody {
+    pub id: String,
+}
 
 pub async fn plugins_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let b: AddPluginBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid body: {e}")}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response()
+        }
     };
     if !crate::api::validation::valid_plugin_id(&b.id) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid plugin id: {:?}", b.id)}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid plugin id: {:?}", b.id)})),
+        )
+            .into_response();
     }
     let base = st.config.claude_config_base.clone();
     let skills = st.config.skills_dir.clone();
     let id = b.id.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::engine::plugin_cli::install_plugin(&base, &id)
-    }).await.map_err(|e| format!("task error: {e}")).and_then(|r| r);
+    let result =
+        tokio::task::spawn_blocking(move || crate::engine::plugin_cli::install_plugin(&base, &id))
+            .await
+            .map_err(|e| format!("task error: {e}"))
+            .and_then(|r| r);
     match result {
-        Ok(_stdout) => Json(crate::engine::components::list_components(&st.config.claude_config_base, &skills)).into_response(),
+        Ok(_stdout) => Json(crate::engine::components::list_components(
+            &st.config.claude_config_base,
+            &skills,
+        ))
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
@@ -803,16 +1146,27 @@ pub async fn plugins_delete_route(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     if !crate::api::validation::valid_plugin_id(&id) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid plugin id: {id:?}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid plugin id: {id:?}")})),
+        )
+            .into_response();
     }
     let base = st.config.claude_config_base.clone();
     let skills = st.config.skills_dir.clone();
     let id2 = id.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::engine::plugin_cli::uninstall_plugin(&base, &id2)
-    }).await.map_err(|e| format!("task error: {e}")).and_then(|r| r);
+    })
+    .await
+    .map_err(|e| format!("task error: {e}"))
+    .and_then(|r| r);
     match result {
-        Ok(_stdout) => Json(crate::engine::components::list_components(&st.config.claude_config_base, &skills)).into_response(),
+        Ok(_stdout) => Json(crate::engine::components::list_components(
+            &st.config.claude_config_base,
+            &skills,
+        ))
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
@@ -820,25 +1174,38 @@ pub async fn plugins_delete_route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::test_support::{test_state, auth, oneshot_req};
+    use crate::api::test_support::{auth, oneshot_req, test_state};
     use axum::body::Body;
     use axum::http::Request;
-    use std::sync::Arc;
     use parking_lot::Mutex;
+    use std::sync::Arc;
 
     #[test]
     fn provider_view_masks_the_key() {
         let p = crate::engine::providers::Provider {
-            name: "minimax".into(), base_url: "https://x".into(), api_key: "SECRET".into(),
-            api_key_env: None, model: "MiniMax-M3".into(),
-            protocol: crate::engine::providers::Protocol::Anthropic, capability: 0.5,
-            description: None, priority: 0.5, cost: 0.3, router: false,
+            name: "minimax".into(),
+            base_url: "https://x".into(),
+            api_key: "SECRET".into(),
+            api_key_env: None,
+            model: "MiniMax-M3".into(),
+            protocol: crate::engine::providers::Protocol::Anthropic,
+            capability: 0.5,
+            description: None,
+            priority: 0.5,
+            cost: 0.3,
+            router: false,
         };
         let json = serde_json::to_string(&provider_view(&p)).unwrap();
-        assert!(!json.contains("SECRET"), "key must never appear in the view: {json}");
+        assert!(
+            !json.contains("SECRET"),
+            "key must never appear in the view: {json}"
+        );
         assert!(!json.contains("api_key"));
         assert!(json.contains("\"has_key\":true"));
-        let p2 = crate::engine::providers::Provider { api_key: String::new(), ..p };
+        let p2 = crate::engine::providers::Provider {
+            api_key: String::new(),
+            ..p
+        };
         assert!(!provider_view(&p2).has_key);
     }
 
@@ -861,8 +1228,12 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        *crate::engine::providers::PROVIDERS_FILE_OVERRIDE.lock() = Some(dir.path().join("providers.json"));
-        ProvidersFileGuard { _dir: dir, _lock: lock }
+        *crate::engine::providers::PROVIDERS_FILE_OVERRIDE.lock() =
+            Some(dir.path().join("providers.json"));
+        ProvidersFileGuard {
+            _dir: dir,
+            _lock: lock,
+        }
     }
 
     #[tokio::test]
@@ -939,7 +1310,10 @@ mod tests {
 
         assert_eq!(s, StatusCode::OK);
         let models = b["models"].as_array().unwrap();
-        assert!(!models.is_empty(), "native Claude candidates should be present");
+        assert!(
+            !models.is_empty(),
+            "native Claude candidates should be present"
+        );
         assert!(!models.iter().any(|m| m["key"] == "deepseek"));
         assert!(models.iter().all(|m| m["native"] == true));
         // Slider reads monotonically "stronger going right": families cheap → capable, and WITHIN
@@ -957,7 +1331,9 @@ mod tests {
             ]
         );
         // Default = the NEWEST opus, even though it's not the last entry.
-        let default_key = models.iter().find(|m| m["default"] == true).unwrap()["key"].as_str().unwrap();
+        let default_key = models.iter().find(|m| m["default"] == true).unwrap()["key"]
+            .as_str()
+            .unwrap();
         assert_eq!(default_key, "claude-opus-4-8");
     }
 
@@ -982,10 +1358,17 @@ mod tests {
     async fn providers_post_rejects_missing_model() {
         // Validation fires BEFORE the upsert, so a 400 here never touches the providers file.
         let st = test_state().await;
-        let (s, b) = oneshot_req(st.clone(), Request::post("/api/providers")
-            .header("authorization", auth(&st))
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"x","base_url":"https://x/anthropic","model":"","api_key":"k"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"x","base_url":"https://x/anthropic","model":"","api_key":"k"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().unwrap().contains("required"));
     }
@@ -1001,7 +1384,10 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(r#"{"name":"rtr","base_url":"https://x/anthropic","model":"m","api_key":"k","protocol":"openai","router":true}"#)).unwrap()).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        assert!(b["error"].as_str().unwrap().contains("router validation failed"));
+        assert!(b["error"]
+            .as_str()
+            .unwrap()
+            .contains("router validation failed"));
     }
 
     #[tokio::test]
@@ -1011,12 +1397,20 @@ mod tests {
         let c = calls.clone();
         st.usage_fn = Some(Arc::new(move || {
             let c = c.clone();
-            Box::pin(async move { *c.lock() += 1;
-                Ok(serde_json::json!({"five_hour":{"utilization":12,"resets_at":"x"}})) })
+            Box::pin(async move {
+                *c.lock() += 1;
+                Ok(serde_json::json!({"five_hour":{"utilization":12,"resets_at":"x"}}))
+            })
         }));
         for _ in 0..2 {
-            let (s, b) = oneshot_req(st.clone(), Request::get("/api/usage")
-                .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+            let (s, b) = oneshot_req(
+                st.clone(),
+                Request::get("/api/usage")
+                    .header("authorization", auth(&st))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
             assert_eq!(s, StatusCode::OK);
             assert_eq!(b["five_hour"]["utilization"], 12);
         }
@@ -1027,10 +1421,17 @@ mod tests {
     #[tokio::test]
     async fn usage_failure_with_no_cache_is_503() {
         let mut st = test_state().await;
-        st.usage_fn = Some(Arc::new(|| Box::pin(async {
-            Err(crate::engine::usage::UsageError::Status(429)) })));
-        let (s, b) = oneshot_req(st.clone(), Request::get("/api/usage")
-            .header("authorization", auth(&st)).body(Body::empty()).unwrap()).await;
+        st.usage_fn = Some(Arc::new(|| {
+            Box::pin(async { Err(crate::engine::usage::UsageError::Status(429)) })
+        }));
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/usage")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(b["error"], "usage endpoint 429");
     }
@@ -1057,17 +1458,29 @@ mod tests {
         for _ in 0..5 {
             let st2 = st.clone();
             handles.push(tokio::spawn(async move {
-                oneshot_req((*st2).clone(), Request::get("/api/usage")
-                    .header("authorization", auth(&st2)).body(Body::empty()).unwrap()).await
+                oneshot_req(
+                    (*st2).clone(),
+                    Request::get("/api/usage")
+                        .header("authorization", auth(&st2))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
             }));
         }
-        let results: Vec<_> = futures_util::future::join_all(handles).await
-            .into_iter().map(|r| r.unwrap()).collect();
+        let results: Vec<_> = futures_util::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
 
         // All must return an error status (503 or 503/stale).
         for (s, _b) in &results {
-            assert!(*s == StatusCode::SERVICE_UNAVAILABLE,
-                "expected 503 on failure, got {}", s);
+            assert!(
+                *s == StatusCode::SERVICE_UNAVAILABLE,
+                "expected 503 on failure, got {}",
+                s
+            );
         }
         // The upstream usage_fn must have been called exactly ONCE.
         let n = *calls.lock();
@@ -1077,10 +1490,15 @@ mod tests {
     #[tokio::test]
     async fn devices_post_requires_token() {
         let st = test_state().await;
-        let (s, b) = oneshot_req(st.clone(), Request::post("/api/devices")
-            .header("authorization", auth(&st))
-            .header("content-type", "application/json")
-            .body(Body::from("{}")).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/devices")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(b["error"], "token required");
     }
@@ -1088,10 +1506,15 @@ mod tests {
     #[tokio::test]
     async fn devices_post_saves_and_returns_ok() {
         let st = test_state().await;
-        let (s, b) = oneshot_req(st.clone(), Request::post("/api/devices")
-            .header("authorization", auth(&st))
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"token":"my-device-token"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/devices")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"my-device-token"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["ok"], true);
         assert!(b["registeredAt"].is_i64());
@@ -1100,10 +1523,15 @@ mod tests {
     #[tokio::test]
     async fn templates_start_no_name_is_400() {
         let st = test_state().await;
-        let (s, b) = oneshot_req(st.clone(), Request::post("/api/templates/start")
-            .header("authorization", auth(&st))
-            .header("content-type", "application/json")
-            .body(Body::from("{}")).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/templates/start")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(b["error"], "name required");
     }
@@ -1111,10 +1539,15 @@ mod tests {
     #[tokio::test]
     async fn templates_start_unknown_name_is_404() {
         let st = test_state().await;
-        let (s, b) = oneshot_req(st.clone(), Request::post("/api/templates/start")
-            .header("authorization", auth(&st))
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"no-such"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/templates/start")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"no-such"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert!(b["error"].as_str().unwrap().contains("no-such"));
     }
@@ -1125,10 +1558,15 @@ mod tests {
     async fn mcp_add_rejects_bad_name() {
         let st = test_state().await;
         let tok = auth(&st);
-        let (s, b) = oneshot_req(st, Request::post("/api/mcp-servers")
-            .header("authorization", tok)
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"../evil","command":"x"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st,
+            Request::post("/api/mcp-servers")
+                .header("authorization", tok)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"../evil","command":"x"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().unwrap().contains("invalid"));
     }
@@ -1137,14 +1575,21 @@ mod tests {
     async fn mcp_add_rejects_reserved_agentic_name() {
         let st = test_state().await;
         let tok = auth(&st);
-        let (s, b) = oneshot_req(st, Request::post("/api/mcp-servers")
-            .header("authorization", tok)
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"agentic","command":"x"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st,
+            Request::post("/api/mcp-servers")
+                .header("authorization", tok)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"agentic","command":"x"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         let err = b["error"].as_str().unwrap();
-        assert!(err.to_lowercase().contains("reserved") || err.contains("invalid"),
-            "error should mention reserved or invalid: {err}");
+        assert!(
+            err.to_lowercase().contains("reserved") || err.contains("invalid"),
+            "error should mention reserved or invalid: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1152,34 +1597,76 @@ mod tests {
         let st = test_state().await;
         let tok = auth(&st);
         // Add
-        let (s, _) = oneshot_req(st.clone(), Request::post("/api/mcp-servers")
-            .header("authorization", tok.clone())
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"test-mcp","command":"node","args":["s.js"]}"#)).unwrap()).await;
+        let (s, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/mcp-servers")
+                .header("authorization", tok.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"test-mcp","command":"node","args":["s.js"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         // Verify in list
-        let (s2, arr) = oneshot_req(st.clone(), Request::get("/api/global-settings")
-            .header("authorization", tok.clone()).body(Body::empty()).unwrap()).await;
+        let (s2, arr) = oneshot_req(
+            st.clone(),
+            Request::get("/api/global-settings")
+                .header("authorization", tok.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s2, StatusCode::OK);
-        assert!(arr.as_array().unwrap().iter().any(|c| c["kind"] == "mcp" && c["id"] == "test-mcp"),
-            "mcp must appear after add: {arr}");
+        assert!(
+            arr.as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["kind"] == "mcp" && c["id"] == "test-mcp"),
+            "mcp must appear after add: {arr}"
+        );
         // Delete
-        let (s3, _) = oneshot_req(st.clone(), Request::delete("/api/mcp-servers/test-mcp")
-            .header("authorization", tok.clone()).body(Body::empty()).unwrap()).await;
+        let (s3, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/mcp-servers/test-mcp")
+                .header("authorization", tok.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s3, StatusCode::OK);
         // Verify gone
-        let (_, arr2) = oneshot_req(st.clone(), Request::get("/api/global-settings")
-            .header("authorization", tok).body(Body::empty()).unwrap()).await;
-        assert!(!arr2.as_array().unwrap().iter().any(|c| c["id"] == "test-mcp"),
-            "mcp must be gone after delete: {arr2}");
+        let (_, arr2) = oneshot_req(
+            st.clone(),
+            Request::get("/api/global-settings")
+                .header("authorization", tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !arr2
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["id"] == "test-mcp"),
+            "mcp must be gone after delete: {arr2}"
+        );
     }
 
     #[tokio::test]
     async fn mcp_delete_absent_is_404() {
         let st = test_state().await;
         let tok = auth(&st);
-        let (s, b) = oneshot_req(st, Request::delete("/api/mcp-servers/no-such")
-            .header("authorization", tok).body(Body::empty()).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st,
+            Request::delete("/api/mcp-servers/no-such")
+                .header("authorization", tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert!(b["error"].as_str().is_some());
     }
@@ -1188,10 +1675,15 @@ mod tests {
     async fn skills_add_rejects_bad_name() {
         let st = test_state().await;
         let tok = auth(&st);
-        let (s, b) = oneshot_req(st, Request::post("/api/skills")
-            .header("authorization", tok)
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"a/b","description":"d"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st,
+            Request::post("/api/skills")
+                .header("authorization", tok)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"a/b","description":"d"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().is_some());
     }
@@ -1203,16 +1695,34 @@ mod tests {
         // Ensure skills_dir exists (test_state sets it to temp/skills)
         std::fs::create_dir_all(&st.config.skills_dir).unwrap();
         // Add
-        let (s, arr) = oneshot_req(st.clone(), Request::post("/api/skills")
-            .header("authorization", tok.clone())
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"name":"my-skill","description":"does stuff"}"#)).unwrap()).await;
+        let (s, arr) = oneshot_req(
+            st.clone(),
+            Request::post("/api/skills")
+                .header("authorization", tok.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"my-skill","description":"does stuff"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
-        assert!(arr.as_array().unwrap().iter().any(|c| c["kind"] == "skill" && c["id"] == "my-skill"),
-            "skill must appear in component list: {arr}");
+        assert!(
+            arr.as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["kind"] == "skill" && c["id"] == "my-skill"),
+            "skill must appear in component list: {arr}"
+        );
         // Delete
-        let (s2, _) = oneshot_req(st.clone(), Request::delete("/api/skills/my-skill")
-            .header("authorization", tok).body(Body::empty()).unwrap()).await;
+        let (s2, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/skills/my-skill")
+                .header("authorization", tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s2, StatusCode::OK);
     }
 
@@ -1220,10 +1730,15 @@ mod tests {
     async fn plugins_add_rejects_bad_id() {
         let st = test_state().await;
         let tok = auth(&st);
-        let (s, b) = oneshot_req(st, Request::post("/api/plugins")
-            .header("authorization", tok)
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"id":"a b"}"#)).unwrap()).await;
+        let (s, b) = oneshot_req(
+            st,
+            Request::post("/api/plugins")
+                .header("authorization", tok)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"a b"}"#))
+                .unwrap(),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().is_some());
     }
@@ -1243,7 +1758,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         *crate::engine::native_overrides::NATIVE_OVERRIDES_FILE_OVERRIDE.lock() =
             Some(dir.path().join("native-overrides.json"));
-        NativeOvGuard { _dir: dir, _lock: lock }
+        NativeOvGuard {
+            _dir: dir,
+            _lock: lock,
+        }
     }
 
     #[tokio::test]
@@ -1273,7 +1791,10 @@ mod tests {
         assert_eq!(opus["customized"], false);
         // A non-overridden family returns an empty description verbatim (the generated per-model
         // fallback happens only at routing time, not in this view).
-        assert_eq!(fams.iter().find(|f| f["family"] == "sonnet").unwrap()["description"], "");
+        assert_eq!(
+            fams.iter().find(|f| f["family"] == "sonnet").unwrap()["description"],
+            ""
+        );
 
         // POST with mixed-case family normalizes and applies
         let (s2, _) = oneshot_req(
@@ -1281,7 +1802,9 @@ mod tests {
             Request::post("/api/native-models/Opus")
                 .header("authorization", auth(&st))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"capability":0.9,"priority":0.85,"cost":0.2,"description":"hard only"}"#))
+                .body(Body::from(
+                    r#"{"capability":0.9,"priority":0.85,"cost":0.2,"description":"hard only"}"#,
+                ))
                 .unwrap(),
         )
         .await;
@@ -1296,7 +1819,13 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        let opus3 = b3["families"].as_array().unwrap().iter().find(|f| f["family"] == "opus").unwrap().clone();
+        let opus3 = b3["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == "opus")
+            .unwrap()
+            .clone();
         assert_eq!(opus3["customized"], true);
         // f32→JSON widens to f64, so compare with a tolerance rather than `== 0.85` (which would fail).
         assert!((opus3["priority"].as_f64().unwrap() - 0.85).abs() < 1e-6);
@@ -1314,7 +1843,9 @@ mod tests {
             Request::post("/api/native-models/other")
                 .header("authorization", auth(&st))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#))
+                .body(Body::from(
+                    r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#,
+                ))
                 .unwrap(),
         )
         .await;
@@ -1326,7 +1857,9 @@ mod tests {
             Request::post("/api/native-models/nope")
                 .header("authorization", auth(&st))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#))
+                .body(Body::from(
+                    r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#,
+                ))
                 .unwrap(),
         )
         .await;
@@ -1338,7 +1871,9 @@ mod tests {
             Request::post("/api/native-models/sonnet")
                 .header("authorization", auth(&st))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"capability":5.0,"priority":-1.0,"cost":0.5}"#))
+                .body(Body::from(
+                    r#"{"capability":5.0,"priority":-1.0,"cost":0.5}"#,
+                ))
                 .unwrap(),
         )
         .await;
@@ -1356,7 +1891,12 @@ mod tests {
         // seed an override, then reset it
         crate::engine::native_overrides::upsert(
             "opus",
-            crate::engine::native_overrides::NativeOverride { capability: 0.9, priority: 0.8, cost: 0.2, description: String::new() },
+            crate::engine::native_overrides::NativeOverride {
+                capability: 0.9,
+                priority: 0.8,
+                cost: 0.2,
+                description: String::new(),
+            },
         )
         .unwrap();
         let (s, _) = oneshot_req(
@@ -1368,7 +1908,9 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        assert!(crate::engine::native_overrides::load_map().get("opus").is_none());
+        assert!(crate::engine::native_overrides::load_map()
+            .get("opus")
+            .is_none());
 
         // idempotent: deleting again is still OK
         let (s2, _) = oneshot_req(

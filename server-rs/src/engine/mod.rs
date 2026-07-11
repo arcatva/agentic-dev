@@ -12,15 +12,15 @@ use crate::engine::repos::ensure_local;
 // injects SdkRunner (main.rs); tests inject an SdkRunner pointed at a fake bridge script. There is
 // no raw-`claude`-CLI runner anymore.
 use crate::engine::runner::Runner;
-use crate::engine::title_client::TitleGenerator;
 use crate::engine::spawner::{compose_user_text, encode_user_message, spawn_claude, SpawnOptions};
 use crate::engine::status::SessionStatus;
 use crate::engine::store::{
     Activity, CreateInput, Field, Session, SessionPatch, SessionUpdate, Store, StoreError,
 };
-use crate::engine::transition::TransitionReason;
 use crate::engine::stream::ClaudeEvent;
+use crate::engine::title_client::TitleGenerator;
 use crate::engine::transcript::TranscriptCache;
+use crate::engine::transition::TransitionReason;
 use crate::engine::worktree::{create_session_worktrees, sync_worktree};
 
 // ──────────────────────────────────────────────────────────────
@@ -71,7 +71,9 @@ pub(crate) fn compose_turn_text_with(item: &QueueItem, prompt: &str) -> String {
 fn max_agentic_prompt_at(lines: &[String]) -> Option<i64> {
     let mut max_at: Option<i64> = None;
     for line in lines {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(|t| t.as_str()) != Some("agentic_prompt") {
             continue;
         }
@@ -303,7 +305,9 @@ pub fn new_staging_token() -> String {
 /// dir). Cheap: one `read_dir` over `.staging`; every error is ignored so this never disrupts the
 /// upload it precedes.
 pub fn sweep_stale_staging(worktrees_root: &std::path::Path, max_age: std::time::Duration) {
-    let Ok(rd) = std::fs::read_dir(staging_root(worktrees_root)) else { return };
+    let Ok(rd) = std::fs::read_dir(staging_root(worktrees_root)) else {
+        return;
+    };
     let now = std::time::SystemTime::now();
     for entry in rd.flatten() {
         let stale = entry
@@ -331,7 +335,11 @@ pub fn sanitize_upload_name(raw: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("upload");
     let safe = RE.replace_all(stem, "_").into_owned();
-    if safe.is_empty() { "upload".into() } else { safe }
+    if safe.is_empty() {
+        "upload".into()
+    } else {
+        safe
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -551,40 +559,56 @@ impl Engine {
                     // outbox files. An EMPTY outbox skips everything — including creating the
                     // logged_outbox entry — so a later first touch that actually sees files still seeds.
                     if !files.is_empty() {
-                    let needs_seed = !self.0.state.lock().logged_outbox.contains_key(&s.id);
-                    let seeded: Option<HashSet<String>> = if needs_seed {
-                        Some(
-                            self.0.store.read_log(&s.id).iter()
-                                .filter(|l| l.contains("\"type\":\"agentic_file\""))
-                                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                                .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("agentic_file"))
-                                .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    };
-                    let mut state_guard = self.0.state.lock();
-                    let logged = state_guard.logged_outbox.entry(s.id.clone()).or_default();
-                    if let Some(seed) = seeded {
-                        logged.extend(seed);
-                    }
-                    for entry in files {
-                        let path = entry.path();
-                        let rel = path.strip_prefix(&outbox_dir).unwrap_or(&path);
-                        let rel_str = format!("outbox/{}", rel.display());
-                        if !logged.insert(rel_str.clone()) { continue; }
-                        let at = entry.metadata().ok().and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or(0);
-                        let marker = serde_json::json!({
-                            "type": "agentic_file",
-                            "path": rel_str,
-                            "at": at,
-                        }).to_string();
-                        self.0.store.append_log_blocking(&s.id, &marker);
-                    }
+                        let needs_seed = !self.0.state.lock().logged_outbox.contains_key(&s.id);
+                        let seeded: Option<HashSet<String>> = if needs_seed {
+                            Some(
+                                self.0
+                                    .store
+                                    .read_log(&s.id)
+                                    .iter()
+                                    .filter(|l| l.contains("\"type\":\"agentic_file\""))
+                                    .filter_map(|l| {
+                                        serde_json::from_str::<serde_json::Value>(l).ok()
+                                    })
+                                    .filter(|v| {
+                                        v.get("type").and_then(|t| t.as_str())
+                                            == Some("agentic_file")
+                                    })
+                                    .filter_map(|v| {
+                                        v.get("path").and_then(|p| p.as_str()).map(str::to_string)
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
+                        let mut state_guard = self.0.state.lock();
+                        let logged = state_guard.logged_outbox.entry(s.id.clone()).or_default();
+                        if let Some(seed) = seeded {
+                            logged.extend(seed);
+                        }
+                        for entry in files {
+                            let path = entry.path();
+                            let rel = path.strip_prefix(&outbox_dir).unwrap_or(&path);
+                            let rel_str = format!("outbox/{}", rel.display());
+                            if !logged.insert(rel_str.clone()) {
+                                continue;
+                            }
+                            let at = entry
+                                .metadata()
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            let marker = serde_json::json!({
+                                "type": "agentic_file",
+                                "path": rel_str,
+                                "at": at,
+                            })
+                            .to_string();
+                            self.0.store.append_log_blocking(&s.id, &marker);
+                        }
                     }
                 }
             }
@@ -631,7 +655,10 @@ impl Engine {
     /// blanking it on a successful-but-empty response.
     pub async fn try_list(&self) -> Result<Vec<Session>, EngineError> {
         let sessions = self.0.store.list().await?;
-        Ok(sessions.into_iter().map(|s| self.with_activity(s)).collect())
+        Ok(sessions
+            .into_iter()
+            .map(|s| self.with_activity(s))
+            .collect())
     }
 
     pub async fn get(&self, id: &str) -> Option<Session> {
@@ -647,9 +674,20 @@ impl Engine {
     /// Update session metadata (model/effort/mode/permission_mode) and return the refreshed session.
     /// Returns Err(StoreError) on DB failure; returns Err(EngineError::NotFound) if the session
     /// does not exist after the update (session was deleted concurrently).
-    pub async fn patch_session_meta(&self, id: &str, patch: SessionPatch) -> Result<Session, EngineError> {
-        self.0.store.update(id, patch).await.map_err(EngineError::Store)?;
-        self.0.store.get(id).await
+    pub async fn patch_session_meta(
+        &self,
+        id: &str,
+        patch: SessionPatch,
+    ) -> Result<Session, EngineError> {
+        self.0
+            .store
+            .update(id, patch)
+            .await
+            .map_err(EngineError::Store)?;
+        self.0
+            .store
+            .get(id)
+            .await
             .map_err(EngineError::Store)?
             .map(|s| self.with_activity(s))
             .ok_or_else(|| EngineError::NotFound(id.to_string()))
@@ -747,8 +785,7 @@ impl Engine {
             .ok_or("no such session")?;
 
         let from = s.native_watermark_lines.max(0) as usize;
-        let (lines, total) =
-            crate::engine::native_transcript::translate_range(&path, from);
+        let (lines, total) = crate::engine::native_transcript::translate_range(&path, from);
         for line in &lines {
             self.0
                 .store
@@ -989,7 +1026,11 @@ impl Engine {
         // Shell-single-quote `cwd`: it may contain spaces or shell metacharacters, which would
         // otherwise break (or inject into) the `cd` when the user pastes this into a terminal.
         // `csid` is already validated (`is_valid_csid`) at adopt time, so it needs no quoting.
-        let resume_cmd = format!("cd {} && claude --resume {}", shell_single_quote(&cwd), csid);
+        let resume_cmd = format!(
+            "cd {} && claude --resume {}",
+            shell_single_quote(&cwd),
+            csid
+        );
         Ok(DetachInfo {
             cwd,
             claude_session_id: csid,
@@ -1091,17 +1132,29 @@ impl Engine {
         // (see `spawn_opts`), NOT written here, so delegate workers / the router never load them.
         // Best-effort — a write failure must never abort the session.
         {
-            let mut sections: Vec<String> = vec![
-                crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
-            ];
+            let mut sections: Vec<String> =
+                vec![crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string()];
             if wts.len() > 1 {
                 let repo_summaries: Vec<(String, Option<String>)> = wts
                     .iter()
-                    .map(|w| (w.repo.clone(), crate::engine::session_guide::summarize_repo(&w.worktree_path)))
+                    .map(|w| {
+                        (
+                            w.repo.clone(),
+                            crate::engine::session_guide::summarize_repo(&w.worktree_path),
+                        )
+                    })
                     .collect();
-                sections.push(crate::engine::session_guide::build_session_guide(&repo_summaries, &skills));
+                sections.push(crate::engine::session_guide::build_session_guide(
+                    &repo_summaries,
+                    &skills,
+                ));
             }
-            if let Some(custom) = meta.claude_md.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(custom) = meta
+                .claude_md
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 sections.push(custom.to_string());
             }
             crate::engine::session_guide::write_session_claude_md(&session_dir, &sections);
@@ -1136,8 +1189,12 @@ impl Engine {
                 // back to a read+write copy if rename fails for any reason.
                 if std::fs::rename(&src, &dst).is_err() {
                     match std::fs::read(&src) {
-                        Ok(bytes) => { let _ = std::fs::write(&dst, &bytes); }
-                        Err(e) => tracing::warn!("[engine] staged upload {token}/{name} unreadable: {e}"),
+                        Ok(bytes) => {
+                            let _ = std::fs::write(&dst, &bytes);
+                        }
+                        Err(e) => {
+                            tracing::warn!("[engine] staged upload {token}/{name} unreadable: {e}")
+                        }
                     }
                 }
                 // Best-effort cleanup of the (now empty) staging token dir.
@@ -1181,10 +1238,10 @@ impl Engine {
             .map_err(|e| format!("store.create: {e}"))?;
 
         // Generate a stable title for the session via the Anthropic HTTP
-// title generator. Fire-and-forget: submit_session returns immediately
-// and the title lands asynchronously. On any failure (timeout, non-2xx,
-// invalid output) the title is left as the user's original prompt —
-// silent fallback per spec.
+        // title generator. Fire-and-forget: submit_session returns immediately
+        // and the title lands asynchronously. On any failure (timeout, non-2xx,
+        // invalid output) the title is left as the user's original prompt —
+        // silent fallback per spec.
         {
             let engine = self.clone();
             let id_for_title = id.clone();
@@ -1276,10 +1333,18 @@ impl Engine {
             .await
             .ok()
             .flatten()?;
-        if let Err(e) = self.0.store.update(id, crate::engine::store::SessionPatch {
-            prompt: Some(new_title.clone()),
-            ..Default::default()
-        }).await {
+        if let Err(e) = self
+            .0
+            .store
+            .update(
+                id,
+                crate::engine::store::SessionPatch {
+                    prompt: Some(new_title.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
             tracing::warn!("[engine] retitle store.update failed: {e}");
         }
         Some(new_title)
@@ -1330,7 +1395,9 @@ impl Engine {
                 mentions::expand_session_mentions(text, &sessions, &|id| store.log_path(id))
             }
             Err(e) => {
-                tracing::warn!("[engine] @session mention expansion skipped — store.list failed: {e}");
+                tracing::warn!(
+                    "[engine] @session mention expansion skipped — store.list failed: {e}"
+                );
                 text.to_string()
             }
         }
@@ -1517,7 +1584,8 @@ impl Engine {
         // an empty log (`since == 0`) so the seed is injected only on the very first turn, never
         // again. Carried on the QueueItem rather than folded into `prompt` so the logged/displayed
         // user message stays the user's text, not the (up to 50k char) transcript.
-        let context_prefix = if s.parent_session_id.is_some() && since == 0 && !s.prompt.is_empty() {
+        let context_prefix = if s.parent_session_id.is_some() && since == 0 && !s.prompt.is_empty()
+        {
             Some(s.prompt.clone())
         } else {
             None
@@ -1549,12 +1617,7 @@ impl Engine {
             // User manually renamed the session → pin it (see live branch above).
             follow_up = follow_up.prompt(prompt.to_string()).title_pinned(true);
         }
-        if let Err(e) = self
-            .0
-            .store
-            .apply_update(id, follow_up)
-            .await
-        {
+        if let Err(e) = self.0.store.apply_update(id, follow_up).await {
             tracing::error!("[engine] store.update follow-up patch failed: {e}");
         }
 
@@ -1599,7 +1662,10 @@ impl Engine {
     /// Returns the new session row on success. On any failure after partial work (some
     /// worktrees created) the worktrees are removed and the row is deleted before returning
     /// the error.
-    pub async fn fork_session(&self, src_id: &str) -> Result<crate::engine::store::Session, EngineError> {
+    pub async fn fork_session(
+        &self,
+        src_id: &str,
+    ) -> Result<crate::engine::store::Session, EngineError> {
         use crate::engine::store::{CreateInput, SessionPatch, StoreError};
         use crate::engine::transcript_filter::filter_log_to_transcript;
 
@@ -1621,15 +1687,24 @@ impl Engine {
         let repo_specs: Vec<(String, std::path::PathBuf)> = if src.repos.is_empty() {
             Vec::new()
         } else {
-            src.repos.iter().map(|r| {
-                crate::engine::repos::ensure_local(r, &self.0.cfg.src_root, &self.0.cfg.git_org, clone_fn)
+            src.repos
+                .iter()
+                .map(|r| {
+                    crate::engine::repos::ensure_local(
+                        r,
+                        &self.0.cfg.src_root,
+                        &self.0.cfg.git_org,
+                        clone_fn,
+                    )
                     .map(|p| (r.clone(), p))
                     .map_err(|e| EngineError::Internal(format!("repo {r}: {e}")))
-            }).collect::<Result<Vec<_>, _>>()?
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         // Read each source worktree's HEAD (snapshot point).
-        let mut base_shas: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut base_shas: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (repo, _repo_path) in &repo_specs {
             let wt = self.0.cfg.worktrees_root.join(src_id).join(repo);
             if !wt.exists() {
@@ -1647,7 +1722,10 @@ impl Engine {
                     truncate_chars(&String::from_utf8_lossy(&sha.stderr), 200)
                 )));
             }
-            base_shas.insert(repo.clone(), String::from_utf8_lossy(&sha.stdout).trim().to_string());
+            base_shas.insert(
+                repo.clone(),
+                String::from_utf8_lossy(&sha.stdout).trim().to_string(),
+            );
         }
 
         // Create the new session id (same generator as submit_session uses internally).
@@ -1666,24 +1744,34 @@ impl Engine {
                 &self.0.cfg.worktrees_root,
                 &id,
                 &base_shas,
-            ).map_err(|e| EngineError::Internal(truncate_chars(&format!("{e}"), 200).to_string()))?
+            )
+            .map_err(|e| EngineError::Internal(truncate_chars(&format!("{e}"), 200).to_string()))?
         };
 
         let session_dir = self.0.cfg.worktrees_root.join(&id);
         let base_shas_db: std::collections::HashMap<String, Option<String>> = wts
-            .iter().map(|w| (w.repo.clone(), Some(w.base_sha.clone()))).collect();
+            .iter()
+            .map(|w| (w.repo.clone(), Some(w.base_sha.clone())))
+            .collect();
 
         // Session CLAUDE.md (Tier-2): build-env guide (always) + multi-repo orientation (when >1
         // worktree) + custom guidance. Routing / fan-out are Tier-1 (system prompt), not written here.
         {
-            let mut sections = vec![
-                crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string(),
-            ];
+            let mut sections = vec![crate::engine::session_guide::WORKTREE_SETUP_GUIDE.to_string()];
             if wts.len() > 1 {
-                let repo_summaries: Vec<(String, Option<String>)> = wts.iter()
-                    .map(|w| (w.repo.clone(), crate::engine::session_guide::summarize_repo(&w.worktree_path)))
+                let repo_summaries: Vec<(String, Option<String>)> = wts
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.repo.clone(),
+                            crate::engine::session_guide::summarize_repo(&w.worktree_path),
+                        )
+                    })
                     .collect();
-                sections.push(crate::engine::session_guide::build_session_guide(&repo_summaries, &src.skills));
+                sections.push(crate::engine::session_guide::build_session_guide(
+                    &repo_summaries,
+                    &src.skills,
+                ));
             }
             crate::engine::session_guide::write_session_claude_md(&session_dir, &sections);
         }
@@ -1695,7 +1783,9 @@ impl Engine {
         let log_raw = std::fs::read_to_string(self.0.store.log_path(src_id)).unwrap_or_default();
         let transcript = filter_log_to_transcript(&log_raw);
         let mut visible_label: String = src.prompt.chars().take(50).collect();
-        if src.prompt.chars().count() > 50 { visible_label.push('…'); }
+        if src.prompt.chars().count() > 50 {
+            visible_label.push('…');
+        }
         let seed_prompt = if transcript.is_empty() {
             format!("Fork of {}:", visible_label)
         } else {
@@ -1787,17 +1877,15 @@ The new session is now active. Awaiting the user's next message.",
     /// Best-effort cleanup helper used by `fork_session` rollback. Mirrors
     /// `remove_session_worktrees` but takes `(repo, repo_path)` pairs instead of a separate
     /// session dir. Logs failures at debug level and never returns.
-    fn remove_worktrees_best_effort(
-        &self,
-        repo_specs: &[(String, std::path::PathBuf)],
-        id: &str,
-    ) {
+    fn remove_worktrees_best_effort(&self, repo_specs: &[(String, std::path::PathBuf)], id: &str) {
         let session_dir = self.0.cfg.worktrees_root.join(id);
         for (repo, repo_path) in repo_specs {
             let wt = session_dir.join(repo);
             let rp = repo_path.to_string_lossy();
             let wp = wt.to_string_lossy();
-            if let Err(e) = crate::engine::worktree::git_sync(&["-C", &rp, "worktree", "remove", "--force", &wp]) {
+            if let Err(e) = crate::engine::worktree::git_sync(&[
+                "-C", &rp, "worktree", "remove", "--force", &wp,
+            ]) {
                 tracing::debug!(repo = %repo, worktree = %wp, "fork rollback: worktree remove failed: {e}");
             }
             if let Err(e) = crate::engine::worktree::git_sync(&["-C", &rp, "worktree", "prune"]) {
@@ -1823,7 +1911,10 @@ The new session is now active. Awaiting the user's next message.",
         let _ = self
             .0
             .store
-            .apply_update(id, crate::engine::store::SessionUpdate::new().clear_auto_resume_at())
+            .apply_update(
+                id,
+                crate::engine::store::SessionUpdate::new().clear_auto_resume_at(),
+            )
             .await
             .map_err(|e| tracing::warn!("[engine] kill: auto-resume cancel failed for {id}: {e}"));
 
@@ -1981,7 +2072,9 @@ The new session is now active. Awaiting the user's next message.",
     /// the user can later rewind to it. Failures are logged, never propagated — a snapshot problem
     /// must never break the turn that triggered it.
     fn snapshot_worktrees(&self, s: &Session, turn_index: usize) {
-        let Some(wt_root) = s.worktree_path.as_deref() else { return };
+        let Some(wt_root) = s.worktree_path.as_deref() else {
+            return;
+        };
         for repo in &s.repos {
             let wt = std::path::Path::new(wt_root).join(repo);
             let snapshot_ref = format!("refs/agentic/snapshots/{}/{}", s.id, turn_index);
@@ -2002,17 +2095,19 @@ The new session is now active. Awaiting the user's next message.",
         for repo in &s.repos {
             let wt = std::path::Path::new(&wt_root).join(repo);
             let target = if turn_index == 0 {
-                s.base_shas
-                    .get(repo)
-                    .cloned()
-                    .flatten()
-                    .ok_or_else(|| EngineError::BadInput(format!("no base snapshot for repo {repo}")))?
+                s.base_shas.get(repo).cloned().flatten().ok_or_else(|| {
+                    EngineError::BadInput(format!("no base snapshot for repo {repo}"))
+                })?
             } else {
                 let snapshot_ref = format!("refs/agentic/snapshots/{id}/{turn_index}");
                 let wt_str = wt.to_string_lossy();
                 // Verify the snapshot exists so the caller gets a clean 400, not a raw git error.
                 if crate::engine::worktree::git_sync(&[
-                    "-C", &wt_str, "rev-parse", "--verify", &format!("{snapshot_ref}^{{commit}}"),
+                    "-C",
+                    &wt_str,
+                    "rev-parse",
+                    "--verify",
+                    &format!("{snapshot_ref}^{{commit}}"),
                 ])
                 .is_err()
                 {
@@ -2187,7 +2282,11 @@ The new session is now active. Awaiting the user's next message.",
                         // StartFailed reason. transition() owns the
                         // status=Failed + error+errorKind+ended_at patch.
                         if let Err(e) = engine
-                            .transition(&id, SessionStatus::Failed, TransitionReason::StartFailed(msg))
+                            .transition(
+                                &id,
+                                SessionStatus::Failed,
+                                TransitionReason::StartFailed(msg),
+                            )
                             .await
                         {
                             tracing::error!("[engine] transition start-failed: {e}");
@@ -2539,9 +2638,9 @@ The new session is now active. Awaiting the user's next message.",
         // (the source transcript) ahead of the user's message; for every normal turn it is just
         // the (mention-expanded) prompt. The displayed user bubble stays the user's text, not the
         // prepended transcript.
-        handle.write(&encode_user_message(&compose_user_text(&compose_turn_text_with(
-            &item, &delivered,
-        ))));
+        handle.write(&encode_user_message(&compose_user_text(
+            &compose_turn_text_with(&item, &delivered),
+        )));
 
         // Attach: spawn the pump task AND register the RunningTurn in state.running. This MUST
         // precede publishing status="running": kill()/watchdog-reap/discard/delete all look the
@@ -2702,7 +2801,13 @@ The new session is now active. Awaiting the user's next message.",
                 state.parked.remove(id);
             }
 
-            ClaudeEvent::DelegateRequest { id: req_id, run_id, tasks, title, .. } => {
+            ClaudeEvent::DelegateRequest {
+                id: req_id,
+                run_id,
+                tasks,
+                title,
+                ..
+            } => {
                 // The main session's `delegate` tool is parked waiting for cheap workers. Run the
                 // fan-out OFF the event loop (it can take minutes — run_delegate also marks the
                 // watchdog exemption), then reply via the bridge's stdin control channel so the tool
@@ -2729,15 +2834,24 @@ The new session is now active. Awaiting the user's next message.",
                 let dtasks: Vec<crate::engine::delegate::DelegateTask> = tasks
                     .iter()
                     .map(|t| crate::engine::delegate::DelegateTask {
-                        prompt: t.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        role: t.get("role").and_then(|v| v.as_str()).unwrap_or("explorer").to_string(),
+                        prompt: t
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        role: t
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("explorer")
+                            .to_string(),
                         model: t.get("model").and_then(|v| v.as_str()).map(String::from),
                         phase: t.get("phase").and_then(|v| v.as_str()).map(String::from),
                         write: t.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
                     })
                     .collect();
                 tokio::spawn(async move {
-                    let summaries = match engine.run_delegate(&caller, &run_id, dtasks, title).await {
+                    let summaries = match engine.run_delegate(&caller, &run_id, dtasks, title).await
+                    {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::error!("[engine] delegate run failed for {caller}: {e}");
@@ -2755,11 +2869,21 @@ The new session is now active. Awaiting the user's next message.",
                         .map(|s| serde_json::json!({ "agentId": s.agent_id, "summary": s.summary, "failed": s.failed }))
                         .collect();
                     let line = serde_json::json!({ "__bridge": "delegate", "id": req_id, "summaries": wire }).to_string();
-                    let run = { engine.0.state.lock().running.get(&caller).map(|r| r.run.clone()) };
+                    let run = {
+                        engine
+                            .0
+                            .state
+                            .lock()
+                            .running
+                            .get(&caller)
+                            .map(|r| r.run.clone())
+                    };
                     if let Some(run) = run {
                         run.write(&line);
                     } else {
-                        tracing::warn!("[engine] delegate reply: caller {caller} no longer running");
+                        tracing::warn!(
+                            "[engine] delegate reply: caller {caller} no longer running"
+                        );
                     }
                 });
             }
@@ -2825,8 +2949,9 @@ The new session is now active. Awaiting the user's next message.",
                 }
                 // Discord-style unread tracking: increment the monotonic counter so the client's
                 // comparison `unreadEventId > lastAckedEventId` detects this as a new "your turn" point.
-                let _ = self.0.store.incr_unread_event_id(id).await
-                    .map_err(|e| tracing::warn!("[engine] unreadEventId incr failed for {id}: {e}"));
+                let _ = self.0.store.incr_unread_event_id(id).await.map_err(|e| {
+                    tracing::warn!("[engine] unreadEventId incr failed for {id}: {e}")
+                });
 
                 // PR4 (finally wired): record the turn-end wall-clock in the
                 // lifecycle sidecar. This is the AUTHORITATIVE end time recover()
@@ -2948,7 +3073,11 @@ The new session is now active. Awaiting the user's next message.",
                     for url in crate::engine::stream::detect_created_pr_urls(text) {
                         let fresh = {
                             let mut state = self.0.state.lock();
-                            state.pr_seen.entry(id.to_string()).or_default().insert(url.clone())
+                            state
+                                .pr_seen
+                                .entry(id.to_string())
+                                .or_default()
+                                .insert(url.clone())
                         };
                         if fresh {
                             let engine = self.clone();
@@ -2987,7 +3116,11 @@ The new session is now active. Awaiting the user's next message.",
                 }
             }
 
-            ClaudeEvent::Workflow { id: card_id, delegate, .. } => {
+            ClaudeEvent::Workflow {
+                id: card_id,
+                delegate,
+                ..
+            } => {
                 // Record each workflow card's tool_use id so we can link it to its run id once known
                 // (delegate: popped on its DelegateRequest; native Workflow: read from its tool result).
                 // Workflow events come only from assistant tool_use blocks (never a re-tailed marker),
@@ -3059,7 +3192,10 @@ The new session is now active. Awaiting the user's next message.",
         let out = match fetched {
             Ok(Ok(o)) if o.status.success() => o,
             Ok(Ok(o)) => {
-                tracing::warn!("[engine] gh pr view {url} failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+                tracing::warn!(
+                    "[engine] gh pr view {url} failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
                 return;
             }
             Ok(Err(e)) => {
@@ -3077,9 +3213,21 @@ The new session is now active. Awaiting the user's next message.",
         };
         let number = meta.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
         let repo = crate::engine::stream::pr_repo_from_url(url).unwrap_or_default();
-        let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let body = meta.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let state = meta.get("state").and_then(|v| v.as_str()).unwrap_or("OPEN").to_string();
+        let title = meta
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = meta
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let state = meta
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OPEN")
+            .to_string();
         let raw = serde_json::json!({
             "type": "pr", "url": url, "number": number, "repo": repo,
             "title": title, "body": body, "state": state,
@@ -3095,7 +3243,15 @@ The new session is now active. Awaiting the user's next message.",
         // and the cursor delivers the one persisted `pr` line exactly once.
         self.emit(
             id,
-            &crate::engine::stream::ClaudeEvent::Pr { url: url.to_string(), number, repo, title, body, state, raw },
+            &crate::engine::stream::ClaudeEvent::Pr {
+                url: url.to_string(),
+                number,
+                repo,
+                title,
+                body,
+                state,
+                raw,
+            },
         );
     }
 
@@ -3193,8 +3349,9 @@ The new session is now active. Awaiting the user's next message.",
         // Discord-style unread tracking: increment the counter for DONE sessions
         // (reaching terminal state is a "your turn" point).
         if status == "done" {
-            let _ = self.0.store.incr_unread_event_id(id).await
-                .map_err(|e| tracing::warn!("[engine] unreadEventId incr on_exit failed for {id}: {e}"));
+            let _ = self.0.store.incr_unread_event_id(id).await.map_err(|e| {
+                tracing::warn!("[engine] unreadEventId incr on_exit failed for {id}: {e}")
+            });
         }
 
         // Emit engineExit event.
@@ -3270,7 +3427,11 @@ pub mod components;
 pub mod delegate;
 pub mod global_settings;
 pub mod groups;
+pub mod lifecycle;
+pub mod litellm;
+pub mod mentions;
 pub mod native_overrides;
+pub mod plugin_cli;
 pub mod plugins;
 pub mod providers;
 pub mod push;
@@ -3286,10 +3447,6 @@ pub mod spawner;
 pub mod status;
 pub mod store;
 pub mod stream;
-pub mod transition;
-pub mod lifecycle;
-pub mod litellm;
-pub mod mentions;
 pub mod structured_diff;
 pub mod tailer;
 pub mod templates;
@@ -3297,9 +3454,9 @@ pub mod title;
 pub mod title_client;
 pub mod transcript;
 pub mod transcript_filter;
+pub mod transition;
 pub mod usage;
 pub mod user_config;
-pub mod plugin_cli;
 pub mod workflows;
 pub mod worktree;
 
@@ -3315,8 +3472,8 @@ mod watchdog;
 pub use error::EngineError;
 
 pub use search::{
-    classify_rendered_line, derive_tool_detail, derive_tool_summary, extract_snippet, ClassifiedLine,
-    SearchField, SearchHit, SearchMatch, SearchResponse, SearchService, SearchTier,
+    classify_rendered_line, derive_tool_detail, derive_tool_summary, extract_snippet,
+    ClassifiedLine, SearchField, SearchHit, SearchMatch, SearchResponse, SearchService, SearchTier,
 };
 
 #[cfg(test)]
