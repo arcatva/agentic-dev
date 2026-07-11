@@ -472,7 +472,9 @@ pub fn annotate_update_available(entries: &mut [CatalogEntry], skills_dir: &Path
         let Ok(text) = std::fs::read_to_string(skills_dir.join(&e.name).join(METADATA_FILE)) else {
             continue;
         };
-        let Ok(meta) = serde_json::from_str::<InstallMeta>(&text) else { continue };
+        let Ok(meta) = serde_json::from_str::<InstallMeta>(&text) else {
+            continue;
+        };
         if !meta.tree_sha.is_empty() && same_install_target(&meta.source, &e.source) {
             e.update_available = Some(meta.tree_sha != e.tree_sha);
         }
@@ -651,7 +653,10 @@ pub async fn install_from_source(
     let meta = InstallMeta {
         source: source.trim().to_string(),
         commit: gh.branch.clone(), // already resolved to the pinned commit sha
-        tree_sha: dir_tree_shas(&tree).get(&gh.path).cloned().unwrap_or_default(),
+        tree_sha: dir_tree_shas(&tree)
+            .get(&gh.path)
+            .cloned()
+            .unwrap_or_default(),
     };
     let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?;
     files.push((METADATA_FILE.to_string(), meta_bytes, false));
@@ -1208,7 +1213,10 @@ mod tests {
         let m = dir_tree_shas(&tree);
         assert_eq!(m.get(""), Some(&"root-sha".to_string()));
         assert_eq!(m.get("skills/weather"), Some(&"weather-sha".to_string()));
-        assert!(!m.contains_key("skills/weather/SKILL.md"), "blobs are not directories");
+        assert!(
+            !m.contains_key("skills/weather/SKILL.md"),
+            "blobs are not directories"
+        );
     }
 
     #[test]
@@ -1219,7 +1227,8 @@ mod tests {
         std::fs::write(
             dir.join("tracked").join(METADATA_FILE),
             r#"{"source":"o/r/tracked","commit":"c1","treeSha":"old"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Installed skill WITHOUT metadata (hand-authored / pre-metadata).
         std::fs::create_dir_all(dir.join("untracked")).unwrap();
 
@@ -1232,9 +1241,9 @@ mod tests {
             update_available: None,
         };
         let mut entries = vec![
-            entry("tracked", "old"),      // same fingerprint → no update
-            entry("untracked", "x"),      // no metadata → unknown
-            entry("not-installed", "y"),  // no dir → unknown
+            entry("tracked", "old"),     // same fingerprint → no update
+            entry("untracked", "x"),     // no metadata → unknown
+            entry("not-installed", "y"), // no dir → unknown
         ];
         annotate_update_available(&mut entries, &dir);
         assert_eq!(entries[0].update_available, Some(false));
