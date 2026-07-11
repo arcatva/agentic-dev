@@ -42,7 +42,9 @@ fn assert_contract(name: &str, value: &serde_json::Value) {
     }
 
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-        panic!("missing contract fixture {path} — run `UPDATE_CONTRACT=1 cargo test --test contract`")
+        panic!(
+            "missing contract fixture {path} — run `UPDATE_CONTRACT=1 cargo test --test contract`"
+        )
     });
     let expected: BTreeSet<String> = serde_json::from_str(&raw).expect("parse fixture");
     let added: Vec<&String> = actual.difference(&expected).collect();

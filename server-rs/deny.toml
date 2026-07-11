@@ -1,13 +1,15 @@
-# cargo-deny 供应链门禁配置。
-# 合并门禁只跑 licenses + bans + sources（见 .github/workflows/ci.yml 的 lint job）。
-# advisories 放独立 non-blocking job——新 RustSec 公告不应无差别拦住无关 PR（见 spec §4.1）。
+# cargo-deny supply-chain policy.
+# The merge gate runs licenses + bans + sources only (see the lint job in .github/workflows/ci.yml).
+# advisories run in a separate non-blocking job — a new RustSec advisory must not redden unrelated
+# PRs (see docs/superpowers/specs/2026-07-11-enterprise-refactor-design.md §4.1).
 
 [graph]
 all-features = true
 
 [licenses]
-# 覆盖依赖树里出现的所有许可（用 cargo metadata 枚举后校验）。OR 表达式择一允许即可，
-# AND 表达式需各部分都在此列表。工作区 crate 的许可已在 Cargo.toml 声明为 MIT。
+# Covers every license present in the dependency tree (enumerated with `cargo metadata`). For an
+# OR expression any one allowed license suffices; for AND, every part must be listed here. The
+# workspace crate's own license is declared as MIT in Cargo.toml.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -29,7 +31,7 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [advisories]
-# 仅在独立 non-blocking job 检查；此处保留有效配置。
+# Checked only in the separate non-blocking job; kept here as valid config.
 yanked = "warn"
 
 [sources]
