@@ -340,15 +340,22 @@ pub fn write_skill_files(skills_dir: &Path, name: &str, files: &[(String, Vec<u8
     result
 }
 
-/// Parse `name:`/`description:` out of a SKILL.md frontmatter (same forgiving rules as
-/// [crate::engine::skills::list_skills]: first match wins, missing → fallback).
+/// Parse `description:` out of a SKILL.md frontmatter (same forgiving rules as
+/// [crate::engine::skills::list_skills]: first match wins, missing → empty). Surrounding
+/// quotes are stripped — YAML-quoted descriptions (e.g. every openclaw skill) would
+/// otherwise display with literal quote marks in the store.
 fn frontmatter_description(text: &str) -> String {
     let Some(fm) = text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) else {
         return String::new();
     };
     for line in fm.0.lines() {
         if let Some(v) = line.strip_prefix("description:") {
-            return v.trim().to_string();
+            let v = v.trim();
+            let unquoted = v
+                .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            return unquoted.to_string();
         }
     }
     String::new()
@@ -856,6 +863,12 @@ mod tests {
             frontmatter_description("---\nname: x\ndescription: does things\n---\nbody"),
             "does things",
         );
+        // YAML-quoted values (openclaw-style) display without the quote marks.
+        assert_eq!(
+            frontmatter_description("---\ndescription: \"Current weather, with quotes\"\n---\n"),
+            "Current weather, with quotes",
+        );
+        assert_eq!(frontmatter_description("---\ndescription: 'single'\n---\n"), "single");
         assert_eq!(frontmatter_description("no frontmatter"), "");
     }
 }
