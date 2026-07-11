@@ -3,9 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Runtime dependency for server-rs/sdk-bridge.mjs — the thin Node bridge the Rust server spawns per turn to drive claude through the Agent SDK (this is what makes AskUserQuestion pause in-turn). Run `npm install` in this directory before cutover (or keep ~/src/agentic-dev/node_modules in place); node resolves @anthropic-ai/claude-agent-sdk from server-rs/node_modules first. Keep this version in sync with the root package.json.",
+  "description": "Runtime dependency for server-rs/sdk-bridge/sdk-bridge.mjs \u2014 the thin Node bridge the Rust server spawns per turn to drive claude through the Agent SDK (this is what makes AskUserQuestion pause in-turn). Run `npm install` in this directory; node resolves @anthropic-ai/claude-agent-sdk from the adjacent node_modules.",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.183",
     "zod": "^4.0.0"
+  },
+  "scripts": {
+    "check": "node --check sdk-bridge.mjs",
+    "lint": "eslint sdk-bridge.mjs"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.0",
+    "@eslint/js": "^9.39.0",
+    "globals": "^16.0.0"
   }
 }
