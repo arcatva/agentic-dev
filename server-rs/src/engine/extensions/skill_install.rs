@@ -447,7 +447,12 @@ struct InstallMeta {
 /// irrelevant for identity)? False when either fails to parse.
 fn same_install_target(a: &str, b: &str) -> bool {
     match (source_key(a), source_key(b)) {
-        (Some(x), Some(y)) => x.owner == y.owner && x.repo == y.repo && x.path == y.path,
+        // GitHub owner/repo are case-insensitive; paths are not.
+        (Some(x), Some(y)) => {
+            x.owner.eq_ignore_ascii_case(&y.owner)
+                && x.repo.eq_ignore_ascii_case(&y.repo)
+                && x.path == y.path
+        }
         _ => false,
     }
 }
@@ -459,7 +464,9 @@ fn same_install_target(a: &str, b: &str) -> bool {
 /// fingerprint would otherwise always differ and show a bogus Update).
 pub fn annotate_update_available(entries: &mut [CatalogEntry], skills_dir: &Path) {
     for e in entries.iter_mut() {
-        if e.tree_sha.is_empty() {
+        // valid_name: the entry name is derived from a user-configured source's tree paths —
+        // never join an unvetted name into skills_dir (path traversal defense-in-depth).
+        if e.tree_sha.is_empty() || !valid_name(&e.name) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(skills_dir.join(&e.name).join(METADATA_FILE)) else {
