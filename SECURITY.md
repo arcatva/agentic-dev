@@ -1,0 +1,34 @@
+# Security Policy
+
+## Reporting a vulnerability
+
+Please report security issues **privately**, not in public issues or PRs:
+
+- Open a [GitHub security advisory](https://github.com/arcatva/agentic-dev/security/advisories/new), or
+- email the maintainer (see the GitHub profile for `@arcatva`).
+
+Include repro steps and affected version/commit. You'll get an acknowledgement; please allow time
+for a fix before any public disclosure.
+
+## Security model (what this server assumes)
+
+`agentic-dev` is an **operator-run, local-first** control plane: it spawns and streams headless
+`claude` sessions in git worktrees on the operator's own machine, and the [Android
+client](https://github.com/arcatva/agentic-dev-android) connects to it over the LAN.
+
+- **Authentication** — every API route except `/api/login` requires an `Authorization: Bearer`
+  token. Tokens are HMAC-signed by the server; the shared secret is a local password
+  (`~/.agentic-dev/login-password`). `/api/login` is rate-limited to blunt brute force.
+- **Transport** — the server terminates TLS in-process (`axum-server` + `rustls`). It uses an
+  operator-supplied PEM cert, or generates and persists a self-signed cert (via `rcgen`) that
+  lists the host's interface IPs as SANs. The Android client pins the self-signed cert.
+- **Trust boundary** — the server runs the local `claude` toolchain with the operator's
+  credentials and filesystem access. It is **not** hardened for exposure to the public internet;
+  keep it on a trusted LAN / behind a tunnel.
+
+## Out of scope / non-secrets
+
+- No secrets, keys, or passwords are committed to this repo (`.env`, `login-password`, and
+  keystores are gitignored). Do not paste tokens or passwords into issues.
+- Supply-chain: dependencies are audited in CI via `cargo-deny` (licenses/bans/sources gate;
+  advisories as a non-blocking signal) and kept current via Dependabot.

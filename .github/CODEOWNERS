@@ -1,0 +1,7 @@
+# Code owners — auto-requested for review on matching paths.
+# Single-maintainer repo; the default owner covers everything.
+*                       @arcatva
+
+# Surfaces worth an explicit callout (still @arcatva, but documents intent):
+/server-rs/src/api/     @arcatva   # HTTP/WS surface the Android client depends on — keep stable
+/.github/               @arcatva   # CI / release / supply-chain config

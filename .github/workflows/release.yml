@@ -42,8 +42,12 @@ jobs:
             echo "version=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Match server-rs/rust-toolchain.toml (1.96.0) so the cross-compile target is installed for
+      # the exact toolchain rustup will use in server-rs/ — otherwise rustup switches to 1.96.0 at
+      # build time while the target was added to `stable`, and the cross build fails. SHA-pinned.
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
+          toolchain: "1.96.0"
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
