@@ -965,11 +965,21 @@ pub async fn skills_catalog_route(
     State(st): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<CatalogQuery>,
 ) -> Response {
-    let (mut skills, errors) =
+    let (skills, errors) =
         crate::engine::skill_install::fetch_catalog(&st.config.claude_config_base, q.refresh).await;
     // Per-request (never cached): compare each entry's content fingerprint against the
     // installed copy's provenance metadata so the app can show Update only when one exists.
-    crate::engine::skill_install::annotate_update_available(&mut skills, &st.config.skills_dir);
+    // Blocking file reads → spawn_blocking, keeping the async executor free.
+    let skills_dir = st.config.skills_dir.clone();
+    let skills = tokio::task::spawn_blocking(move || {
+        let mut skills = skills;
+        crate::engine::skill_install::annotate_update_available(&mut skills, &skills_dir);
+        skills
+    })
+    .await
+    // JoinError = the annotation task panicked (it can't, absent fs pathology). An empty
+    // list beats a 500 for a read-only catalog.
+    .unwrap_or_default();
     Json(json!({ "skills": skills, "errors": errors })).into_response()
 }
 
