@@ -96,11 +96,10 @@ Run: `cd server-rs && cargo build 2>&1 | tail -5` → 通过。
 ### Task B1.4: CI 接入
 **Files:** Modify `.github/workflows/ci.yml`
 - [ ] **Step 1:** 把 toolchain 步骤改为装 rustfmt+clippy 并新增 lint job（保持既有 `test` job 不变）：
-  - 将 `dtolnay/rust-toolchain@stable` 改为固定版 + 组件：
+  - 将 `dtolnay/rust-toolchain@stable` 改为**钉版**（同时钉 action 与工具链，勿用 `@master` 未固定引用——见 §4.9 CI 加固；理想是钉 commit SHA）+ 组件：
     ```yaml
-    - uses: dtolnay/rust-toolchain@master
+    - uses: dtolnay/rust-toolchain@1.96.0   # 钉 action+工具链版本；生产可进一步钉该 tag 的 commit SHA
       with:
-        toolchain: 1.96.0
         components: rustfmt, clippy
     ```
   - 新增独立 `lint` job：`cargo fmt --check`、`cargo clippy --all-targets`（**不加 -D**）、`EmbarkStudios/cargo-deny-action`（`command: check licenses bans sources`）。
