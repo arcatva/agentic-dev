@@ -515,10 +515,12 @@ fn source_key(src: &str) -> Option<GithubRef> {
 }
 
 /// Drop a source's cached scan so mutations take effect immediately (and removed sources
-/// don't linger in memory).
+/// don't linger in memory). Matches by CANONICAL identity, not raw spelling — the cache may
+/// hold the source under a different spelling than the one being mutated.
 fn invalidate_source_cache(source: &str) {
+    let key = source_key(source);
     if let Some(m) = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        m.remove(source);
+        m.retain(|k, _| k != source && (key.is_none() || source_key(k) != key));
     }
 }
 
@@ -539,16 +541,19 @@ pub fn add_source(config_base: &Path, source: &str) -> Result<Vec<String>, Strin
     Ok(sources)
 }
 
-/// Remove a store source. Returns (new list, found). Removing the last source is allowed —
-/// the store is simply empty then (the default is only seeded while NO file exists).
+/// Remove a store source — matched by CANONICAL identity (add dedupes canonically, so remove
+/// must too: adding "https://github.com/o/r" then removing "o/r" works). Returns
+/// (new list, found). Removing the last source is allowed — the store is simply empty then
+/// (the default is only seeded while NO file exists).
 pub fn remove_source(config_base: &Path, source: &str) -> Result<(Vec<String>, bool), String> {
     let source = source.trim().trim_end_matches('/');
+    let key = source_key(source);
     let _guard = SOURCES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut sources = read_sources_for_write(config_base)
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| vec![DEFAULT_SOURCE.to_string()]);
     let before = sources.len();
-    sources.retain(|s| s != source);
+    sources.retain(|s| s != source && (key.is_none() || source_key(s) != key));
     let found = sources.len() != before;
     if found {
         write_sources(config_base, &sources).map_err(|e| e.to_string())?;
@@ -564,8 +569,9 @@ static CATALOG_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, 
     std::sync::Mutex::new(None);
 
 /// The aggregated skill catalog across every configured store source. One broken/unreachable
-/// source degrades to an entry in `errors` instead of failing the whole store. Per-source
-/// results are cached for [CATALOG_TTL]; `refresh` bypasses the cache.
+/// source degrades to an entry in `errors` instead of failing the whole store. Sources are
+/// scanned in PARALLEL (a single slow source must not stall the rest behind its 20s timeout).
+/// Per-source results are cached for [CATALOG_TTL]; `refresh` bypasses the cache.
 pub async fn fetch_catalog(config_base: &Path, refresh: bool) -> (Vec<CatalogEntry>, Vec<String>) {
     let sources = read_sources(config_base);
     let mut entries: Vec<CatalogEntry> = Vec::new();
@@ -574,26 +580,43 @@ pub async fn fetch_catalog(config_base: &Path, refresh: bool) -> (Vec<CatalogEnt
         Ok(c) => c,
         Err(e) => return (entries, vec![e]),
     };
-    for src in sources {
-        if !refresh {
-            let cache = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, cached)) = cache.as_ref().and_then(|m| m.get(&src)) {
-                if at.elapsed() < CATALOG_TTL {
-                    entries.extend(cached.iter().cloned());
-                    continue;
+
+    enum ScanResult {
+        Cached(Vec<CatalogEntry>),
+        Fresh(String, Vec<CatalogEntry>),
+        Error(String, String),
+    }
+
+    let scans = sources.into_iter().map(|src| {
+        let client = client.clone(); // reqwest::Client is a cheap Arc handle
+        async move {
+            if !refresh {
+                // Guard dropped before any await — never held across suspension.
+                let cache = CATALOG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((at, cached)) = cache.as_ref().and_then(|m| m.get(&src)) {
+                    if at.elapsed() < CATALOG_TTL {
+                        return ScanResult::Cached(cached.clone());
+                    }
                 }
             }
+            match scan_source(&client, &src).await {
+                Ok(found) => ScanResult::Fresh(src, found),
+                Err(e) => ScanResult::Error(src, e),
+            }
         }
-        match scan_source(&client, &src).await {
-            Ok(found) => {
+    });
+    for res in futures_util::future::join_all(scans).await {
+        match res {
+            ScanResult::Cached(cached) => entries.extend(cached),
+            ScanResult::Fresh(src, found) => {
                 CATALOG_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get_or_insert_with(Default::default)
-                    .insert(src.clone(), (Instant::now(), found.clone()));
+                    .insert(src, (Instant::now(), found.clone()));
                 entries.extend(found);
             }
-            Err(e) => errors.push(format!("{src}: {e}")),
+            ScanResult::Error(src, e) => errors.push(format!("{src}: {e}")),
         }
     }
     entries.sort_by(|a, b| (a.name.as_str(), a.source_repo.as_str()).cmp(&(b.name.as_str(), b.source_repo.as_str())));
