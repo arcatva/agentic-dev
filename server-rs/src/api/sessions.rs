@@ -854,9 +854,11 @@ pub struct FileQuery {
 /// changed between my first attempt and this resume" (stale resume must restart from scratch, not
 /// stitch mismatched halves). size+mtime alone can collide when a file is REGENERATED with the
 /// same length and a preserved/coarse timestamp (cp -p, fat mtime granularity); a regenerated
-/// file virtually always gets a new inode, which closes that hole without hashing 44MB per
-/// request. In-place same-size overwrites within one mtime tick remain theoretically ambiguous —
-/// nothing in the outbox flow writes like that.
+/// file written the way this codebase writes files — tmp + rename (engine::atomic_write) —
+/// always gets a distinct inode (the tmp is allocated while the old file still exists), which
+/// closes that hole without hashing 44MB per request. Honest caveats: delete-then-recreate IN
+/// PLACE can silently reuse the freed inode (ext4 does), and in-place same-size overwrites
+/// within one mtime tick are ambiguous — nothing in the outbox flow writes either way.
 fn file_etag(meta: &std::fs::Metadata) -> String {
     use std::time::UNIX_EPOCH;
     let mt = meta
@@ -1994,12 +1996,21 @@ mod tests {
             .unwrap()
             .to_string();
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        // Regenerate: new file, same length, mtime pinned back to the original.
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, b"ABCDEFGHIJ").unwrap();
-        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        // Regenerate: new file, same length, mtime pinned back to the original. Written via
+        // tmp+rename — the same pattern production uses (engine::atomic_write) — so the new
+        // file's inode is allocated while the old file still exists and is therefore guaranteed
+        // to differ. (The previous delete-then-recreate-in-place version was flaky in CI: ext4
+        // happily REUSES the just-freed inode, making dev+ino+size+mtime — and thus the ETag —
+        // collide.)
+        let tmp_path = path.with_file_name("ten.bin.tmp");
+        std::fs::write(&tmp_path, b"ABCDEFGHIJ").unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
+            .unwrap();
         f.set_modified(mtime).unwrap();
         drop(f);
+        std::fs::rename(&tmp_path, &path).unwrap();
         let etag2 = file_req(&st, "s-rng-regen", &[])
             .await
             .headers()
