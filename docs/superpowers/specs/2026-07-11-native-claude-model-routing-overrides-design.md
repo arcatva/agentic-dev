@@ -190,16 +190,29 @@ which loads the map at the call boundary; the four existing test callers (`provi
 `~/.agentic-dev/native-overrides.json` or race a concurrent `set_var` (the UB the provider file
 override static was written to avoid):
 
+**One candidate per family (decision D1 = collapse to newest).** `native_claude_models()` is in
+API order (newest first), so we keep the FIRST model seen per family and drop older siblings from
+the routing candidate list. This makes a family a single routing unit (consistent with family
+keying), so a raised family priority can't be undercut by the router LLM naming an older sibling
+with now-identical metrics; it also shrinks the router prompt. Discovery and the
+`/api/native-models` view still list every discovered id — only the *routing candidate* set is
+collapsed.
+
 ```rust
 pub fn native_claude_candidates(overrides: &BTreeMap<String, NativeOverride>) -> Vec<Provider> {
-    // per discovered model m:
-    let fam = family_of(&m.id);
-    let (cap, cost, prio, desc) = match overrides.get(fam) {
-        Some(o) => (o.capability, o.cost, o.priority,
-                    if o.description.is_empty() { default_desc(m) } else { o.description.clone() }),
-        None => { let (c, k) = family_default_metrics(fam); (c, k, DEFAULT_NATIVE_PRIORITY, default_desc(m)) }
-    };
-    // ... build the Provider as today ...
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in native_claude_models() {              // newest-first
+        let fam = family_of(&m.id);
+        if !seen.insert(fam) { continue; }         // keep only the newest per family
+        let (cap, cost, prio, desc) = match overrides.get(fam) {
+            Some(o) => (o.capability, o.cost, o.priority,
+                        if o.description.is_empty() { default_desc(m) } else { o.description.clone() }),
+            None => { let (c, k) = family_default_metrics(fam); (c, k, DEFAULT_NATIVE_PRIORITY, default_desc(m)) }
+        };
+        out.push(/* build the Provider from m + (cap, prio, cost, desc) as today */);
+    }
+    out
 }
 ```
 
@@ -211,10 +224,9 @@ Production call site (`delegate.rs`):
 candidate, and `apply_priority` makes a raised family `priority` authoritative among
 capable-enough candidates — the whole point of the feature.
 
-**Open decision (see "Open decisions" below):** whether a family should be a SINGLE routing
-candidate (newest model only) or keep every discovered sibling as its own candidate as today. This
-governs whether a raised family priority can be undercut by the router LLM naming an older sibling
-that now carries identical family metrics.
+An explicit `model` pin to an *older* native id (e.g. `claude-opus-4-7` when `-4-8` exists) no
+longer resolves to a native candidate and falls back to the main model — negligible (same
+subscription and tier).
 
 ### API layer (`api/misc.rs`, routes in `api/mod.rs`)
 
@@ -337,10 +349,12 @@ endpoint, so API stability for older app builds is preserved.
    carries them and non-overridden families keep defaults + `priority` 0.5.
 5. **Inheritance across releases:** seed `claude-opus-4-9` (a hypothetical new id), pass the `opus`
    family override, assert the new model's candidate inherits it — the durability guarantee.
-6. **Hermeticity:** `native_claude_candidates(&BTreeMap::new())` reproduces today's defaults
-   verbatim; the existing candidate/resolve tests are updated to pass an empty map and therefore
-   never read the real overrides file. (Guards against the "helper silently reads `$HOME`" regression
-   and the `set_var` race.)
+6. **Hermeticity + collapse:** `native_claude_candidates(&BTreeMap::new())` (empty map) returns one
+   candidate per family (newest), with `family_default_metrics` + `priority` 0.5 — the existing
+   `native_claude_candidates_compete_as_routing_candidates` assertion changes from 5 to 4 candidates
+   (opus-4-8 + opus-4-7 collapse) and every candidate/resolve test is updated to pass an empty map,
+   so none read the real overrides file. (Guards the "helper silently reads `$HOME`" regression and
+   the `set_var` race, and pins the newest-per-family behavior.)
 
 ### Backend API tests (`api/misc.rs`)
 
@@ -365,32 +379,23 @@ possible.
 - `make build` (backend) and the Android compile must pass before commit; `make test` should be
   green for the backend.
 
-## Open decisions
+## Decisions & known issues
 
-**D1 — Is a family ONE routing candidate, or one per discovered sibling?**
+**D1 (RESOLVED — collapse to newest-per-family for routing candidates).**
 Today `native_claude_candidates()` emits every discovered model as its own candidate ("no tier
 bucketing, no latest-per-family cap" — an explicit current invariant, asserted at
-`providers.rs:653`). Once family keying gives all siblings in a family identical metrics, if the
-router LLM names an older sibling (`claude-opus-4-7` while `-4-8` exists), `apply_priority` cannot
-upgrade it (metrics are equal), so an older model can run despite a raised family priority.
+`providers.rs:653`). With family keying all siblings in a family share metrics, so if the router LLM
+named an older sibling (`claude-opus-4-7` while `-4-8` exists) `apply_priority` could not upgrade it
+and an older model could run despite a raised family priority. **Decision:** a family is ONE routing
+unit — `native_claude_candidates` keeps only the newest model per family (see the routing section).
+This reverses the old invariant and updates `native_claude_candidates_compete_as_routing_candidates`
+(the seeded set collapses from 5 candidates to 4: opus-4-8 + opus-4-7 → opus-4-8). Discovery and the
+`/api/native-models` view are unaffected — they still list every id.
 
-- **Option A (recommended): collapse to newest-per-family for ROUTING candidates.** A family becomes
-  one routing unit — consistent with family keying, shrinks the router prompt, removes the
-  older-sibling ambiguity. Cost: reverses the current invariant and updates the
-  `native_claude_candidates_compete_as_routing_candidates` test; an explicit `model` pin to an older
-  native id would no longer resolve to a native candidate (falls back to the main model — negligible,
-  same subscription/tier).
-- **Option B: keep every sibling a candidate (status quo).** Smaller change, preserves the invariant;
-  accepts that the router may occasionally pick an older same-tier sibling (functionally equivalent —
-  same subscription, same cost, marginally older quality).
-
-This only affects the routing candidate list, never the picker or the `/api/native-models` view.
-
-**D2 — pre-existing `apply_priority` EPS asymmetry.** A reviewer flagged that `apply_priority`'s
-first-swap branch uses EPS-thresholded comparisons while later swaps use strict `>`/`<`, which can
-be order-sensitive under near-equal priorities. It predates this feature and is out of scope; Option
-A (well-separated cross-family metrics, one candidate per family) sidesteps it in practice. Noted so
-it is not forgotten.
+**D2 (KNOWN, pre-existing, out of scope).** `apply_priority`'s first-swap branch uses
+EPS-thresholded comparisons while later swaps use strict `>`/`<`, which can be order-sensitive under
+near-equal priorities. It predates this feature; D1 (well-separated cross-family metrics, one
+candidate per family) sidesteps it in practice. Noted so it is not forgotten, not fixed here.
 
 ## Out of scope
 
