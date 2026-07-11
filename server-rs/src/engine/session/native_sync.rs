@@ -72,10 +72,14 @@ impl Engine {
 
         let from = s.native_watermark_lines.max(0) as usize;
         let (lines, total) = crate::engine::native_transcript::translate_range(&path, from);
-        for line in &lines {
+        // Batch the delta into ONE append: per-line appends spawned a blocking task and
+        // opened/closed the file once per line. `append_log` writes `{arg}\n`, so joining with
+        // '\n' produces byte-identical file content to N single-line calls — and fewer partial
+        // states if interrupted mid-import.
+        if !lines.is_empty() {
             self.0
                 .store
-                .append_log(id, line)
+                .append_log(id, &lines.join("\n"))
                 .await
                 .map_err(|e| e.to_string())?;
         }

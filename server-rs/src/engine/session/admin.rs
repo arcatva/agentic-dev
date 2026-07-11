@@ -116,6 +116,10 @@ impl Engine {
     pub async fn rewind(&self, id: &str, turn_index: usize) -> Result<(), EngineError> {
         let s = self.live_session(id).await?;
         let wt_root = s.worktree_path.clone().ok_or(EngineError::NoWorktree)?;
+        // Phase 1: resolve + verify EVERY repo's restore target before touching anything, so a
+        // validation failure on repo N cannot leave repos 1..N-1 already restored (a partially
+        // rewound multi-repo workspace).
+        let mut plan: Vec<(std::path::PathBuf, String, String)> = Vec::with_capacity(s.repos.len());
         for repo in &s.repos {
             let wt = std::path::Path::new(&wt_root).join(repo);
             let target = if turn_index == 0 {
@@ -141,7 +145,12 @@ impl Engine {
                 }
                 snapshot_ref
             };
-            crate::engine::worktree::restore_worktree(&wt, &target)
+            plan.push((wt, target, repo.clone()));
+        }
+        // Phase 2: all targets validated — restore. (A restore *failure* can still stop midway;
+        // what this removes is partial state from a mere validation error.)
+        for (wt, target, repo) in &plan {
+            crate::engine::worktree::restore_worktree(wt, target)
                 .map_err(|e| EngineError::Internal(format!("rewind restore {repo} failed: {e}")))?;
         }
         Ok(())
