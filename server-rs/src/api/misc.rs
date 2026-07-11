@@ -390,6 +390,135 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
     }
 }
 
+// ── native Claude per-family routing overrides ──
+
+#[derive(serde::Serialize)]
+struct NativeModelRef {
+    id: String,
+    display_name: String,
+}
+
+#[derive(serde::Serialize)]
+struct NativeFamilyView {
+    family: String,
+    label: String,
+    models: Vec<NativeModelRef>,
+    capability: f32,
+    priority: f32,
+    cost: f32,
+    description: String,
+    customized: bool,
+    editable: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct NativeOverrideReq {
+    capability: f32,
+    priority: f32,
+    cost: f32,
+    #[serde(default)]
+    description: String,
+}
+
+fn is_editable_family(family: &str) -> bool {
+    matches!(family, "opus" | "sonnet" | "haiku" | "fable")
+}
+
+fn family_label(family: &str) -> &'static str {
+    match family {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        "fable" => "Fable",
+        _ => "Other",
+    }
+}
+
+/// GET /api/native-models — native Claude families with effective routing metrics + override state.
+pub async fn native_models_get() -> Response {
+    use crate::engine::providers::{family_default_metrics, family_of, native_claude_models, DEFAULT_NATIVE_PRIORITY};
+    let overrides = crate::engine::native_overrides::load_map();
+
+    // Group discovered models by family, first-seen (newest-first) order.
+    let mut order: Vec<&'static str> = Vec::new();
+    let mut groups: std::collections::HashMap<&'static str, Vec<NativeModelRef>> = std::collections::HashMap::new();
+    for m in native_claude_models() {
+        let fam = family_of(&m.id);
+        groups.entry(fam).or_default().push(NativeModelRef { id: m.id.clone(), display_name: m.display_name.clone() });
+        if !order.contains(&fam) {
+            order.push(fam);
+        }
+    }
+
+    let mut views: Vec<NativeFamilyView> = order
+        .into_iter()
+        .map(|fam| {
+            let (dc, dk) = family_default_metrics(fam);
+            let (capability, priority, cost, description, customized) = match overrides.get(fam) {
+                Some(o) => (o.capability, o.priority, o.cost, o.description.clone(), true),
+                None => (dc, DEFAULT_NATIVE_PRIORITY, dk, String::new(), false),
+            };
+            NativeFamilyView {
+                family: fam.to_string(),
+                label: family_label(fam).to_string(),
+                models: groups.remove(fam).unwrap_or_default(),
+                capability,
+                priority,
+                cost,
+                description,
+                customized,
+                editable: is_editable_family(fam),
+            }
+        })
+        .collect();
+    // cheap → capable, family-name tiebreak (matches the /api/models ordering contract).
+    views.sort_by(|a, b| a.capability.total_cmp(&b.capability).then_with(|| a.family.cmp(&b.family)));
+
+    Json(json!({ "families": views })).into_response()
+}
+
+/// POST /api/native-models/{family} — set a family's routing override.
+pub async fn native_models_post(
+    axum::extract::Path(family): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let family = family.trim().to_lowercase();
+    if !is_editable_family(&family) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("not an editable family: {family}")}))).into_response();
+    }
+    let req: NativeOverrideReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid override: {e}")}))).into_response(),
+    };
+    for (name, v) in [("capability", req.capability), ("priority", req.priority), ("cost", req.cost)] {
+        if v.is_nan() {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{name} cannot be NaN")}))).into_response();
+        }
+    }
+    let ov = crate::engine::native_overrides::NativeOverride {
+        capability: req.capability.clamp(0.0, 1.0),
+        priority: req.priority.clamp(0.0, 1.0),
+        cost: req.cost.clamp(0.0, 1.0),
+        description: req.description,
+    };
+    match crate::engine::native_overrides::upsert(&family, ov) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// DELETE /api/native-models/{family} — reset a family to defaults (idempotent).
+pub async fn native_models_delete(axum::extract::Path(family): axum::extract::Path<String>) -> Response {
+    let family = family.trim().to_lowercase();
+    if !is_editable_family(&family) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("not an editable family: {family}")}))).into_response();
+    }
+    match crate::engine::native_overrides::remove(&family) {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 // ── model catalog (native Claude tiers + registered BYOK providers) ──
 
 #[derive(serde::Serialize)]
@@ -1097,5 +1226,172 @@ mod tests {
             .body(Body::from(r#"{"id":"a b"}"#)).unwrap()).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().is_some());
+    }
+
+    struct NativeOvGuard {
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for NativeOvGuard {
+        fn drop(&mut self) {
+            *crate::engine::native_overrides::NATIVE_OVERRIDES_FILE_OVERRIDE.lock() = None;
+        }
+    }
+    fn isolated_native_overrides_file() -> NativeOvGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        *crate::engine::native_overrides::NATIVE_OVERRIDES_FILE_OVERRIDE.lock() =
+            Some(dir.path().join("native-overrides.json"));
+        NativeOvGuard { _dir: dir, _lock: lock }
+    }
+
+    #[tokio::test]
+    async fn native_models_get_groups_then_post_marks_customized() {
+        let _ov = isolated_native_overrides_file();
+        let st = test_state().await;
+        crate::engine::providers::seed_claude_models_for_tests();
+
+        // GET: families present, opus editable and not customized
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/native-models")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let fams = b["families"].as_array().unwrap();
+        // Seed families: fable/opus/opus/sonnet/haiku → 4 groups (opus collapses in routing, but GET
+        // groups by discovered family). Ordering contract: cheap → capable (family-name tiebreak).
+        assert_eq!(fams.len(), 4);
+        let order: Vec<&str> = fams.iter().map(|f| f["family"].as_str().unwrap()).collect();
+        assert_eq!(order, vec!["haiku", "sonnet", "opus", "fable"]);
+        let opus = fams.iter().find(|f| f["family"] == "opus").unwrap();
+        assert_eq!(opus["editable"], true);
+        assert_eq!(opus["customized"], false);
+        // A non-overridden family returns an empty description verbatim (the generated per-model
+        // fallback happens only at routing time, not in this view).
+        assert_eq!(fams.iter().find(|f| f["family"] == "sonnet").unwrap()["description"], "");
+
+        // POST with mixed-case family normalizes and applies
+        let (s2, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/native-models/Opus")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"capability":0.9,"priority":0.85,"cost":0.2,"description":"hard only"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK);
+
+        // GET again: opus is now customized with the new priority
+        let (_, b3) = oneshot_req(
+            st.clone(),
+            Request::get("/api/native-models")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let opus3 = b3["families"].as_array().unwrap().iter().find(|f| f["family"] == "opus").unwrap().clone();
+        assert_eq!(opus3["customized"], true);
+        // f32→JSON widens to f64, so compare with a tolerance rather than `== 0.85` (which would fail).
+        assert!((opus3["priority"].as_f64().unwrap() - 0.85).abs() < 1e-6);
+        assert_eq!(opus3["description"], "hard only");
+    }
+
+    #[tokio::test]
+    async fn native_models_post_rejects_other_and_bad_family_and_clamps() {
+        let _ov = isolated_native_overrides_file();
+        let st = test_state().await;
+
+        // `other` is read-only
+        let (s_other, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/native-models/other")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s_other, StatusCode::BAD_REQUEST);
+
+        // unknown family
+        let (s_bad, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/native-models/nope")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"capability":0.5,"priority":0.5,"cost":0.5}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s_bad, StatusCode::BAD_REQUEST);
+
+        // out-of-range clamps (stored value is 1.0, not 5.0)
+        let (s_ok, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/native-models/sonnet")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"capability":5.0,"priority":-1.0,"cost":0.5}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s_ok, StatusCode::OK);
+        let m = crate::engine::native_overrides::load_map();
+        assert_eq!(m["sonnet"].capability, 1.0);
+        assert_eq!(m["sonnet"].priority, 0.0);
+    }
+
+    #[tokio::test]
+    async fn native_models_delete_resets_and_validates_family() {
+        let _ov = isolated_native_overrides_file();
+        let st = test_state().await;
+
+        // seed an override, then reset it
+        crate::engine::native_overrides::upsert(
+            "opus",
+            crate::engine::native_overrides::NativeOverride { capability: 0.9, priority: 0.8, cost: 0.2, description: String::new() },
+        )
+        .unwrap();
+        let (s, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/native-models/opus")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(crate::engine::native_overrides::load_map().get("opus").is_none());
+
+        // idempotent: deleting again is still OK
+        let (s2, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/native-models/opus")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK);
+
+        // invalid family (`other` catch-all, and an unknown name) → 400
+        for bad in ["other", "nope"] {
+            let (sb, _) = oneshot_req(
+                st.clone(),
+                Request::delete(format!("/api/native-models/{bad}"))
+                    .header("authorization", auth(&st))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(sb, StatusCode::BAD_REQUEST, "DELETE {bad} must be 400");
+        }
     }
 }
