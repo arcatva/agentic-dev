@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use super::delegate::DelegateTask;
-use super::providers::{Protocol, Provider, ProviderRegistry};
+use crate::engine::delegate::DelegateTask;
+use crate::engine::providers::{Protocol, Provider, ProviderRegistry};
 
 /// Shared HTTP client (connection pool); one per process, like `engine::usage`.
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
@@ -193,7 +193,8 @@ pub(crate) fn apply_priority(
     choices
         .into_iter()
         .map(|(idx, choice)| {
-            let Some(picked) = super::providers::resolve_candidate(candidates, &choice.model)
+            let Some(picked) =
+                crate::engine::providers::resolve_candidate(candidates, &choice.model)
             else {
                 return (idx, choice);
             };

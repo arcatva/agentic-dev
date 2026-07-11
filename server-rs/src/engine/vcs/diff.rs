@@ -1,7 +1,7 @@
 //! Engine: structured-diff read methods (commit-history graph + changed files).
 //! Read-only — works for running and terminal sessions.
 
-use super::{Engine, EngineError};
+use crate::engine::{Engine, EngineError};
 
 impl Engine {
     /// Per-repo commit-history graph. Read-only (works for running and terminal sessions).

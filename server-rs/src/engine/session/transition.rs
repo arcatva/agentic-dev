@@ -22,10 +22,10 @@
 //! `EngineError::IllegalTransition { from, to }` — runtime-only check; the
 //! type system can't enforce this since the legality is data-dependent.
 
-use super::*;
 use crate::engine::error::EngineError;
 use crate::engine::status::SessionStatus;
 use crate::engine::store::SessionUpdate;
+use crate::engine::*;
 use std::str::FromStr;
 
 /// Why a particular status change is happening. The `transition()` body uses

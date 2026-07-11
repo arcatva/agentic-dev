@@ -1,12 +1,12 @@
 //! Engine: the watchdog reaper — idle/wall-time timeouts + opt-in idle-TTL reap of parked turns.
 
-use super::*;
 use crate::engine::status::SessionStatus;
+use crate::engine::*;
 
 impl Engine {
     // ── Watchdog ─────────────────────────────────────────────
 
-    pub(super) fn start_watchdog(&self) {
+    pub(crate) fn start_watchdog(&self) {
         let inner = self.0.clone();
         let handle = tokio::spawn(async move {
             let mut interval =
