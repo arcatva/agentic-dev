@@ -525,9 +525,23 @@ async fn route_via_native_claude(
         .filter(|(_, t)| t.model.as_deref().unwrap_or("").trim().is_empty())
         .map(|(i, _)| i)
         .collect();
-    // Nothing to decide: no un-pinned tasks, or <2 candidates (the caller assigns the only one).
-    if route_idxs.is_empty() || candidates.len() < 2 {
+    // Nothing to route: no un-pinned tasks.
+    if route_idxs.is_empty() {
         return HashMap::new();
+    }
+    // A single candidate means there is no routing DECISION to make — assign it to every un-pinned
+    // task directly (mirrors router::route_batch's single-candidate handling). Without this, an
+    // un-pinned task would get no pick and fall back to the subscription DEFAULT model — so the sole
+    // candidate (e.g. a single-family native catalog collapsed to one newest model, or one registered
+    // provider) and any override attached to it would never run. Returns before spawning the router.
+    if candidates.len() == 1 {
+        let only = candidates[0];
+        return route_idxs
+            .into_iter()
+            .map(|i| {
+                (i, crate::engine::router::RouteChoice { model: only.model.clone(), reason: "only candidate".into() })
+            })
+            .collect();
     }
     let prompt = router::build_route_prompt(tasks, &route_idxs, candidates);
     let uniq = std::time::SystemTime::now()
