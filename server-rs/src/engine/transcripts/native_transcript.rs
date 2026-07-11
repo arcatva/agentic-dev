@@ -61,7 +61,7 @@ pub struct Adoptable {
 /// bookkeeping. Tests also exercise this directly through `translate_lines`, which uses
 /// the same function internally.
 pub(crate) fn iso_to_ms(ts: &str) -> i64 {
-    super::auto_resume::rfc3339_to_epoch_ms(ts).unwrap_or(0)
+    crate::engine::auto_resume::rfc3339_to_epoch_ms(ts).unwrap_or(0)
 }
 
 /// Local Claude Code UI slash-commands whose transcript is a command artifact, not a conversation.
@@ -262,7 +262,7 @@ pub fn scan_adoptable(
                 .iter()
                 .find_map(|l| user_prompt_text(l))
                 .unwrap_or_default();
-            let resumable = super::resume_gate::transcript_is_resumable(&p);
+            let resumable = crate::engine::resume_gate::transcript_is_resumable(&p);
             let mtime_ms = f
                 .metadata()
                 .ok()

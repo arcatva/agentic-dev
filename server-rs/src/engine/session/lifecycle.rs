@@ -16,8 +16,8 @@
 //! PR4 wires the writes (TurnStarted on every fresh turn, TurnEnded on
 //! every terminal). PR5 will add the reader used by `recover()`.
 
-use super::*;
 use crate::engine::status::SessionStatus;
+use crate::engine::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

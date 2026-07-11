@@ -22,8 +22,8 @@
 //! persisted on the session row, so a scheduled resume survives a server restart. A user
 //! `kill` is a deliberate stop — killed sessions are never auto-resumed.
 
-use super::*;
 use crate::engine::status::SessionStatus;
+use crate::engine::*;
 use std::str::FromStr;
 
 /// Wait this long past the computed reset instant before resuming (clock-skew guard, and

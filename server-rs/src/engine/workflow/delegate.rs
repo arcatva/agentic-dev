@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use super::workflows::{read_running_run, WorkflowAgent, WorkflowPhase};
 use crate::engine::runner::Runner;
 use crate::engine::spawner::{encode_user_message, spawn_claude, SpawnOptions};
+use crate::engine::workflows::{read_running_run, WorkflowAgent, WorkflowPhase};
 
 /// One cheap worker's final outcome, used to build the completion summary.
 #[derive(Clone, Debug, Default)]
@@ -680,11 +680,11 @@ fn snapshot_session_repos(
     session_dir: &Path,
     repos: &[String],
     run_id: &str,
-) -> Result<HashMap<String, String>, super::worktree::WorktreeError> {
+) -> Result<HashMap<String, String>, crate::engine::worktree::WorktreeError> {
     let sref = snapshot_ref(run_id);
     let mut bases = HashMap::new();
     for repo in repos {
-        let sha = super::worktree::snapshot_worktree(&session_dir.join(repo), &sref)?;
+        let sha = crate::engine::worktree::snapshot_worktree(&session_dir.join(repo), &sref)?;
         bases.insert(repo.clone(), sha);
     }
     Ok(bases)
@@ -698,8 +698,8 @@ fn provision_write_worktree(
     run_id: &str,
     agent_id: &str,
     bases: &HashMap<String, String>,
-) -> Result<WriteProvision, super::worktree::WorktreeError> {
-    use super::worktree::WorktreeError;
+) -> Result<WriteProvision, crate::engine::worktree::WorktreeError> {
+    use crate::engine::worktree::WorktreeError;
     let worker_dir = session_dir
         .join(".agentic-delegate")
         .join(run_id)
@@ -715,7 +715,9 @@ fn provision_write_worktree(
         let branch = format!("agentic-deleg/{run_id}/{agent_id}/{repo}");
         let rp = anchor.to_string_lossy();
         let wp = worker_wt.to_string_lossy();
-        super::worktree::git_sync(&["-C", &rp, "worktree", "add", &wp, "-b", &branch, base])?;
+        crate::engine::worktree::git_sync(&[
+            "-C", &rp, "worktree", "add", &wp, "-b", &branch, base,
+        ])?;
         out.push(WriteRepoWt {
             repo: repo.clone(),
             anchor,
@@ -735,7 +737,7 @@ fn provision_write_worktree(
 async fn collect_write_patch(prov: &WriteProvision) -> String {
     let mut patch = String::new();
     for r in &prov.repos {
-        match super::worktree::diff_worktree(&r.worker_wt, &r.base_sha).await {
+        match crate::engine::worktree::diff_worktree(&r.worker_wt, &r.base_sha).await {
             Ok(d) if !d.trim().is_empty() => {
                 patch.push_str(&format!(
                     "\n===== BEGIN PATCH · repo `{0}` · review, then `git apply` inside the {0}/ subdir =====\n",
@@ -761,7 +763,7 @@ async fn collect_write_patch(prov: &WriteProvision) -> String {
 fn teardown_write_worktrees(provs: &HashMap<String, WriteProvision>) {
     for prov in provs.values() {
         for r in &prov.repos {
-            let _ = super::worktree::discard_worktree(&r.anchor, &r.worker_wt, &r.branch);
+            let _ = crate::engine::worktree::discard_worktree(&r.anchor, &r.worker_wt, &r.branch);
         }
     }
 }
@@ -770,12 +772,12 @@ fn teardown_write_worktrees(provs: &HashMap<String, WriteProvision>) {
 fn cleanup_write_batch(session_dir: &Path, repos: &[String], run_id: &str) {
     let snap_id = format!("deleg-{run_id}");
     for repo in repos {
-        super::worktree::delete_snapshot_refs(&session_dir.join(repo), &snap_id);
+        crate::engine::worktree::delete_snapshot_refs(&session_dir.join(repo), &snap_id);
     }
     let _ = std::fs::remove_dir_all(session_dir.join(".agentic-delegate").join(run_id));
 }
 
-impl super::Engine {
+impl crate::engine::Engine {
     /// Run a `delegate` cheap-worker fan-out on behalf of `caller_id`: resolve the caller's worktree
     /// + journal dir, exempt the turn from the watchdog, run the workers, write the completion
     /// summary, and return each worker's distilled result. The workers appear in the caller
@@ -1125,7 +1127,7 @@ impl super::Engine {
 }
 
 // ── watchdog exemption hooks (used by the /api/sessions/:id/delegate route, follow-up slice) ──
-impl super::Engine {
+impl crate::engine::Engine {
     /// Park the watchdog for `id` while a `delegate` fan-out is in flight: cheap workers can run for
     /// minutes with no events on the main session, which would otherwise trip the idle/wall cancel.
     /// Mirrors `pending_ask`; cleared by `clear_delegate_pending` when the call returns.

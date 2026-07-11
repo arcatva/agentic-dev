@@ -17,7 +17,6 @@
 //! behavior. All 5 existing `recover_*` tests pass unchanged because
 //! they don't write a sidecar.
 
-use super::*;
 use crate::engine::classify_error::classify_claude_error;
 use crate::engine::lifecycle::{
     last_outcome_in_current_turn, last_prompt_at, last_turn_ended_at, last_turn_started_at,
@@ -26,6 +25,7 @@ use crate::engine::lifecycle::{
 use crate::engine::status::SessionStatus;
 use crate::engine::store::SessionUpdate;
 use crate::engine::transition::TransitionReason;
+use crate::engine::*;
 use std::str::FromStr;
 
 impl Engine {

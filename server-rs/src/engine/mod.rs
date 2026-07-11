@@ -3418,60 +3418,42 @@ The new session is now active. Awaiting the user's next message.",
     }
 }
 
-// Engine method clusters split across sibling files (multi-file inherent impls).
-// HTTP-independent core modules.
-pub mod atomic_write;
-pub mod auto_resume;
-pub mod classify_error;
-pub mod components;
-pub mod delegate;
-pub mod global_settings;
-pub mod groups;
-pub mod lifecycle;
-pub mod litellm;
-pub mod mentions;
-pub mod native_overrides;
-pub mod plugin_cli;
-pub mod plugins;
-pub mod providers;
-pub mod push;
-pub mod repos;
-pub mod router;
-pub mod runner;
-pub mod sdk_runner;
-pub mod search;
-pub mod session_guide;
-pub mod skill_install;
-pub mod skills;
-pub mod spawner;
-pub mod status;
-pub mod store;
-pub mod stream;
-pub mod structured_diff;
-pub mod tailer;
-pub mod templates;
-pub mod title;
-pub mod title_client;
-pub mod transcript;
-pub mod transcript_filter;
-pub mod transition;
-pub mod usage;
-pub mod user_config;
-pub mod workflows;
-pub mod worktree;
+// HTTP-independent core, grouped by responsibility. Each group is a submodule; every file is
+// re-exported at the engine level below so existing `crate::engine::<module>` paths keep
+// resolving — this was a behavior-preserving regroup of a previously-flat directory. The API
+// layer (`api::sessions`) reaches `native_transcript` etc. through these re-exports; the engine
+// itself stays axum-free.
+pub mod config;
+pub mod extensions;
+pub mod misc;
+pub mod model;
+pub mod persistence;
+pub mod runtime;
+pub mod session;
+pub mod streaming;
+pub mod titling;
+pub mod transcripts;
+pub mod vcs;
+pub mod workflow;
 
-// Engine method clusters split across sibling files (multi-file inherent impls).
-mod diff;
-mod error;
-// `pub(crate)` so the API layer (`api::sessions`) can call `scan_adoptable` /
-// `transcript_path` for the adopt / adoptable HTTP routes. The engine stays axum-free.
-pub(crate) mod native_transcript;
-mod recover;
-mod resume_gate;
-mod watchdog;
-pub use error::EngineError;
+pub use config::{global_settings, session_guide, templates, user_config};
+pub use extensions::{components, plugin_cli, plugins, skill_install, skills};
+pub use misc::{classify_error, error, mentions, push, search};
+pub use model::{litellm, native_overrides, providers, router};
+pub use persistence::{atomic_write, store};
+pub use runtime::{runner, sdk_runner, spawner};
+pub use session::{
+    auto_resume, groups, lifecycle, recover, resume_gate, status, transition, watchdog,
+};
+pub use streaming::stream;
+pub use titling::{title, title_client};
+pub use transcripts::{native_transcript, tailer, transcript, transcript_filter, usage};
+pub use vcs::{diff, repos, structured_diff, worktree};
+pub use workflow::{delegate, workflows};
 
-pub use search::{
+pub use misc::error::EngineError;
+
+pub use misc::search::{
     classify_rendered_line, derive_tool_detail, derive_tool_summary, extract_snippet,
     ClassifiedLine, SearchField, SearchHit, SearchMatch, SearchResponse, SearchService, SearchTier,
 };
