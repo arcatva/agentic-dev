@@ -21,14 +21,15 @@ a fake bridge script in `server-rs/tests/fixtures/` — no Node, no API cost.
 
 ## Code style & gates
 
-CI runs on every PR (`.github/workflows/ci.yml`):
+CI runs on every PR (`.github/workflows/ci.yml`). The Rust crate lives in `server-rs/`, so run
+these from there (`cd server-rs`):
 
 - `cargo fmt --check` — formatting is enforced (config in `server-rs/rustfmt.toml`).
 - `cargo clippy --all-targets` — currently **warn-only** while the existing backlog is cleared;
   new code should not add warnings.
-- `cargo-deny check licenses bans sources` — supply-chain gate.
+- `cargo deny check licenses bans sources` — supply-chain gate (config in `server-rs/deny.toml`).
 
-Run `cargo fmt` and skim `cargo clippy` before pushing.
+Run `cd server-rs && cargo fmt` and skim `cargo clippy` before pushing.
 
 ## Architectural rules (keep these true)
 
