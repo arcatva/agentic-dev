@@ -41,6 +41,10 @@ fn default_cost() -> f32 {
     0.5
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub name: String,
@@ -75,6 +79,11 @@ pub struct Provider {
     /// should be set; `engine::router::router_provider` prefers it over the priority-based default.
     #[serde(default)]
     pub router: bool,
+    /// Whether this model participates in routing at all. `false` → excluded from the candidate
+    /// pool AND cannot act as the router (a disabled model neither receives work nor spends the
+    /// user's key routing). Defaults `true` (old files / unspecified).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 impl Provider {
@@ -170,6 +179,7 @@ impl ProviderRegistry {
                 priority: 0.5,
                 cost: 0.3,
                 router: false,
+                enabled: true,
             });
         }
         if let Ok(k) = std::env::var("DEEPSEEK_API_KEY") {
@@ -186,6 +196,7 @@ impl ProviderRegistry {
                 priority: 0.5,
                 cost: 0.5,
                 router: false,
+                enabled: true,
             });
         }
         Self { providers }
@@ -454,7 +465,7 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
             continue;
         }
         let default_desc = format!("Anthropic {} — native (subscription)", m.display_name);
-        let (capability, priority, cost, description) = match overrides.get(fam) {
+        let (capability, priority, cost, description, enabled) = match overrides.get(fam) {
             Some(o) => (
                 o.capability,
                 o.priority,
@@ -464,10 +475,11 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
                 } else {
                     o.description.clone()
                 },
+                o.enabled,
             ),
             None => {
                 let (c, k) = family_default_metrics(fam);
-                (c, DEFAULT_NATIVE_PRIORITY, k, default_desc)
+                (c, DEFAULT_NATIVE_PRIORITY, k, default_desc, true)
             }
         };
         out.push(Provider {
@@ -482,6 +494,7 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
             priority,
             cost,
             router: false,
+            enabled,
         });
     }
     out
@@ -659,6 +672,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn enabled_defaults_true_and_roundtrips() {
+        // Old file with no `enabled` field → true (back-compat).
+        let p: Provider =
+            serde_json::from_str(r#"{"name":"m","base_url":"u","model":"m1"}"#).unwrap();
+        assert!(p.enabled);
+        // Explicit false round-trips.
+        let p2: Provider =
+            serde_json::from_str(r#"{"name":"m","base_url":"u","model":"m1","enabled":false}"#)
+                .unwrap();
+        assert!(!p2.enabled);
+        // NativeOverride without `enabled` also defaults true.
+        let ov: crate::engine::native_overrides::NativeOverride =
+            serde_json::from_str(r#"{"capability":0.6,"priority":0.5,"cost":0.3}"#).unwrap();
+        assert!(ov.enabled);
+    }
+
+    #[test]
     fn family_of_classifies_and_metrics_are_unchanged() {
         assert_eq!(family_of("claude-opus-4-8"), "opus");
         assert_eq!(family_of("claude-sonnet-4-6"), "sonnet");
@@ -703,6 +733,7 @@ mod tests {
                 priority: 0.85,
                 cost: 0.2,
                 description: String::new(),
+                enabled: true,
             },
         );
 
@@ -784,6 +815,7 @@ mod tests {
                     priority: 0.3,
                     cost: 0.5,
                     router: false,
+                    enabled: true,
                 },
                 Provider {
                     name: "deepseek".into(),
@@ -797,6 +829,7 @@ mod tests {
                     priority: 0.5,
                     cost: 0.5,
                     router: false,
+                    enabled: true,
                 },
                 Provider {
                     name: "opus".into(),
@@ -810,6 +843,7 @@ mod tests {
                     priority: 0.9,
                     cost: 0.5,
                     router: false,
+                    enabled: true,
                 },
             ],
         }
@@ -890,6 +924,7 @@ mod tests {
             priority: 0.5,
             cost: 0.5,
             router: false,
+            enabled: true,
         };
         let native = native_claude_candidates(&Default::default());
         // candidate order mirrors run_delegate: registered FIRST, then native.
@@ -989,6 +1024,7 @@ mod tests {
             priority: 0.5,
             cost: 0.5,
             router: false,
+            enabled: true,
         };
         assert!(load_list_from(&f).unwrap().is_empty());
         upsert_at(&f, mk("minimax", "MiniMax-M3")).unwrap();
@@ -1039,6 +1075,7 @@ mod tests {
             priority: 0.5,
             cost: 0.5,
             router: false,
+            enabled: true,
         };
         // seed with a real key
         upsert_at(&f, mk("secret-key", "MiniMax-M3", 0.5)).unwrap();
@@ -1079,6 +1116,7 @@ mod tests {
                 priority: 0.5,
                 cost: 0.5,
                 router: false,
+                enabled: true,
             },
         )
         .unwrap();
@@ -1120,6 +1158,7 @@ mod tests {
                 priority: 0.5,
                 cost: 0.5,
                 router: false,
+                enabled: true,
             },
         )
         .unwrap();
@@ -1142,6 +1181,7 @@ mod tests {
                 priority: 0.5,
                 cost: 0.5,
                 router: false,
+                enabled: true,
             }
         )
         .is_err());

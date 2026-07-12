@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 /// One family's override. Full values (the edit form writes all four); "reset to default" removes
 /// the whole row. An empty `description` falls back to the generated per-model description at
 /// routing time.
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NativeOverride {
     pub capability: f32,
@@ -18,6 +22,10 @@ pub struct NativeOverride {
     pub cost: f32,
     #[serde(default)]
     pub description: String,
+    /// Whether this native family participates in routing. `false` → excluded from the candidate
+    /// pool. Defaults `true` (old files / unspecified).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 /// family -> override. `BTreeMap` for deterministic on-disk ordering.
@@ -124,6 +132,7 @@ mod tests {
             priority: p,
             cost: k,
             description: d.into(),
+            enabled: true,
         }
     }
 

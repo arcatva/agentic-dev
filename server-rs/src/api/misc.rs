@@ -593,6 +593,10 @@ struct NativeFamilyView {
     editable: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(serde::Deserialize)]
 struct NativeOverrideReq {
     capability: f32,
@@ -600,6 +604,9 @@ struct NativeOverrideReq {
     cost: f32,
     #[serde(default)]
     description: String,
+    /// Whether this native family participates in routing. Defaults true (old clients omit it).
+    #[serde(default = "default_true")]
+    enabled: bool,
 }
 
 fn is_editable_family(family: &str) -> bool {
@@ -716,6 +723,7 @@ pub async fn native_models_post(
         priority: req.priority.clamp(0.0, 1.0),
         cost: req.cost.clamp(0.0, 1.0),
         description: req.description,
+        enabled: req.enabled,
     };
     match crate::engine::native_overrides::upsert(&family, ov) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
@@ -1225,6 +1233,7 @@ mod tests {
             priority: 0.5,
             cost: 0.3,
             router: false,
+            enabled: true,
         };
         let json = serde_json::to_string(&provider_view(&p)).unwrap();
         assert!(
@@ -1287,6 +1296,7 @@ mod tests {
                 priority: 0.5,
                 cost: 0.3,
                 router: false,
+                enabled: true,
             },
         )
         .unwrap();
@@ -1326,6 +1336,7 @@ mod tests {
                 priority: 0.5,
                 cost: 0.5,
                 router: false,
+                enabled: true,
             },
         )
         .unwrap();
@@ -2089,6 +2100,7 @@ mod tests {
                 priority: 0.8,
                 cost: 0.2,
                 description: String::new(),
+                enabled: true,
             },
         )
         .unwrap();
