@@ -257,8 +257,10 @@ fn credentials_from_token_body(
         .as_ref()
         .and_then(|c| c.get("exp").and_then(|e| e.as_i64()))
         .unwrap_or_else(|| {
+            // No `exp` claim: use `expires_in`, but if that's absent/0 too, assume a conservative
+            // hour so `maybe_refresh` doesn't see expires_at≈now and refresh-storm every 60s tick.
             let ttl = body.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(0);
-            unix_now() + ttl
+            unix_now() + if ttl > 0 { ttl } else { 3600 }
         });
 
     Ok(Credentials {
@@ -493,6 +495,11 @@ pub fn spawn_refresh_task() {
         }
         loop {
             std::thread::sleep(Duration::from_secs(60));
+            // ponytail: a rotation (~hourly) reloads the SHARED LiteLLM proxy, which hard-restarts
+            //   it and interrupts any in-flight openai worker of OTHER providers — same blast radius
+            //   as the existing "reload on every provider CRUD". Upgrade path if it bites: have the
+            //   proxy read the codex bearer from a file it re-reads per request, so rotation needs no
+            //   restart. Out of scope here.
             if maybe_refresh() {
                 crate::engine::litellm::request_reload();
             }
