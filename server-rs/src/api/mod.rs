@@ -173,6 +173,10 @@ pub fn app(state: AppState) -> Router {
             "/api/native-models/{family}",
             post(misc::native_models_post).delete(misc::native_models_delete),
         )
+        .route(
+            "/api/routing",
+            get(misc::routing_get).post(misc::routing_post),
+        )
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(COMPRESS_MIN_BYTES)));
 
     compressed
