@@ -57,17 +57,21 @@ const SUCCESS_HTML: &str = "<html><body style=\"font-family:sans-serif\"><h2>Cha
      <p>You can close this tab and return to agentic-dev.</p></body></html>";
 
 async fn callback(State(st): State<CbState>, Query(q): Query<CbQuery>) -> Html<String> {
-    if let Some(err) = q.error {
-        st.done.notify_one();
-        return Html(format!("<h2>Login failed: {err}</h2>"));
-    }
-    let (Some(code), Some(state)) = (q.code, q.state) else {
-        return Html("<h2>Missing code/state</h2>".to_string());
-    };
-    if state != *st.expected_state {
-        // Ignore a bad-state hit; keep the listener up for the real redirect.
+    // Gate EVERY terminal action (success AND error) on a matching `state`: a mismatched or missing
+    // state is ignored WITHOUT tearing the listener down, so a stray/forged loopback hit can't abort
+    // a legitimate in-flight login. (The success and error branches must not diverge here.)
+    if q.state.as_deref() != Some(st.expected_state.as_str()) {
         return Html("<h2>State mismatch — ignore this tab.</h2>".to_string());
     }
+    // NB: never reflect query values into the HTML — `error` is attacker-controllable, so a static
+    // message avoids reflected XSS in the ephemeral localhost tab.
+    if q.error.is_some() {
+        st.done.notify_one();
+        return Html("<h2>Login was denied or failed. Return to agentic-dev and retry.</h2>".to_string());
+    }
+    let Some(code) = q.code else {
+        return Html("<h2>Missing authorization code — ignore this tab.</h2>".to_string());
+    };
     let verifier = st.verifier.clone();
     let exchanged =
         tokio::task::spawn_blocking(move || oauth::exchange_code(&code, &verifier)).await;

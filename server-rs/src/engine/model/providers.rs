@@ -104,10 +104,13 @@ impl Provider {
             .unwrap_or_default()
     }
 
-    /// True for the single well-known ChatGPT-subscription provider (identified by name).
+    /// True for the single well-known ChatGPT-subscription provider. Matched on BOTH the reserved
+    /// name AND the codex base_url so a user's hand-added provider that merely happens to be named
+    /// "chatgpt" (with some other endpoint) is NOT hijacked onto the OAuth store.
     pub fn is_subscription(&self) -> bool {
         self.name
             .eq_ignore_ascii_case(super::openai_oauth::PROVIDER_NAME)
+            && self.base_url == super::openai_oauth::CODEX_BASE_URL
     }
 
     /// The key routing/LiteLLM should use: for the subscription provider, the rotating OAuth access
@@ -850,6 +853,16 @@ mod tests {
         };
         assert!(!normal.is_subscription());
         assert_eq!(normal.effective_key(), "literal");
+        // a user provider that merely happens to be named "chatgpt" with a DIFFERENT base_url is
+        // NOT hijacked onto the OAuth store — it keeps its own key.
+        let lookalike = Provider {
+            name: "chatgpt".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "mine".into(),
+            ..sub.clone()
+        };
+        assert!(!lookalike.is_subscription());
+        assert_eq!(lookalike.effective_key(), "mine");
         *openai_oauth::STORE_FILE_OVERRIDE.lock() = None;
     }
 
