@@ -25,6 +25,11 @@ pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const REDIRECT_PORT: u16 = 1455;
 pub const SCOPES: &str = "openid profile email offline_access";
 
+/// Base URL of the ChatGPT subscription (codex) backend. The bearer resolved from the OAuth store
+/// is ONLY handed to a provider pointed here (see `Provider::oauth_account`) — a provider with any
+/// other base_url must never receive the subscription token.
+pub const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
 /// The default account key — one ChatGPT login backs every registered GPT model.
 pub const DEFAULT_ACCOUNT: &str = "chatgpt";
 
@@ -206,7 +211,12 @@ pub fn authorize_url(challenge: &str, state: &str) -> String {
         .append_pair("scope", SCOPES)
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state);
+        .append_pair("state", state)
+        // Codex-app flags: attach org info to the id_token and use the simplified consent flow so the
+        // issued token carries the `chatgpt_account_id` the codex backend expects. (Connector scopes
+        // are intentionally NOT requested — the confirmed scope set is identity + offline only.)
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true");
     u.to_string()
 }
 
@@ -333,10 +343,16 @@ fn email_from_claims(c: &serde_json::Value) -> Option<String> {
 
 // ── accessors + refresh ──
 
-/// The cached access token for `account` (may be stale — the refresh task keeps it fresh; callers
-/// on the hot path must not block on the network). `None` when logged out / empty.
+/// The cached access token for `account` (kept fresh by the refresh task; callers on the hot path
+/// must not block on the network). `None` when logged out, empty, past expiry, or needing re-auth —
+/// so a dead account's provider drops out of delegate candidacy and the LiteLLM config instead of
+/// shipping a token every call would 401 on.
 pub fn access_token(account: &str) -> Option<String> {
-    load(account).map(|c| c.access_token).filter(|s| !s.is_empty())
+    let c = load(account)?;
+    if c.needs_reauth || c.access_token.is_empty() || c.expires_at <= now() {
+        return None;
+    }
+    Some(c.access_token)
 }
 
 /// The `chatgpt_account_id` for `account` (for the `ChatGPT-Account-Id` header).
@@ -380,7 +396,7 @@ pub fn status(account: &str) -> Status {
 /// ask litellm to reload so the new bearer reaches the proxy). Blocking network — call off the async
 /// runtime (`spawn_blocking`).
 pub fn refresh_if_needed(account: &str) -> Result<bool, String> {
-    let mut c = match load(account) {
+    let c = match load(account) {
         Some(c) => c,
         None => return Ok(false),
     };
@@ -390,8 +406,14 @@ pub fn refresh_if_needed(account: &str) -> Result<bool, String> {
     if !c.is_stale() {
         return Ok(false);
     }
+    // The refresh is a blocking network round-trip; a concurrent login could replace the creds
+    // while it's in flight. Guard both outcomes on "the refresh token we used is still the current
+    // one", so a stale in-flight refresh never clobbers a freshly-issued login (TOCTOU).
     match refresh_creds(&c.refresh_token) {
         Ok(mut fresh) => {
+            if superseded(account, &c.refresh_token) {
+                return Ok(false);
+            }
             // Preserve identity fields the refresh response may have omitted.
             if fresh.account_id.is_empty() {
                 fresh.account_id = c.account_id.clone();
@@ -403,12 +425,25 @@ pub fn refresh_if_needed(account: &str) -> Result<bool, String> {
             Ok(true)
         }
         Err(e) => {
-            if e.contains("invalid_grant") {
-                c.needs_reauth = true;
-                let _ = save(account, &c);
+            // Only latch needs_reauth if the token we tried is still current — an old token failing
+            // must not mark a just-completed re-login as dead.
+            if e.contains("invalid_grant") && !superseded(account, &c.refresh_token) {
+                if let Some(mut cur) = load(account) {
+                    cur.needs_reauth = true;
+                    let _ = save(account, &cur);
+                }
             }
             Err(e)
         }
+    }
+}
+
+/// True when the stored refresh token no longer matches `used` — i.e. a newer login/refresh landed
+/// while we were mid-request, so our result is stale and must not be written back.
+fn superseded(account: &str, used: &str) -> bool {
+    match load(account) {
+        Some(cur) => cur.refresh_token != used,
+        None => true, // logged out mid-refresh → don't resurrect
     }
 }
 
@@ -588,6 +623,46 @@ mod tests {
         };
         assert_eq!(p.oauth_account(), Some("chatgpt"));
         assert_eq!(p.resolved_key(), "at", "bearer comes from the oauth store, not env");
+        // Security: the SAME oauth ref on a provider pointed at a NON-codex endpoint must NOT resolve
+        // the subscription bearer (else a user-registered provider could exfiltrate the token).
+        let evil = crate::engine::providers::Provider {
+            base_url: "https://evil.example.com".into(),
+            ..p.clone()
+        };
+        assert_eq!(evil.oauth_account(), None, "non-codex base_url must not get the token");
+        assert_eq!(evil.resolved_key(), "");
+
+        // needs_reauth / expiry hide the token so a dead account drops out of candidacy.
+        save(
+            "chatgpt",
+            &OauthCreds {
+                access_token: "at".into(),
+                refresh_token: "rt".into(),
+                expires_at: now() + 3600,
+                needs_reauth: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(access_token("chatgpt"), None, "needs_reauth hides the token");
+        assert_eq!(p.resolved_key(), "", "reauth-needed provider resolves to no key");
+        save(
+            "chatgpt",
+            &OauthCreds {
+                access_token: "at".into(),
+                refresh_token: "rt".into(),
+                expires_at: now().saturating_sub(1), // expired
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(access_token("chatgpt"), None, "expired token is hidden");
+        // superseded() detects a rotated refresh token vs. the one a stale refresh used.
+        assert!(!superseded("chatgpt", "rt"), "current token is not superseded");
+        assert!(superseded("chatgpt", "old-rt"), "a rotated token is superseded");
+        assert!(superseded("nobody", "rt"), "logged-out account is superseded");
+        // restore a valid record for the remaining assertions
+        save(&"chatgpt".to_string(), &c).unwrap();
 
         #[cfg(unix)]
         {

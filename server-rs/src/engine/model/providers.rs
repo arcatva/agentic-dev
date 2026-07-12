@@ -112,7 +112,15 @@ impl Provider {
 
     /// If this provider authenticates via a ChatGPT subscription OAuth login (its `api_key_env` is
     /// an `oauth:<account>` reference), the account key whose rotating bearer backs it — else None.
+    ///
+    /// Gated on the provider pointing at the ChatGPT codex endpoint: any record is registerable via
+    /// `POST /api/providers`, so without this a user-supplied provider with an arbitrary `base_url`
+    /// and `api_key_env = "oauth:chatgpt"` would receive the subscription bearer and exfiltrate it to
+    /// that endpoint. Only a codex-pointed provider may resolve the token.
     pub fn oauth_account(&self) -> Option<&str> {
+        if !self.base_url.starts_with(crate::engine::oauth::CODEX_BASE_URL) {
+            return None;
+        }
         self.api_key_env
             .as_deref()
             .and_then(crate::engine::oauth::account_from_key_ref)

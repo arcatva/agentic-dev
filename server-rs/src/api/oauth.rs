@@ -23,8 +23,9 @@ use crate::engine::oauth;
 use crate::engine::providers::{Protocol, Provider};
 
 /// Base URL of the ChatGPT subscription (codex) backend — worker calls reach it via the LiteLLM
-/// proxy, which reads it from the provider's `base_url`.
-const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+/// proxy, which reads it from the provider's `base_url`. Shared with `Provider::oauth_account`,
+/// which only hands the subscription bearer to a provider pointed here.
+use crate::engine::oauth::CODEX_BASE_URL as CODEX_BASE;
 
 /// GPT models registered on a successful login. Kept small and editable — the user can add/disable
 /// more from the normal providers UI; all share the one ChatGPT login via the `oauth:` key ref.
@@ -65,13 +66,13 @@ pub async fn start() -> Response {
     // Bind the loopback callback listener BEFORE returning the URL, so the browser redirect can
     // never race ahead of a ready listener. Abort any stale in-flight attempt first.
     abort_pending();
-    let listener = match bind_callback().await {
-        Ok(l) => l,
-        Err(e) => {
+    let (primary, secondary) = match bind_callbacks().await {
+        Some(pair) => pair,
+        None => {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": format!(
-                    "cannot bind OAuth callback port {}: {e}. Another login may be in progress.",
+                    "cannot bind OAuth callback port {} on loopback. Another login may be in progress.",
                     oauth::REDIRECT_PORT
                 ) })),
             )
@@ -83,7 +84,7 @@ pub async fn start() -> Response {
     let verifier = pkce.verifier;
     let expected_state = state;
     let handle = tokio::spawn(async move {
-        run_callback(listener, verifier, expected_state).await;
+        run_callback(primary, secondary, verifier, expected_state).await;
     });
     *PENDING.lock() = Some(handle);
 
@@ -121,32 +122,62 @@ pub async fn logout() -> Response {
     Json(json!({ "ok": true })).into_response()
 }
 
-async fn bind_callback() -> std::io::Result<tokio::net::TcpListener> {
+/// Bind the callback on BOTH loopback families (`127.0.0.1` and `::1`) so a browser that resolves
+/// `localhost` to IPv6-first still reaches us even if it doesn't fall back to IPv4. Returns the
+/// primary listener + an optional secondary; `None` only when neither family binds (port busy).
+async fn bind_callbacks() -> Option<(tokio::net::TcpListener, Option<tokio::net::TcpListener>)> {
+    let v4 = bind_one("127.0.0.1").await;
+    let v6 = bind_one("::1").await;
+    match (v4, v6) {
+        (Some(a), b) => Some((a, b)),
+        (None, Some(b)) => Some((b, None)),
+        (None, None) => None,
+    }
+}
+
+async fn bind_one(ip: &str) -> Option<tokio::net::TcpListener> {
     // A previous aborted attempt may not have released the socket yet; one short retry covers it.
-    match tokio::net::TcpListener::bind(("127.0.0.1", oauth::REDIRECT_PORT)).await {
-        Ok(l) => Ok(l),
-        Err(_) => {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            tokio::net::TcpListener::bind(("127.0.0.1", oauth::REDIRECT_PORT)).await
+    for attempt in 0..2 {
+        if let Ok(l) = tokio::net::TcpListener::bind((ip, oauth::REDIRECT_PORT)).await {
+            return Some(l);
         }
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    None
+}
+
+/// Accept a connection from either loopback listener, or `pending` forever when there's no secondary
+/// (so the `select!` arm is inert rather than busy).
+async fn accept_either(
+    l: &Option<tokio::net::TcpListener>,
+) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    match l {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
     }
 }
 
 /// Accept connections until the callback (with a valid state) arrives or 5 minutes pass.
 async fn run_callback(
-    listener: tokio::net::TcpListener,
+    primary: tokio::net::TcpListener,
+    secondary: Option<tokio::net::TcpListener>,
     verifier: String,
     expected_state: String,
 ) {
     let deadline = tokio::time::sleep(Duration::from_secs(300));
     tokio::pin!(deadline);
     loop {
-        tokio::select! {
+        let accepted = tokio::select! {
             _ = &mut deadline => {
                 tracing::warn!("[oauth] login timed out with no callback");
                 return;
             }
-            accepted = listener.accept() => {
+            a = primary.accept() => a,
+            a = accept_either(&secondary) => a,
+        };
+        {
                 let mut stream = match accepted {
                     Ok((s, _)) => s,
                     Err(e) => { tracing::warn!("[oauth] callback accept failed: {e}"); continue; }
@@ -175,7 +206,6 @@ async fn run_callback(
                         return;
                     }
                 }
-            }
         }
     }
 }
