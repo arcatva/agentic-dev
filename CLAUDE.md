@@ -52,10 +52,27 @@ After a change is ready:
 1. **Adversarially verify the change BEFORE you commit.** Fan out sub-agents with `delegate`
    (per the model-routing rule at the top of the session CLAUDE.md — leave `model` UNSET so each
    task is cost-routed; give them a `title` + `phase`). Give each worker the diff and a distinct
-   *refutation* angle — logic/regression, edge cases & error paths, security, and test/coverage
-   gaps — and tell it to actively try to prove the change wrong, not to praise it. Fix anything a
-   worker surfaces as a real problem before committing. This is our own pre-flight gate; it runs
-   in ADDITION to Codex review below, not instead of it.
+   *refutation* angle and tell it to actively try to prove the change wrong, not to praise it. Run
+   at least one worker per angle below — the first three are the classics; the last three are
+   REQUIRED and are the ones a single review panel most often misses:
+   - **logic / regression** — does it break existing behavior or any caller?
+   - **edge cases & error paths** — nulls, timeouts, retries, partial writes, clock skew.
+   - **security** — secrets at rest / in logs, auth, injection, input at trust boundaries.
+   - **failure-mode test coverage** — enumerate EVERY failure mode the diff can hit (error path,
+     race, concurrent access, expiry, revoked-then-retry, empty/None) and require a test for each
+     one that is not yet covered. A test whose name implies a path it never exercises (e.g. a
+     "refresh" test that only asserts the skip branch) counts as MISSING. Happy-path-only fails this angle.
+   - **reuse / reinvention** — before accepting any new helper, grep the repo for an existing one
+     (`rg 'fn <verb>'`, check `engine/persistence/`, `engine/model/`, existing utils). Re-implementing
+     something the repo already provides — e.g. writing a bespoke atomic file write when
+     `persistence::write_file_atomic` exists (and worse, dropping its fsync) — is a defect to fix, not ship.
+   - **cross-layer / cross-repo contract** — when the change touches an API the Android client
+     (`agentic-dev-android`) calls, verify both sides still match: route paths, JSON field names,
+     nullability, status/enum values, error-code shape. A server field the client silently discards,
+     or a rename on one side only, is a contract break — fix it or land both sides together.
+   Fix anything a worker surfaces as a real problem before committing. This is our own pre-flight
+   gate; it runs in ADDITION to Codex review below, not instead of it. When a finding is one we keep
+   hitting, capture it with `/ce-compound` so the lesson compounds into `docs/solutions/`.
 2. Commit on the session branch, push, open a PR with `gh pr create` (targets default branch
    `master`). One PR per coherent change. Opening a non-draft PR triggers a Codex review
    automatically; if you opened it as a draft, mark it ready (or comment `@codex review`) to
