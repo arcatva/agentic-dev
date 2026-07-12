@@ -564,6 +564,7 @@ async fn route_via_native_claude(
     config_dir: &str,
     tasks: &[DelegateTask],
     candidates: &[&crate::engine::providers::Provider],
+    t: f32,
 ) -> HashMap<usize, crate::engine::router::RouteChoice> {
     use crate::engine::router;
     let route_idxs: Vec<usize> = tasks
@@ -635,9 +636,10 @@ async fn route_via_native_claude(
     if text.trim().is_empty() {
         return HashMap::new();
     }
-    router::apply_priority(
+    router::select_from_picks(
         router::parse_route_response(&text, &route_idxs, candidates),
         candidates,
+        t,
     )
 }
 
@@ -919,8 +921,10 @@ impl crate::engine::Engine {
         // Pick the routing model: a flagged/keyed third-party router runs over HTTP; if NONE is flagged,
         // NATIVE Claude (the subscription) makes the decision via a one-shot headless call so tasks still
         // route across the catalog (incl. the registered models) instead of all running unrouted.
+        // Global cost⇄quality tradeoff (0=cheapest .. 1=strongest) feeds the deterministic scorer.
+        let t = crate::engine::routing_config::load().tradeoff;
         let picks = match crate::engine::router::router_provider(&registry) {
-            Some(rp) => crate::engine::router::route_batch(&tasks, &candidates, rp, None).await,
+            Some(rp) => crate::engine::router::route_batch(&tasks, &candidates, rp, t, None).await,
             None => {
                 let config_dir = self.0.cfg.claude_config_base.to_string_lossy().into_owned();
                 route_via_native_claude(
@@ -929,6 +933,7 @@ impl crate::engine::Engine {
                     &config_dir,
                     &tasks,
                     &candidates,
+                    t,
                 )
                 .await
             }

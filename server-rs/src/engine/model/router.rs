@@ -179,87 +179,6 @@ pub fn parse_route_response(
     out
 }
 
-/// Apply provider PRIORITY (then COST as tiebreaker) deterministically on top of the LLM's per-task
-/// pick. The LLM's chosen model sets the capability BAR (how hard it judged the task); among
-/// candidates AT LEAST that capable, the highest `priority` wins — the user's explicit preference.
-/// When priorities are tied, the lowest `cost` wins — cheaper is better. A mere tie keeps the LLM's
-/// pick (the cheapest-sufficient one). This makes `priority` authoritative even when the cheap router
-/// model ignores the "prefer higher priority" instruction and picks a strong model by reputation.
-pub(crate) fn apply_priority(
-    choices: HashMap<usize, RouteChoice>,
-    candidates: &[&Provider],
-) -> HashMap<usize, RouteChoice> {
-    const EPS: f32 = 1e-4;
-    choices
-        .into_iter()
-        .map(|(idx, choice)| {
-            let Some(picked) =
-                crate::engine::providers::resolve_candidate(candidates, &choice.model)
-            else {
-                return (idx, choice);
-            };
-            let bar = picked.capability;
-            // `picked` is the initial best, so an equal-priority+equal-cost candidate never displaces
-            // the LLM's (cheapest-sufficient) choice; only a STRICTLY higher priority (or equal
-            // priority + strictly lower cost) at-least-as-capable wins.
-            let mut best = picked;
-            // Track whether we've already decided to override the LLM's pick.
-            // While best == picked, use EPS thresholds so negligible differences
-            // don't flip the LLM's choice.  Once overridden, use strict comparison
-            // among alternatives so the true maximum-priority / minimum-cost
-            // candidate wins regardless of iteration order.
-            let mut overrode = false;
-            for c in candidates.iter().copied() {
-                if c.capability + EPS < bar {
-                    continue;
-                }
-                if !overrode {
-                    if c.priority > picked.priority + EPS {
-                        best = c;
-                        overrode = true;
-                    } else if (c.priority - picked.priority).abs() < EPS
-                        && c.cost < picked.cost - EPS
-                    {
-                        best = c;
-                        overrode = true;
-                    }
-                } else {
-                    if c.priority > best.priority
-                        || ((c.priority - best.priority).abs() < EPS && c.cost < best.cost)
-                    {
-                        best = c;
-                    }
-                }
-            }
-            if best.name == picked.name {
-                (idx, choice)
-            } else {
-                let detail = if choice.reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", choice.reason)
-                };
-                let kind = if (best.priority - picked.priority).abs() > EPS {
-                    "priority"
-                } else {
-                    "cost"
-                };
-                let reason: String = format!("{kind} pick over {}{}", picked.model, detail)
-                    .chars()
-                    .take(80)
-                    .collect();
-                (
-                    idx,
-                    RouteChoice {
-                        model: best.model.clone(),
-                        reason,
-                    },
-                )
-            }
-        })
-        .collect()
-}
-
 /// How close (on the MAIN-axis score) two models must be for `priority` to decide between them.
 /// Priority is a BOUNDED near-tie nudge, not an additive term: an additive `β·priority` is not
 /// scale-consistent — capability is weighted by `t` and cost by `1−t`, so a constant weight would
@@ -442,11 +361,13 @@ pub async fn validate_router(router: &Provider, ask: Option<&AskFn>) -> Result<(
 /// original-task-index → choice; tasks not present in the map (explicit, unrouted, or failed) are
 /// left for the caller's heuristic fallback. Never errors — any failure yields an empty map.
 ///
-/// `ask` is the transport seam: `None` → the real HTTP call; `Some(f)` → a test fake.
+/// `t` is the global cost⇄quality tradeoff fed to `select_model`. `ask` is the transport seam:
+/// `None` → the real HTTP call; `Some(f)` → a test fake.
 pub async fn route_batch(
     tasks: &[DelegateTask],
     candidates: &[&Provider],
     router: &Provider,
+    t: f32,
     ask: Option<&AskFn>,
 ) -> HashMap<usize, RouteChoice> {
     // Only auto-route tasks without an explicit model; with <2 candidates there's nothing to pick.
@@ -483,15 +404,33 @@ pub async fn route_batch(
         None => http_ask(router, &prompt).await,
     };
     match text {
-        Ok(t) => apply_priority(
-            parse_route_response(&t, &route_idxs, candidates),
+        Ok(reply) => select_from_picks(
+            parse_route_response(&reply, &route_idxs, candidates),
             candidates,
+            t,
         ),
         Err(e) => {
             tracing::warn!("[router] routing call failed; task(s) fall back to native Claude: {e}");
             HashMap::new()
         }
     }
+}
+
+/// Map the LLM's raw per-task picks through the deterministic joint scorer (`select_model`) at the
+/// given tradeoff `t`. A pick whose model no longer resolves to a candidate is dropped (the caller
+/// then falls back). Shared by both routing paths (HTTP router + native-Claude router).
+pub(crate) fn select_from_picks(
+    picks: HashMap<usize, RouteChoice>,
+    candidates: &[&Provider],
+    t: f32,
+) -> HashMap<usize, RouteChoice> {
+    picks
+        .into_iter()
+        .filter_map(|(idx, choice)| {
+            let picked = crate::engine::providers::resolve_candidate(candidates, &choice.model)?;
+            Some((idx, select_model(picked, candidates, t)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -759,155 +698,6 @@ mod tests {
         assert_eq!(router_provider(&r).unwrap().name, "deepseek");
     }
 
-    #[tokio::test]
-    async fn priority_overrides_the_llm_pick_when_capable_enough() {
-        crate::engine::providers::seed_claude_models_for_tests();
-        // The router (LLM) picks "opus" for a hard task, but a registered model that is at least as
-        // capable AND higher-priority must win deterministically.
-        let mk = |cap: f32| {
-            let mut cat = vec![p(
-                "minimax",
-                "MiniMax-M3",
-                cap,
-                1.0,
-                0.3,
-                Protocol::Anthropic,
-                "mk",
-            )];
-            cat.extend(crate::engine::providers::native_claude_candidates(
-                &Default::default(),
-            ));
-            cat
-        };
-        let router = p(
-            "minimax",
-            "MiniMax-M3",
-            1.0,
-            1.0,
-            0.3,
-            Protocol::Anthropic,
-            "mk",
-        );
-        let ts = vec![DelegateTask {
-            prompt: "explore the architecture".into(),
-            role: "explorer".into(),
-            model: None,
-            phase: None,
-            write: false,
-        }];
-        let pick_opus = |_: &str| -> Result<String, String> {
-            Ok(r#"[{"task":1,"model":"opus","reason":"deep exploration"}]"#.into())
-        };
-
-        // minimax capability 1.0 (≥ opus's 0.97) + priority 1.0 (> native 0.5) → overrides opus.
-        let cat = mk(1.0);
-        let cands: Vec<&Provider> = cat.iter().collect();
-        let got = route_batch(&ts, &cands, &router, Some(&pick_opus)).await;
-        assert_eq!(
-            got.get(&0).unwrap().model,
-            "MiniMax-M3",
-            "priority must override the LLM's opus pick"
-        );
-
-        // minimax capability 0.5 (< opus's 0.97) → NOT capable enough → opus stays.
-        let cat2 = mk(0.5);
-        let cands2: Vec<&Provider> = cat2.iter().collect();
-        let got2 = route_batch(&ts, &cands2, &router, Some(&pick_opus)).await;
-        assert_eq!(
-            got2.get(&0).unwrap().model,
-            "opus",
-            "a less-capable model must not override on priority alone"
-        );
-    }
-
-    #[tokio::test]
-    async fn cost_tiebreaker_prefers_cheaper_when_priorities_are_tied() {
-        // Three equally-capable models with identical priority but different cost. The router (LLM)
-        // picks the expensive one, but cost tiebreaker overrides it with the cheapest eligible model.
-        let cat = vec![
-            p(
-                "cheap",
-                "cheap-model",
-                0.8,
-                0.5,
-                0.1,
-                Protocol::Anthropic,
-                "k",
-            ),
-            p("mid", "mid-model", 0.8, 0.5, 0.5, Protocol::Anthropic, "k"),
-            p(
-                "expensive",
-                "expensive-model",
-                0.8,
-                0.5,
-                0.9,
-                Protocol::Anthropic,
-                "k",
-            ),
-        ];
-        let cands: Vec<&Provider> = cat.iter().collect();
-        let ts = vec![DelegateTask {
-            prompt: "a typical task".into(),
-            role: "worker".into(),
-            model: None,
-            phase: None,
-            write: false,
-        }];
-        let router = p("mid", "mid-model", 0.5, 0.5, 0.5, Protocol::Anthropic, "k");
-        // The LLM routes to "expensive-model" but cost tiebreaker should switch to the cheapest.
-        let fake = |_: &str| -> Result<String, String> {
-            Ok(r#"[{"task":1,"model":"expensive-model","reason":"looks good"}]"#.into())
-        };
-        let got = route_batch(&ts, &cands, &router, Some(&fake)).await;
-        assert_eq!(
-            got.get(&0).unwrap().model,
-            "cheap-model",
-            "cost tiebreaker must prefer cheapest when priorities are tied"
-        );
-        assert!(
-            got[&0].reason.contains("cost"),
-            "reason must mention 'cost': {}",
-            got[&0].reason
-        );
-
-        // When a higher-priority model exists, it wins regardless of cost.
-        let cat2 = vec![
-            p(
-                "cheap",
-                "cheap-model",
-                0.8,
-                0.3,
-                0.1,
-                Protocol::Anthropic,
-                "k",
-            ),
-            p(
-                "expensive",
-                "expensive-model",
-                0.8,
-                0.9,
-                0.9,
-                Protocol::Anthropic,
-                "k",
-            ),
-        ];
-        let cands2: Vec<&Provider> = cat2.iter().collect();
-        let fake2 = |_: &str| -> Result<String, String> {
-            Ok(r#"[{"task":1,"model":"cheap-model","reason":"cheap"}]"#.into())
-        };
-        let got2 = route_batch(&ts, &cands2, &router, Some(&fake2)).await;
-        assert_eq!(
-            got2.get(&0).unwrap().model,
-            "expensive-model",
-            "higher priority must win over cheaper cost"
-        );
-        assert!(
-            got2[&0].reason.contains("priority"),
-            "reason must mention 'priority': {}",
-            got2[&0].reason
-        );
-    }
-
     #[test]
     fn router_provider_skips_openai_protocol_and_keyless() {
         // Only an openai-protocol provider and a keyless anthropic one → no eligible router.
@@ -1035,7 +825,7 @@ mod tests {
             assert!(prompt.contains("grep for TODO"));
             Ok(r#"[{"task":1,"model":"MiniMax-M3","reason":"cheap"},{"task":3,"model":"deepseek-chat","reason":"reasoning"}]"#.to_string())
         };
-        let got = route_batch(&ts, &cands, &router, Some(&fake)).await;
+        let got = route_batch(&ts, &cands, &router, 0.5, Some(&fake)).await;
         // task 1 (idx 0) and task 3 (idx 2) routed; pinned task 2 (idx 1) absent.
         assert_eq!(got.len(), 2);
         assert_eq!(got[&0].model, "MiniMax-M3");
@@ -1079,10 +869,16 @@ mod tests {
         let fake = |_: &str| -> Result<String, String> {
             Ok(r#"[{"task":1,"model":"sonnet","reason":"needs strong reasoning"}]"#.to_string())
         };
-        let got = route_batch(&ts, &cands, &router, Some(&fake)).await;
-        // "sonnet" validates against the native candidate (model "sonnet"), so the task is routed.
+        let got = route_batch(&ts, &cands, &router, 0.5, Some(&fake)).await;
+        // "sonnet" resolves to the native candidate; select_model returns its CANONICAL model id
+        // (the full "claude-sonnet-4-6"), not the LLM's abbreviated string — more precise, and it
+        // still resolves downstream. At t=0.5 sonnet leads the main axis (opus/fable cost more).
         assert_eq!(got.len(), 1);
-        assert_eq!(got[&0].model, "sonnet");
+        assert!(
+            got[&0].model.contains("sonnet"),
+            "expected a native sonnet id, got {}",
+            got[&0].model
+        );
     }
 
     #[tokio::test]
@@ -1100,7 +896,7 @@ mod tests {
             "mk",
         );
         let fail = |_: &str| -> Result<String, String> { Err("boom".into()) };
-        assert!(route_batch(&ts, &cands, &router, Some(&fail))
+        assert!(route_batch(&ts, &cands, &router, 0.5, Some(&fail))
             .await
             .is_empty());
     }
@@ -1128,7 +924,7 @@ mod tests {
             c.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok("[]".into())
         };
-        let got = route_batch(&ts, &cands, &router, Some(&fake)).await;
+        let got = route_batch(&ts, &cands, &router, 0.5, Some(&fake)).await;
         // The single registered model is assigned to BOTH un-pinned tasks, with no LLM call.
         assert_eq!(got.len(), 2);
         assert_eq!(got[&0].model, "MiniMax-M3");
