@@ -88,8 +88,37 @@ pub struct Provider {
 
 impl Provider {
     /// The effective API key: the literal if set, else read from `api_key_env`, else empty.
+    ///
+    /// OAuth-backed subscription providers carry the `AGENTIC_OAUTH:<name>` sentinel in `api_key_env`
+    /// instead of a real env var name: the live (rotating) access token lives in the 0600 oauth store,
+    /// NOT in providers.json. For those we read the current token from the store; a blank result
+    /// (not logged in / relogin required) makes the provider drop out of routing until re-auth.
     pub fn resolved_key(&self) -> String {
+        if self.api_key_env.as_deref().is_some_and(|e| {
+            e.eq_ignore_ascii_case(crate::engine::oauth_store::SENTINEL)
+        }) {
+            // Only the canonical `chatgpt` provider (name + backend base URL) may read the live token.
+            // Without this, an operator could register ANOTHER openai provider carrying the same
+            // sentinel but a different base_url and exfiltrate the bearer to an attacker endpoint.
+            return if self.is_oauth_subscription() {
+                crate::engine::oauth_store::current_access_token()
+            } else {
+                String::new()
+            };
+        }
         self.resolved_key_with(|e| std::env::var(e).ok())
+    }
+
+    /// True when this provider is the canonical ChatGPT subscription provider backed by the OAuth
+    /// store: the sentinel in `api_key_env` AND the reserved name + backend base URL. The extra
+    /// name/base_url binding is a security guard (see `resolved_key`) — a rogue provider that merely
+    /// copies the sentinel is NOT treated as subscription-backed and gets no token / headers.
+    pub fn is_oauth_subscription(&self) -> bool {
+        self.api_key_env
+            .as_deref()
+            .is_some_and(|e| e.eq_ignore_ascii_case(crate::engine::oauth_store::SENTINEL))
+            && self.name.eq_ignore_ascii_case(crate::engine::oauth_store::PROVIDER_NAME)
+            && self.base_url == crate::engine::oauth_store::BACKEND_BASE
     }
 
     /// [resolved_key] with an injectable env lookup — tests pass a closure instead of mutating
@@ -989,6 +1018,58 @@ mod tests {
         );
         // a bare/empty hint resolves to nothing.
         assert!(resolve_candidate(&cands, "   ").is_none());
+    }
+
+    #[test]
+    fn oauth_sentinel_resolves_key_from_store() {
+        use crate::engine::oauth_store;
+        let _guard = oauth_store::test_util::isolate();
+
+        let p = Provider {
+            name: "chatgpt".into(),
+            base_url: oauth_store::BACKEND_BASE.into(),
+            api_key: String::new(),
+            api_key_env: Some(oauth_store::SENTINEL.into()),
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.7,
+            description: None,
+            priority: 0.5,
+            cost: 0.4,
+            router: false,
+            enabled: true,
+        };
+        assert!(p.is_oauth_subscription());
+        // Not logged in → empty key → provider drops out of routing.
+        assert_eq!(p.resolved_key(), "");
+        // After login the live access token is returned (never stored in providers.json).
+        oauth_store::save(&oauth_store::ChatGptTokens {
+            access_token: "sk-live-oauth".into(),
+            refresh_token: "rt".into(),
+            account_id: "acct_x".into(),
+            expires_at: 9_999_999_999_000,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(p.resolved_key(), "sk-live-oauth");
+
+        // Security: a rogue provider that copies the sentinel but points elsewhere must NOT get the
+        // token (else it would exfiltrate the bearer to an attacker base_url via the proxy).
+        let rogue = Provider {
+            name: "evil".into(),
+            base_url: "https://attacker.example".into(),
+            api_key_env: Some(oauth_store::SENTINEL.into()),
+            ..p.clone()
+        };
+        assert!(!rogue.is_oauth_subscription());
+        assert_eq!(rogue.resolved_key(), "");
+        // Same name, wrong base_url → still refused.
+        let rogue2 = Provider {
+            base_url: "https://attacker.example".into(),
+            ..p.clone()
+        };
+        assert!(!rogue2.is_oauth_subscription());
+        assert_eq!(rogue2.resolved_key(), "");
     }
 
     #[test]

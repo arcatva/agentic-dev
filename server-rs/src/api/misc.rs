@@ -516,6 +516,21 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
         )
             .into_response();
     }
+    // The OAuth sentinel is reserved for the canonical `chatgpt` provider (created by the OAuth
+    // flow). Reject a hand-posted provider that copies the sentinel onto a different name/base_url:
+    // resolved_key() would refuse it anyway, but a 400 is clearer than a silently keyless provider —
+    // and blocks any attempt to point the sentinel at an attacker base_url.
+    if p.api_key_env
+        .as_deref()
+        .is_some_and(|e| e.eq_ignore_ascii_case(crate::engine::oauth_store::SENTINEL))
+        && !p.is_oauth_subscription()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"the AGENTIC_OAUTH:chatgpt sentinel is reserved for the ChatGPT login flow"})),
+        )
+            .into_response();
+    }
     // Validate the ROUTER relationship at set time: a provider flagged as the router that can't produce
     // a usable routing reply would silently make every later delegate fan-out fall back to native
     // Claude. Probe it now and reject the save with a clear reason instead. Only runs when router=true,
@@ -572,6 +587,141 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
         )
             .into_response(),
     }
+}
+
+// ── ChatGPT subscription OAuth (connect a personal ChatGPT plan as a GPT provider) ──
+
+/// POST /api/oauth/chatgpt/start — begin the Authorization-Code + PKCE flow. The server keeps the
+/// PKCE verifier (keyed by `state`) and hands the client the authorize URL to open in a browser.
+pub async fn chatgpt_oauth_start() -> Response {
+    use crate::engine::oauth_store;
+    let verifier = oauth_store::generate_verifier();
+    let challenge = oauth_store::code_challenge(&verifier);
+    let state = oauth_store::generate_state();
+    oauth_store::remember_verifier(&state, &verifier);
+    Json(json!({
+        "authorize_url": oauth_store::authorize_url(&challenge, &state),
+        "state": state,
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct OauthCompleteReq {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub code: String,
+}
+
+/// POST /api/oauth/chatgpt/complete — finish the flow with the `code` the browser was redirected
+/// with. Exchanges it for tokens (using the stored PKCE verifier), persists them to the 0600 store,
+/// registers/updates the `chatgpt` provider, and reloads the LiteLLM proxy so GPT can route.
+pub async fn chatgpt_oauth_complete(body: axum::body::Bytes) -> Response {
+    use crate::engine::{oauth_store, providers};
+    let req: OauthCompleteReq = if body.is_empty() {
+        Default::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid body: {e}")})),
+                )
+                    .into_response()
+            }
+        }
+    };
+    let (state, code) = (req.state.trim(), req.code.trim());
+    if state.is_empty() || code.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"state and code are required"})),
+        )
+            .into_response();
+    }
+    // One-shot: an unknown/expired/replayed state is rejected (CSRF + stale-callback guard).
+    let Some(verifier) = oauth_store::take_verifier(state) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"unknown or expired state — restart the login"})),
+        )
+            .into_response();
+    };
+    let tokens = match oauth_store::exchange_code(code, &verifier).await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("token exchange failed: {e}")})),
+            )
+                .into_response()
+        }
+    };
+    if let Err(e) = oauth_store::save(&tokens) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to store tokens: {e}")})),
+        )
+            .into_response();
+    }
+    // Register the GPT provider (openai protocol, sentinel key → live token). Upsert so a re-login
+    // just refreshes it. The token itself never lands in providers.json.
+    let provider = providers::Provider {
+        name: oauth_store::PROVIDER_NAME.to_string(),
+        base_url: oauth_store::BACKEND_BASE.to_string(),
+        api_key: String::new(),
+        api_key_env: Some(oauth_store::SENTINEL.to_string()),
+        model: oauth_store::DEFAULT_MODEL.to_string(),
+        protocol: providers::Protocol::Openai,
+        capability: 0.7,
+        description: Some("ChatGPT subscription (OpenAI GPT) — OAuth login".to_string()),
+        priority: 0.5,
+        cost: 0.4,
+        router: false,
+        enabled: true,
+    };
+    if let Err(e) = providers::upsert(provider) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to register provider: {e}")})),
+        )
+            .into_response();
+    }
+    crate::engine::litellm::request_reload();
+    Json(json!({
+        "ok": true,
+        "account_id": tokens.account_id,
+        "expires_at": tokens.expires_at,
+        "model": oauth_store::DEFAULT_MODEL,
+    }))
+    .into_response()
+}
+
+/// GET /api/oauth/chatgpt/status — connection state for the UI badge. Never returns the token.
+pub async fn chatgpt_oauth_status() -> Response {
+    use crate::engine::oauth_store;
+    match oauth_store::load() {
+        Some(t) => Json(json!({
+            "connected": !t.access_token.is_empty() && !t.needs_relogin,
+            "account_id": t.account_id,
+            "expires_at": t.expires_at,
+            "needs_relogin": t.needs_relogin,
+            "model": oauth_store::DEFAULT_MODEL,
+        }))
+        .into_response(),
+        None => Json(json!({"connected": false, "needs_relogin": false})).into_response(),
+    }
+}
+
+/// DELETE /api/oauth/chatgpt — disconnect: drop the stored tokens and the `chatgpt` provider.
+pub async fn chatgpt_oauth_logout() -> Response {
+    use crate::engine::{oauth_store, providers};
+    let _ = oauth_store::remove();
+    let _ = providers::remove(oauth_store::PROVIDER_NAME);
+    crate::engine::litellm::request_reload();
+    Json(json!({"ok": true})).into_response()
 }
 
 // ── native Claude per-family routing overrides ──
@@ -1483,6 +1633,207 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("router validation failed"));
+    }
+
+    // ── ChatGPT OAuth routes ──
+
+    #[tokio::test]
+    async fn oauth_start_returns_authorize_url_and_state() {
+        let st = test_state().await;
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/oauth/chatgpt/start")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let url = b["authorize_url"].as_str().unwrap();
+        assert!(url.starts_with("https://auth.openai.com/oauth/authorize"));
+        assert!(url.contains("code_challenge="));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+        let state = b["state"].as_str().unwrap();
+        assert!(url.contains(&format!("state={state}")));
+    }
+
+    #[tokio::test]
+    async fn oauth_complete_rejects_unknown_state_and_missing_fields() {
+        let st = test_state().await;
+        // Unknown state → 400 (never touches the network).
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/oauth/chatgpt/complete")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"nope","code":"abc"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(b["error"].as_str().unwrap().contains("state"));
+        // Missing fields → 400.
+        let (s2, _) = oneshot_req(
+            st.clone(),
+            Request::post("/api/oauth/chatgpt/complete")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_status_reflects_store() {
+        use crate::engine::oauth_store;
+        let _tok = oauth_store::test_util::isolate();
+        let st = test_state().await;
+
+        // Not connected.
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/oauth/chatgpt")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["connected"], false);
+
+        // Connected.
+        oauth_store::save(&oauth_store::ChatGptTokens {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            account_id: "acct_9".into(),
+            expires_at: 9_999_999_999_000,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_, b2) = oneshot_req(
+            st.clone(),
+            Request::get("/api/oauth/chatgpt")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(b2["connected"], true);
+        assert_eq!(b2["account_id"], "acct_9");
+
+        // Relogin required hides the connection.
+        oauth_store::save(&oauth_store::ChatGptTokens {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            needs_relogin: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_, b3) = oneshot_req(
+            st.clone(),
+            Request::get("/api/oauth/chatgpt")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(b3["connected"], false);
+        assert_eq!(b3["needs_relogin"], true);
+    }
+
+    #[tokio::test]
+    async fn oauth_logout_removes_provider_and_token() {
+        use crate::engine::{oauth_store, providers};
+        let _prov = isolated_providers_file();
+        let _tok = oauth_store::test_util::isolate();
+        let st = test_state().await;
+
+        // Simulate a completed login: token stored + provider registered.
+        oauth_store::save(&oauth_store::ChatGptTokens {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            account_id: "acct".into(),
+            expires_at: 9_999_999_999_000,
+            ..Default::default()
+        })
+        .unwrap();
+        providers::upsert_at(
+            &providers::providers_file_path(),
+            providers::Provider {
+                name: oauth_store::PROVIDER_NAME.into(),
+                base_url: oauth_store::BACKEND_BASE.into(),
+                api_key: String::new(),
+                api_key_env: Some(oauth_store::SENTINEL.into()),
+                model: oauth_store::DEFAULT_MODEL.into(),
+                protocol: providers::Protocol::Openai,
+                capability: 0.7,
+                description: None,
+                priority: 0.5,
+                cost: 0.4,
+                router: false,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert!(providers::load_list().iter().any(|p| p.name == "chatgpt"));
+
+        let (s, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/oauth/chatgpt")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(oauth_store::load().is_none(), "token file removed");
+        assert!(
+            !providers::load_list().iter().any(|p| p.name == "chatgpt"),
+            "provider removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_get_includes_chatgpt_after_register() {
+        use crate::engine::{oauth_store, providers};
+        let _prov = isolated_providers_file();
+        let st = test_state().await;
+        providers::seed_claude_models_for_tests();
+        providers::upsert_at(
+            &providers::providers_file_path(),
+            providers::Provider {
+                name: oauth_store::PROVIDER_NAME.into(),
+                base_url: oauth_store::BACKEND_BASE.into(),
+                api_key: String::new(),
+                api_key_env: Some(oauth_store::SENTINEL.into()),
+                model: oauth_store::DEFAULT_MODEL.into(),
+                protocol: providers::Protocol::Openai,
+                capability: 0.7,
+                description: None,
+                priority: 0.5,
+                cost: 0.4,
+                router: false,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/models")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let models = b["models"].as_array().unwrap();
+        assert!(
+            models.iter().any(|m| m["key"] == "chatgpt" && m["native"] == false),
+            "GPT provider must appear in the default model catalog after login"
+        );
     }
 
     #[tokio::test]
