@@ -26,10 +26,12 @@ Two real defects fall out of this:
   floor and was *more* capable, but tied on priority (0=0) and cost (0.50=0.50), so
   the tie preserved the LLM's Sonnet pick. Above-floor capability (0.90 vs 0.85) was
   discarded the moment both cleared the gate.
-- **Circular floor.** The capability gate `bar` is set to *the capability of whatever
-  model the LLM happened to pick*. A flaky LLM pick of a strong model raises the bar
-  and locks out cheaper-but-adequate models — the bar is not an independent estimate
-  of task difficulty.
+- **Floor coupled to the pick** (secondary). The gate `bar` = capability of the model the
+  LLM picked, so a flaky *strong* pick raises the floor and can lock out cheaper-but-adequate
+  models. Note: adversarial review (§11) concluded this coupling is the *lesser evil* — the
+  pick is a committed judgment that bounds mis-estimation, whereas a free-floating difficulty
+  scalar is unanchored. So the redesign **keeps** `floor = capability(pick)` and instead fixes
+  the primary bug (the tie pathology) with the joint score above the floor.
 
 There is also **no way to exclude a model** from routing. Native Claude tiers
 (opus/sonnet/haiku/fable) are always candidates; the sliders tune *preference*, not
@@ -41,8 +43,9 @@ that clears the floor.
 
 - **Quality threshold / cascade is standard.** RouteLLM calibrates a threshold on a
   *predicted difficulty/quality* score to hit a target strong-model rate; FrugalGPT
-  cascades on per-stage quality thresholds. So a capability floor is correct — but the
-  score is an **independent** per-query estimate, not "the capability of the first pick."
+  cascades on per-stage quality thresholds. So a capability floor is correct. (Ideally the
+  score is an independent per-query estimate; here we anchor it to the LLM's committed pick —
+  see §11 for why that beat a free-floating difficulty scalar in review.)
 - **Joint utility, not lexicographic.** The field optimizes a (quality, cost) Pareto
   frontier — pick the point maximizing quality per cost. OpenRouter composes signals
   (`sort` + `max_price`), Unify weights a metric config over {quality, latency, cost},
@@ -59,22 +62,26 @@ cascade survey; NotDiamond docs; Unify metric config.
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | Difficulty floor source | **Router LLM emits a per-task difficulty (0..1)** in the same call; floor = that. Removes the circularity, ~free. |
+| 1 | Difficulty floor source | **Keep the LLM's per-task model pick; floor `d = capability(pick)`.** *(Revised after adversarial review — see §11.)* A bare emitted difficulty scalar is *unanchored* (the LLM stakes nothing) and regresses on mis-estimation; the pick is a *committed* judgment, so its capability is a self-anchored floor. The pick's ONLY role is to set the floor. |
 | 2 | Signal combination | **Floor + joint weighted score.** Keep the capability floor; above it, argmax a joint score. Ties break toward cheaper. |
 | 3 | Global tradeoff knob | **Add it, keep per-model priority.** One global "cheaper ⇄ stronger" knob sets the weights; priority stays as fine-tuning. Back-compatible. |
 | 4 | Enable/disable | **Separate `Enabled` toggle** per model. Off = grayed card + removed from candidate pool. `priority` stays pure preference. |
 
-**Architectural shift:** the LLM's job changes from *"pick the model"* to *"estimate
-task difficulty (0..1)"*. A **deterministic scorer** then selects the model. One
-unreliable LLM call can no longer lock out a cheaper adequate model.
+**Architectural shift:** the LLM still picks a per-task model, but its pick now only sets
+the **difficulty floor** `d = capability(pick)`; a **deterministic joint scorer** re-ranks
+all floor-survivors and makes the final choice. The lexicographic strict-improvement
+override (`apply_priority`) is replaced. One unreliable LLM pick can no longer lock out a
+cheaper *equally-capable* model, because above-floor capability is now scored, not discarded.
 
 ## 4. Routing pipeline (replaces `apply_priority`)
 
 ```
 candidates = enabled registered providers (keyed, protocol-eligible)
            + enabled native Claude families              # disabled → excluded
+  │   (if candidates is EMPTY → fail the delegate call with a clear error;      ← §11 fix
+  │    NEVER fall through to the silent native-default path)
   │
-  ├─ difficulty d ∈ [0,1]  ← router LLM, per task (independent of model choice)
+  ├─ LLM pick per task  → difficulty floor  d = capability(pick)   # self-anchored, §3
   │
   ├─ floor filter: keep candidates with capability ≥ d − ε
   │     (if NONE clear the floor → fall back to the single most-capable candidate,
@@ -86,25 +93,35 @@ candidates = enabled registered providers (keyed, protocol-eligible)
 ```
 
 - `t` — **global tradeoff** ∈ [0,1], `0` = cheapest, `1` = strongest. Default `0.5`.
-- `β` — per-model priority weight, small constant (start `0.5`; tune in impl). Priority
-  becomes a persistent nudge, not a hard lexicographic axis.
+- **Score scale.** The main axis `(1−t)·(1−cost) + t·capability` lies in `[0,1]` (its two
+  coefficients sum to 1). Keep the priority term on the SAME scale so it stays a nudge.
+- `β` — per-model priority weight, **`0.1`** (revised from 0.5 — see §11). At `β=0.1` a
+  `priority=1` model gets at most `+0.1`, i.e. it only wins when it is already within `0.1`
+  of the top on the main axis — a genuine nudge, provably not a hard override. `β` must stay
+  `≪ 1`.
 - `capability_m` is used **raw** (not `capability − d`) in the score, so the knob toward
   "stronger" meaningfully prefers higher-capability models; the floor already removed the
   inadequate ones.
 - **Tie-break drops "strict improvement only."** On an exact score tie the deterministic
   scorer prefers cheaper/stronger/registered — it never falls back to "keep the LLM's pick."
+- Report the decision on `/1.0` (main axis) in the summary reason so the printed comparison
+  is apples-to-apples; if `β·priority` moved the pick, say so explicitly.
 
 ### Degradation
-- Router disabled / call fails → no per-task difficulty. Fall back to difficulty `0.5`
-  (or run the existing native-default path) so the fan-out still completes; log it.
-- Empty candidate set (everything disabled) → error surfaced to the caller, not a silent
-  native fallback. (Guard: never let the user disable themselves into a no-op.)
+- Router disabled / call fails → no LLM pick. Fall back to a **mid floor `d = 0.5`** and run
+  the joint scorer over the enabled candidates (so the fan-out still completes and still
+  respects the knob/cost); log it. Do NOT drop to the raw subscription default model.
+- **Empty candidate set** (user disabled everything, or Claude discovery failed AND all
+  registered are disabled) → **fail the delegate call with an explicit error** ("no models
+  enabled for routing"), surfaced as the tool result. This guard lives in `run_delegate`
+  BEFORE the `router_provider` match, ahead of the existing silent native path that §11
+  showed would otherwise swallow it.
 
 ## 5. Worked example (the DeepSeek fix)
 
-Difficulty `d = 0.85`. Enabled candidates & floor(cap ≥ 0.85): DeepSeek(0.90) ✓,
-Sonnet(0.85) ✓, Opus(0.97) ✓, Fable(0.99) ✓; MiniMax(0.70) ✗, Haiku(0.60) ✗.
-`t = 0.5`, `β = 0.5`, all priority `0`:
+LLM picks Sonnet (cap 0.85) → floor `d = 0.85`. Enabled candidates clearing the floor:
+DeepSeek(0.90) ✓, Sonnet(0.85) ✓, Opus(0.97) ✓, Fable(0.99) ✓; MiniMax(0.70) ✗,
+Haiku(0.60) ✗. `t = 0.5`, `β = 0.1`, all priority `0` (so the priority term is 0 here):
 
 | model | S = (1−t)(1−cost) + t·cap + β·prio | S |
 |-------|-----------------------------------|---|
@@ -124,13 +141,20 @@ DeepSeek wins — above-floor capability (0.90 > 0.85) is no longer discarded. K
 - **Global tradeoff config** — a new tiny persisted value `t ∈ [0,1]` (its own file,
   e.g. `~/.agentic-dev/routing.json` `{ "tradeoff": 0.5 }`, mirroring the providers-file
   CRUD: atomic write, 0600, corrupt-file-errors-not-wipes, test-override static). GET/POST API.
-- `router.rs` — split responsibilities:
-  - `estimate_difficulty(tasks, router, ask) -> HashMap<idx, f32>` (LLM emits difficulty; JSON parse + validation reused).
-  - `select_model(difficulty, candidates, t, β) -> RouteChoice` (deterministic floor + joint score + tie-break). **Replaces `apply_priority`.**
+- `router.rs`:
+  - Keep the LLM per-task pick (`route_batch` / `route_via_native_claude` largely unchanged —
+    they still return a per-task picked model).
+  - `select_model(picked, candidates, t, β) -> RouteChoice` — **replaces `apply_priority`**:
+    `d = capability(picked)`; floor-filter `candidates` by `cap ≥ d − ε` (empty → most-capable);
+    argmax the joint score; tie-break cheaper→stronger→registered.
+  - `router_provider()` — **must also require `enabled`** (§11 fix): a flagged-but-disabled
+    router provider is skipped, falling through to native-Claude-as-router. A disabled model
+    can neither receive work nor keep spending the user's key as the router.
   - Keep the transport seam (`AskFn`) and pure/unit-tested split.
-- `delegate.rs` — filter candidates by `enabled`; call `estimate_difficulty` then
+- `delegate.rs` — filter candidates by `enabled`; **guard the empty candidate set** (return
+  `Err` from `run_delegate` before the `router_provider` match, §11); call the LLM pick then
   `select_model`; surface the decision in the run summary reason, e.g.
-  `w1→deepseek (difficulty 0.85, S 0.70 > sonnet 0.675)`.
+  `w1→deepseek (floor 0.85, S 0.70 > sonnet 0.675)`.
 - `native_claude_candidates` — carry `enabled` through; drop disabled families.
 
 ### API (`server-rs/src/api/`)
@@ -156,11 +180,12 @@ DeepSeek wins — above-floor capability (0.90 > 0.85) is no longer discarded. K
 
 ## 8. Testing
 - **Pure unit tests** (in-crate, no network) for `select_model`: the DeepSeek tie case,
-  floor filtering, empty-floor fallback, tie-break ordering, knob extremes (`t=0`, `t=1`),
-  disabled-exclusion, priority nudge.
-- `estimate_difficulty`: JSON parse/validation + transport-failure → graceful default
-  (reuse the existing `AskFn` fake-transport pattern).
-- Delegate flow: candidate filtering by `enabled`; summary reason string.
+  floor filtering, empty-floor→most-capable fallback, tie-break ordering, knob extremes
+  (`t=0`, `t=1`), disabled-exclusion, and the **`β` nudge bounds** — assert a `priority=1`
+  model does NOT beat a model that leads it by `> β` on the main axis (guards §11 regression).
+- `router_provider()`: a disabled flagged router is skipped (§11).
+- Delegate flow: candidate filtering by `enabled`; **empty-set → `Err`, not native fallback**;
+  router-fail → `d=0.5` degradation; summary reason string.
 - Android: keep it light — a smoke test that `enabled=false` removes a card from the pool
   representation if such tests exist; otherwise manual.
 
@@ -169,8 +194,32 @@ Two PRs (backend first, then Android), each via its repo's Codex-review auto-mer
 workflow, with the delegate adversarial-verify pre-flight gate run on each diff.
 
 ## 10. Out of scope (YAGNI)
-- Learned/trained routers (matrix factorization, BERT) — the LLM difficulty estimate is
-  enough for a BYOK self-host; revisit only if difficulty estimates prove unreliable.
+- Learned/trained routers (matrix factorization, BERT) — the LLM pick + deterministic
+  joint scorer is enough for a BYOK self-host; revisit only if picks prove unreliable.
 - Latency/throughput as a routing signal — not modeled today; add a third weight later if
   needed (the score is already a weighted sum, so it extends cleanly).
 - Per-task tradeoff override — the knob is global for now.
+
+## 11. Adversarial review outcomes (2026-07-12)
+
+Three refutation workers reviewed this design before implementation. Four real flaws found;
+all resolved above.
+
+1. **`β=0.5` was a hard override, not a nudge** (scoring). priority=1 added +0.5 — half the
+   entire cap+cost dynamic range — so a weak high-priority model beat a strong one for any
+   `t`. **Fix:** `β=0.1`, documented `≪ 1`, with a unit test asserting priority can't overcome
+   a `> β` lead on the main axis. Also noted the score scale ([0,1] main axis) so the summary
+   reason compares apples-to-apples.
+2. **Emitting a difficulty scalar didn't fix the bug and regressed** (floor). The DeepSeek
+   pathology is purely a *tie-break* problem — solved by the joint score, not by changing the
+   floor source. A bare difficulty scalar is unanchored (mis-estimate → crypto on Haiku / typo
+   on Opus). **Fix:** reverted decision #1 — keep the LLM pick as a *committed* anchor,
+   `floor = capability(pick)`; the joint score does the real work above it. Smaller diff too.
+3. **"Empty candidate set → error" was contradicted by existing code** (state). Disabling
+   everything would hit the silent native-default fallback at `delegate.rs:970` via an
+   unguarded `route_via_native_claude`. **Fix:** explicit empty-set guard in `run_delegate`
+   *before* the `router_provider` match, failing the delegate call.
+4. **Disabling the router provider was unhandled** (state). `router_provider()` ignored
+   `enabled`, so a toggled-off MiniMax would keep making every routing call (user's key/money)
+   while unable to receive work. **Fix:** `router_provider()` requires `enabled`; a disabled
+   flagged router falls through to native-Claude-as-router.
