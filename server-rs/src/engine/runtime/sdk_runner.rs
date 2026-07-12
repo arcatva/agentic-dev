@@ -1,5 +1,5 @@
 //! Production turn runner: drives claude through the official Claude Agent SDK via a thin Node bridge
-//! (`server-rs/sdk-bridge.mjs`). This is the only turn runner; there is no raw-`claude`-CLI runner.
+//! (`server-rs/sdk-bridge/sdk-bridge.mjs`). This is the only turn runner; there is no raw-`claude`-CLI runner.
 //! Tests inject an SdkRunner pointed at a fake bridge script (`tests/fixtures/fake-sdk-bridge-*.sh`).
 //!
 //! Why a Node bridge instead of a pure-Rust port: the SDK is the harness side of claude's stream-json
