@@ -259,7 +259,9 @@ pub(crate) fn select_with_floor(d: f32, candidates: &[&Provider], t: f32) -> Rou
     let top_other = pool
         .iter()
         .copied()
-        .filter(|m| m.name != best.name)
+        // Exclude `best` by IDENTITY, not name — two candidates could share a name (a manually-edited
+        // provider colliding with a native model id), and name-equality would drop the wrong one.
+        .filter(|m| !std::ptr::eq(*m, best))
         .max_by(|a, b| main(a).total_cmp(&main(b)));
     let reason: String = match top_other {
         Some(r) if main(best) + EPS >= main(r) => {
