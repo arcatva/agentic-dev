@@ -558,6 +558,10 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
 pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     match crate::engine::providers::remove(&name) {
         Ok(true) => {
+            // If this provider was OAuth-backed, drop its token too — otherwise deleting the card via
+            // the generic UI would leave the refresher renewing an orphaned token that a later
+            // same-named provider could silently reuse.
+            let _ = crate::engine::oauth::remove_token(&name);
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }

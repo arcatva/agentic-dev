@@ -114,16 +114,22 @@ fn save_store_to(path: &Path, store: &Store) -> std::io::Result<()> {
     }
     let body = serde_json::to_string_pretty(store).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)?;
+    // Create the temp file 0600 FROM THE START — a plain `fs::write` would create it 0644 under a
+    // typical umask, leaving a window where another local user could race-read the refresh token.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // This file holds OAuth tokens; if we can't lock it down, say so loudly rather than leave a
-        // world-readable secret silently (umask would otherwise make it 0644).
-        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!("[oauth] chmod 600 on token store failed: {e}");
-        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(body.as_bytes())?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, &body)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -150,6 +156,22 @@ pub fn put_token(name: &str, token: SubscriptionToken) -> std::io::Result<()> {
     let mut store = load_store_from(&path);
     store.insert(name.to_string(), token);
     save_store_to(&path, &store)
+}
+
+/// Persist `new` only if the stored token for `name` still carries `expected_refresh` — i.e. the
+/// user didn't log out or re-login while we were off refreshing on the network. Prevents the
+/// refresher from resurrecting a token that `logout` removed mid-flight. Returns true if written.
+fn put_token_if_unchanged(name: &str, expected_refresh: &str, new: SubscriptionToken) -> bool {
+    let _g = STORE_LOCK.lock();
+    let path = tokens_file_path();
+    let mut store = load_store_from(&path);
+    match store.get(name) {
+        Some(cur) if cur.refresh_token == expected_refresh => {
+            store.insert(name.to_string(), new);
+            save_store_to(&path, &store).is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// Remove a token; `Ok(true)` if one was present.
@@ -345,6 +367,11 @@ pub fn refresh(refresh_token: &str) -> Result<SubscriptionToken, String> {
 /// in the providers file), then reload the proxy so routing picks up the model.
 pub fn register_from_token(name: &str, token: SubscriptionToken) -> Result<(), String> {
     put_token(name, token).map_err(|e| format!("persist token: {e}"))?;
+    // Remove any existing record under this name FIRST. `upsert` preserves a stored key when the
+    // incoming key is blank (the "edit keeps the key" rule); without this, a pre-existing BYOK `gpt`
+    // key would survive and `resolved_key` (literal before OAuth store) would hand the proxy the old
+    // BYOK bearer instead of the fresh ChatGPT token. A fresh add stores the blank key blank.
+    let _ = crate::engine::providers::remove(name);
     let provider = crate::engine::providers::Provider {
         name: name.to_string(),
         base_url: CODEX_BASE_URL.to_string(),
@@ -577,8 +604,17 @@ fn finish_login(code: Option<&str>, state: Option<&str>) -> Result<(), String> {
 
 // ── background refresher ──
 
+/// A refresh error is only terminal when the OAuth server rejects the refresh token itself; a
+/// transient network / 5xx failure must stay retryable so a blip doesn't force a manual re-login.
+fn is_terminal_refresh_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("invalid_grant") || e.contains("invalid_client") || e.contains("unauthorized_client")
+}
+
 /// Refresh any token within the expiry buffer. `do_refresh` is injectable for tests. Returns the
-/// number of tokens refreshed. On invalid refresh, marks the token `needs_reauth`.
+/// number of tokens refreshed. Only an irreversible error (`invalid_grant` …) marks the token
+/// `needs_reauth`; transient failures are left retryable for the next wake. Writes are guarded so a
+/// concurrent logout isn't undone by an in-flight refresh.
 pub fn run_refresh_once(
     now: i64,
     do_refresh: impl Fn(&str) -> Result<SubscriptionToken, String>,
@@ -592,15 +628,19 @@ pub fn run_refresh_once(
         }
         match do_refresh(&tok.refresh_token) {
             Ok(new) => {
-                if put_token(name, new).is_ok() {
+                // Only persist if this token is still the current one (not logged out mid-refresh).
+                if put_token_if_unchanged(name, &tok.refresh_token, new) {
                     refreshed += 1;
                 }
             }
-            Err(e) => {
-                tracing::warn!("[oauth] refresh for {name} failed: {e}; marking needs_reauth");
+            Err(e) if is_terminal_refresh_error(&e) => {
+                tracing::warn!("[oauth] refresh for {name} rejected: {e}; needs re-login");
                 let mut dead = tok.clone();
                 dead.needs_reauth = true;
-                let _ = put_token(name, dead);
+                let _ = put_token_if_unchanged(name, &tok.refresh_token, dead);
+            }
+            Err(e) => {
+                tracing::warn!("[oauth] refresh for {name} failed transiently: {e}; will retry");
             }
         }
     }
@@ -779,6 +819,28 @@ mod tests {
             let n = run_refresh_once(1000, |_rt| Err("invalid_grant".into()));
             assert_eq!(n, 0);
             assert!(subscription_token("gpt").unwrap().needs_reauth);
+        });
+    }
+
+    #[test]
+    fn transient_refresh_failure_stays_retryable() {
+        with_temp_store(|| {
+            put_token(
+                "gpt",
+                SubscriptionToken {
+                    access_token: "old".into(),
+                    refresh_token: "r0".into(),
+                    account_id: "a".into(),
+                    account_email: None,
+                    expires_at: 1000,
+                    needs_reauth: false,
+                },
+            )
+            .unwrap();
+            // A network/5xx blip must NOT force re-login.
+            let n = run_refresh_once(1000, |_rt| Err("token endpoint 503: upstream".into()));
+            assert_eq!(n, 0);
+            assert!(!subscription_token("gpt").unwrap().needs_reauth);
         });
     }
 

@@ -115,8 +115,14 @@ fn build_model_yaml(reg: &ProviderRegistry) -> (String, Vec<(String, String)>) {
         // A ChatGPT-subscription (OAuth) provider talks to the Codex backend, which requires three
         // non-standard headers (the account id comes from the JWT stored with the token). The bearer
         // itself is still the rotating access token injected via env above; only these extra headers
-        // are static. ponytail: assumes litellm can speak the Codex `responses` shape at this
-        // api_base; if not, the upgrade is a thin Anthropic→Codex shim for this one provider.
+        // are static.
+        // ponytail: KNOWN CEILING — the `openai/<model>` route above makes litellm POST to
+        // `<api_base>/chat/completions`, but the ChatGPT subscription backend serves the Responses API
+        // at `<api_base>/responses`. This block wires the auth, account header, and endpoint base
+        // (all covered by the unit test), which is the part provable without live credentials; making
+        // a real delegated call land also needs litellm pointed at `/responses` (a Responses-mode
+        // route or a thin Anthropic→Codex-responses shim for this one provider). Tracked, not yet done
+        // — proving it needs a live ChatGPT login the fake-bridge test suite can't exercise.
         if let Some(tok) = crate::engine::oauth::subscription_token(&p.name) {
             yaml.push_str(&format!(
                 "      extra_headers:\n        ChatGPT-Account-Id: {acct}\n        originator: {orig}\n        OpenAI-Beta: {beta}\n",
