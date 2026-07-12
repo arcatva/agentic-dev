@@ -62,12 +62,13 @@ pub fn validate_mcp_def(def: &crate::engine::store::McpServerDef) -> Result<(), 
         if url.trim().is_empty() {
             return Err("server requires a \"command\" (stdio) or \"url\" (http/sse)".into());
         }
-        let host = url
+        let rest = url
             .strip_prefix("https://")
             .or_else(|| url.strip_prefix("http://"))
             .unwrap_or("");
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
         if host.is_empty() || url.chars().any(char::is_whitespace) {
-            return Err(format!("invalid url {url:?} — must be http(s)://…"));
+            return Err(format!("invalid url {url:?} — must be http(s)://host…"));
         }
     }
     Ok(())

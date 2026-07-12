@@ -1800,8 +1800,13 @@ mod tests {
             (r#"{"name":"x","type":"http"}"#, "url"),
             (r#"{"name":"x","type":"http","url":"ftp://e.com"}"#, "url"),
             (r#"{"name":"x","type":"sse","url":"https://"}"#, "url"),
+            (r#"{"name":"x","type":"http","url":"https:///mcp"}"#, "url"),
+            (r#"{"name":"x","type":"http","url":"http://?x=1"}"#, "url"),
             (r#"{"name":"x","type":"ws","url":"https://e.com"}"#, "type"),
-            (r#"{"name":"x","command":"c","url":"https://e.com"}"#, "both"),
+            (
+                r#"{"name":"x","command":"c","url":"https://e.com"}"#,
+                "both",
+            ),
             (
                 r#"{"name":"x","type":"http","command":"c","url":"https://e.com"}"#,
                 "command",
@@ -1809,10 +1814,7 @@ mod tests {
         ] {
             let (s, b) = post_json(&st, "/api/mcp-servers", body).await;
             assert_eq!(s, StatusCode::BAD_REQUEST, "body: {body}");
-            assert!(
-                b["error"].as_str().unwrap().contains(want),
-                "{body} -> {b}"
-            );
+            assert!(b["error"].as_str().unwrap().contains(want), "{body} -> {b}");
         }
     }
 
@@ -1877,11 +1879,21 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["sources"], serde_json::json!(["anthropics/skills"]));
         // Add.
-        let (s, b) = post_json(&st, "/api/skills/sources", r#"{"source":"octocat/Hello-World"}"#).await;
+        let (s, b) = post_json(
+            &st,
+            "/api/skills/sources",
+            r#"{"source":"octocat/Hello-World"}"#,
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["sources"].as_array().unwrap().len(), 2);
         // Duplicate (trailing-slash variant) is deduped, not appended.
-        let (s, b) = post_json(&st, "/api/skills/sources", r#"{"source":"octocat/Hello-World/"}"#).await;
+        let (s, b) = post_json(
+            &st,
+            "/api/skills/sources",
+            r#"{"source":"octocat/Hello-World/"}"#,
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["sources"].as_array().unwrap().len(), 2);
         // Bad syntax → 400.
