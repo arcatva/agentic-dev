@@ -425,6 +425,7 @@ mod tests {
             priority,
             cost,
             router: false,
+            enabled: true,
         }
     }
 
