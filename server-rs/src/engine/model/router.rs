@@ -53,7 +53,10 @@ pub fn router_provider(reg: &ProviderRegistry) -> Option<&Provider> {
     // over an ineligible (openai/keyless) first one.
     if reg.providers.iter().any(|p| p.router) {
         return reg.providers.iter().find(|p| {
-            p.router && matches!(p.protocol, Protocol::Anthropic) && !p.resolved_key().is_empty()
+            p.router
+                && p.enabled
+                && matches!(p.protocol, Protocol::Anthropic)
+                && !p.resolved_key().is_empty()
         });
     }
     if let Ok(name) = std::env::var("AGENTIC_ROUTER_PROVIDER") {
@@ -63,6 +66,7 @@ pub fn router_provider(reg: &ProviderRegistry) -> Option<&Provider> {
         // (which could leak the prompt to an unintended endpoint or cost the user money).
         return reg.providers.iter().find(|p| {
             p.name.eq_ignore_ascii_case(name)
+                && p.enabled
                 && matches!(p.protocol, Protocol::Anthropic)
                 && !p.resolved_key().is_empty()
         });
@@ -200,8 +204,14 @@ pub(crate) const PRIORITY_MARGIN: f32 = 0.05;
 /// band the order is: higher priority → higher M → lower cost → higher capability → registered over
 /// native → lower index (stable).
 pub(crate) fn select_model(picked: &Provider, candidates: &[&Provider], t: f32) -> RouteChoice {
+    select_with_floor(picked.capability, candidates, t)
+}
+
+/// [select_model] with the difficulty floor `d` passed directly. Used by the router-failure
+/// degradation path, where there is no LLM pick, so the caller supplies a neutral mid floor
+/// (`d = 0.5`) and still gets a knob-/cost-aware pick instead of the raw subscription default.
+pub(crate) fn select_with_floor(d: f32, candidates: &[&Provider], t: f32) -> RouteChoice {
     const EPS: f32 = 1e-4;
-    let d = picked.capability;
     let mut pool: Vec<&Provider> = candidates
         .iter()
         .copied()
@@ -234,8 +244,15 @@ pub(crate) fn select_model(picked: &Provider, candidates: &[&Provider], t: f32) 
                 .then(is_native(a).cmp(&is_native(b)).reverse()) // registered (false) beats native (true)
                 .then(ib.cmp(ia)) // lower index wins (stable)
         })
-        .map(|(_, m)| m)
-        .unwrap_or(picked);
+        .map(|(_, m)| m);
+    let Some(best) = best else {
+        // Only reachable if `candidates` is empty; every caller guards against that (delegate's
+        // empty-set check, and select_model passes a picked model that is itself a candidate).
+        return RouteChoice {
+            model: String::new(),
+            reason: "no candidates".into(),
+        };
+    };
     // Honest reason: name the runner-up by MAIN score and state what decided. If `best` is also the
     // top-M candidate we print `≥`; if priority pulled a slightly-lower-M model up, we say so — never
     // a false `>`.
@@ -639,6 +656,34 @@ mod tests {
     }
 
     #[test]
+    fn select_with_floor_degrades_to_a_scored_pick() {
+        // Router-failure path: no LLM pick, so a mid floor d=0.5 is used. All candidates clear it;
+        // at t=0 the cheapest wins, at t=1 the most capable — a scored pick, not a raw default.
+        let cheap = p("cheap", "cheap", 0.60, 0.0, 0.10, Protocol::Anthropic, "k");
+        let strong = p(
+            "strong",
+            "strong",
+            0.95,
+            0.0,
+            0.90,
+            Protocol::Anthropic,
+            "k",
+        );
+        let cat = vec![cheap, strong];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        assert_eq!(select_with_floor(0.5, &cands, 0.0).model, "cheap");
+        assert_eq!(select_with_floor(0.5, &cands, 1.0).model, "strong");
+    }
+
+    #[test]
+    fn select_with_floor_on_empty_candidates_is_safe() {
+        // Defensive: empty candidates (callers guard this) → an empty-model choice, no panic.
+        let cands: Vec<&Provider> = vec![];
+        let got = select_with_floor(0.5, &cands, 0.5);
+        assert!(got.model.is_empty());
+    }
+
+    #[test]
     fn empty_floor_falls_back_to_most_capable() {
         // A synthetic pick more capable than every candidate empties the floor → most-capable wins,
         // so a hard task still runs on the best available model instead of nothing.
@@ -663,6 +708,20 @@ mod tests {
         // minimax has LOWER priority than deepseek, but is explicitly flagged as the router → it wins.
         let mut r = reg();
         r.providers[0].router = true; // minimax
+        assert_eq!(router_provider(&r).unwrap().name, "minimax");
+    }
+
+    #[test]
+    fn router_provider_skips_a_disabled_flagged_router() {
+        // A provider flagged as the router but DISABLED must not run routing (it would spend the
+        // user's key while unable to receive work). find() returns None → routing falls through to
+        // native-Claude-as-router, exactly like the ineligible-router case.
+        let mut r = reg();
+        r.providers[0].router = true; // minimax
+        r.providers[0].enabled = false;
+        assert!(router_provider(&r).is_none());
+        // Re-enabling it makes it the router again.
+        r.providers[0].enabled = true;
         assert_eq!(router_provider(&r).unwrap().name, "minimax");
     }
 

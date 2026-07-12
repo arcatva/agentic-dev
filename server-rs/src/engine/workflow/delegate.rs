@@ -908,23 +908,56 @@ impl crate::engine::Engine {
             .providers
             .iter()
             .filter(|p| {
-                // Anthropic providers run directly; openai providers run via the LiteLLM proxy, so
-                // only offer them as candidates when that proxy is actually available.
-                !p.resolved_key().is_empty()
+                // Disabled models never participate in routing (the Enabled toggle).
+                p.enabled
+                    // Anthropic providers run directly; openai providers run via the LiteLLM proxy,
+                    // so only offer them as candidates when that proxy is actually available.
+                    && !p.resolved_key().is_empty()
                     && (matches!(p.protocol, crate::engine::providers::Protocol::Anthropic)
                         || (matches!(p.protocol, crate::engine::providers::Protocol::Openai)
                             && crate::engine::litellm::available()))
             })
-            .chain(native_candidates.iter())
+            .chain(native_candidates.iter().filter(|p| p.enabled))
             .collect();
+
+        // Did ANY candidate exist BEFORE the enabled filter? This distinguishes two very different
+        // empty-pool causes: (a) the user deliberately DISABLED everything — a real config error we
+        // should surface, not paper over by silently running on the subscription default; versus
+        // (b) there was nothing to route to at all — no registered providers AND native discovery
+        // empty (the startup race before `init_claude_models` populates the OnceLock, or a permanent
+        // auth/network discovery failure). Case (b) must keep the pre-feature behavior: fall through
+        // to the subscription-default path, NOT error. (Erroring in (b) would break every fan-out for
+        // a user who simply hasn't hit the Providers screen yet.)
+        let existed_before_disable = !native_candidates.is_empty()
+            || registry.providers.iter().any(|p| {
+                !p.resolved_key().is_empty()
+                    && (matches!(p.protocol, crate::engine::providers::Protocol::Anthropic)
+                        || (matches!(p.protocol, crate::engine::providers::Protocol::Openai)
+                            && crate::engine::litellm::available()))
+            });
+        if candidates.is_empty() && existed_before_disable {
+            // Everything that existed was turned off. Fail BEFORE the router match (spec §11): the
+            // native-router path has no empty guard and the worker-spec `None =>` arm would otherwise
+            // route every task to the default model, lying to a user who disabled everything.
+            teardown_write_worktrees(&write_provisions);
+            cleanup_write_batch(&session_dir, &repos, run_id);
+            self.clear_delegate_pending(caller_id);
+            return Err(
+                "all routing models are disabled — enable at least one provider or native tier"
+                    .into(),
+            );
+        }
 
         // Pick the routing model: a flagged/keyed third-party router runs over HTTP; if NONE is flagged,
         // NATIVE Claude (the subscription) makes the decision via a one-shot headless call so tasks still
         // route across the catalog (incl. the registered models) instead of all running unrouted.
         // Global cost⇄quality tradeoff (0=cheapest .. 1=strongest) feeds the deterministic scorer.
-        let t = crate::engine::routing_config::load().tradeoff;
+        // Named `knob` (not `t`) so it isn't shadowed by the per-task closure param `t` below.
+        let knob = crate::engine::routing_config::load().tradeoff;
         let picks = match crate::engine::router::router_provider(&registry) {
-            Some(rp) => crate::engine::router::route_batch(&tasks, &candidates, rp, t, None).await,
+            Some(rp) => {
+                crate::engine::router::route_batch(&tasks, &candidates, rp, knob, None).await
+            }
             None => {
                 let config_dir = self.0.cfg.claude_config_base.to_string_lossy().into_owned();
                 route_via_native_claude(
@@ -933,7 +966,7 @@ impl crate::engine::Engine {
                     &config_dir,
                     &tasks,
                     &candidates,
-                    t,
+                    knob,
                 )
                 .await
             }
@@ -954,10 +987,15 @@ impl crate::engine::Engine {
                         crate::engine::providers::resolve_candidate(&candidates, m)
                             .map(|p| (p, None))
                     } else {
-                        picks.get(&i).and_then(|c| {
-                            crate::engine::providers::resolve_candidate(&candidates, &c.model)
-                                .map(|p| (p, Some(c.reason.clone())))
-                        })
+                        // The LLM pick, already run through select_model upstream. If routing
+                        // failed / produced no pick for this un-pinned task, DEGRADE to a mid-floor
+                        // (d=0.5) SCORED pick so it still respects the tradeoff/cost knob instead of
+                        // silently running on the raw subscription default model.
+                        let choice = picks.get(&i).cloned().unwrap_or_else(|| {
+                            crate::engine::router::select_with_floor(0.5, &candidates, knob)
+                        });
+                        crate::engine::providers::resolve_candidate(&candidates, &choice.model)
+                            .map(|p| (p, Some(choice.reason.clone())))
                     };
                 let (model, overlay, route_reason) = match resolved {
                     // A native Claude candidate runs on the subscription: model override, NO overlay.
