@@ -289,8 +289,12 @@ fn post_token_form(form: &[(&str, &str)]) -> Result<serde_json::Value, RefreshEr
             .map_err(|e| RefreshErr::Transient(e.to_string()))
     } else {
         let body = resp.text().unwrap_or_default();
-        // 4xx from the token endpoint (invalid_grant, expired refresh) is a definitive auth failure.
-        if status.is_client_error() {
+        // Most 4xx from the token endpoint (invalid_grant, expired refresh) is a definitive auth
+        // failure → sign out. But 429/408 are retryable: don't sign the user out over a transient
+        // rate-limit during a background refresh.
+        let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT;
+        if status.is_client_error() && !retryable {
             Err(RefreshErr::Auth(format!("{status}: {body}")))
         } else {
             Err(RefreshErr::Transient(format!("{status}: {body}")))
@@ -421,12 +425,39 @@ fn subscription_provider() -> Provider {
     }
 }
 
-/// Register (or refresh) the subscription provider row and reload the LiteLLM proxy.
-fn register_provider() {
-    if let Err(e) = crate::engine::providers::upsert(subscription_provider()) {
-        tracing::warn!("[chatgpt-oauth] failed to register provider: {e}");
+/// Bumped on every sign-out (disconnect / generic delete). An in-flight refresh captures the value
+/// before its network call and refuses to write the store back if it changed meanwhile — otherwise a
+/// refresh that started before a disconnect would recreate the credential file after sign-out.
+static DISCONNECT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Register (or refresh) the subscription provider row and reload the LiteLLM proxy. Preserves any
+/// user-set routing metadata (enabled toggle, capability/priority/cost) on an existing row so a
+/// boot-time / refresh re-register doesn't silently re-enable a model the user disabled. Returns the
+/// upsert error (unwritable/corrupt providers file) so callers can surface a failed registration.
+fn register_provider() -> std::io::Result<()> {
+    let mut p = subscription_provider();
+    if let Some(existing) = crate::engine::providers::load_list()
+        .into_iter()
+        .find(|x| x.name.eq_ignore_ascii_case(PROVIDER_NAME))
+    {
+        p = carry_user_metadata(p, &existing);
     }
+    crate::engine::providers::upsert(p)?;
     crate::engine::litellm::request_reload();
+    Ok(())
+}
+
+/// Copy the user-tunable routing metadata from an `existing` row onto the freshly-templated one, so a
+/// re-register keeps the user's Enabled toggle and capability/priority/cost edits.
+fn carry_user_metadata(mut fresh: Provider, existing: &Provider) -> Provider {
+    fresh.enabled = existing.enabled;
+    fresh.capability = existing.capability;
+    fresh.priority = existing.priority;
+    fresh.cost = existing.cost;
+    if existing.description.is_some() {
+        fresh.description = existing.description.clone();
+    }
+    fresh
 }
 
 /// Finish a login started by [start_login]: exchange the code, persist tokens, register the model.
@@ -435,17 +466,46 @@ pub fn complete_login(code: &str, state: &str) -> Result<(), String> {
     if pending.state != state {
         return Err("state mismatch (possible CSRF) — restart the sign-in".into());
     }
+    // Refuse to clobber a user's pre-existing non-subscription provider that happens to be named
+    // `chatgpt` (sign-in would overwrite it and sign-out would delete it).
+    if let Some(existing) = crate::engine::providers::load_list()
+        .into_iter()
+        .find(|x| x.name.eq_ignore_ascii_case(PROVIDER_NAME))
+    {
+        if !is_subscription_provider(&existing) {
+            return Err(
+                "a provider named 'chatgpt' already exists — rename or delete it before signing in"
+                    .into(),
+            );
+        }
+    }
     let creds = exchange_code(code, &pending.verifier)?;
+    // The ChatGPT access token is short-lived; without a refresh token the account silently dies at
+    // expiry. offline_access should always yield one — treat its absence as a failed login.
+    if creds.refresh_token.is_empty() {
+        return Err(
+            "ChatGPT did not return a refresh token (offline_access denied?) — try again".into(),
+        );
+    }
     save(&creds).map_err(|e| e.to_string())?;
-    register_provider();
+    register_provider().map_err(|e| format!("signed in but failed to register the model: {e}"))?;
     Ok(())
 }
 
 /// Sign out: drop the tokens and remove the provider row.
 pub fn disconnect() {
+    DISCONNECT_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
     delete_store();
     let _ = crate::engine::providers::remove(PROVIDER_NAME);
     crate::engine::litellm::request_reload();
+}
+
+/// Drop just the stored tokens, without touching the provider row or reloading — used when the row is
+/// deleted through the generic `DELETE /api/providers/{name}` path, so signing out via the normal
+/// providers UI doesn't leave the account connected (and boot doesn't re-register it).
+pub fn forget_credentials() {
+    DISCONNECT_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+    delete_store();
 }
 
 /// Refresh the token if it's within the skew window. Returns true if it rotated (→ reload LiteLLM).
@@ -458,8 +518,15 @@ fn maybe_refresh() -> bool {
     if c.expires_at != 0 && c.expires_at - unix_now() > REFRESH_SKEW_SECS {
         return false;
     }
+    // Snapshot the sign-out generation before the network call; if a disconnect lands while we're
+    // waiting, don't write the store back (that would resurrect a signed-out account).
+    let gen = DISCONNECT_GEN.load(std::sync::atomic::Ordering::Acquire);
+    let disconnected_since = || DISCONNECT_GEN.load(std::sync::atomic::Ordering::Acquire) != gen;
     match refresh(&c) {
         Ok(nc) => {
+            if disconnected_since() {
+                return false;
+            }
             if let Err(e) = save(&nc) {
                 tracing::warn!("[chatgpt-oauth] save after refresh failed: {e}");
                 return false;
@@ -469,6 +536,9 @@ fn maybe_refresh() -> bool {
         }
         Err(RefreshErr::Auth(msg)) => {
             tracing::warn!("[chatgpt-oauth] refresh rejected ({msg}); sign-in required");
+            if disconnected_since() {
+                return false;
+            }
             let mut dead = c;
             dead.needs_relogin = true;
             let _ = save(&dead);
@@ -488,7 +558,9 @@ pub fn spawn_refresh_task() {
         // On boot, if we already have a login, make sure the provider row exists (providers.json may
         // have been reset) and the token is fresh.
         if load().is_some() {
-            register_provider();
+            if let Err(e) = register_provider() {
+                tracing::warn!("[chatgpt-oauth] boot re-register failed: {e}");
+            }
             if maybe_refresh() {
                 crate::engine::litellm::request_reload();
             }
@@ -616,6 +688,31 @@ mod tests {
             ..subscription_provider()
         };
         assert!(!is_subscription_provider(&other));
+    }
+
+    #[test]
+    fn re_register_preserves_user_routing_metadata() {
+        // A boot / refresh re-register must not silently re-enable a model the user disabled, nor
+        // wipe their capability/priority/cost edits.
+        let fresh = subscription_provider();
+        assert!(fresh.enabled, "template starts enabled");
+        let existing = Provider {
+            enabled: false,
+            capability: 0.42,
+            priority: 0.1,
+            cost: 0.9,
+            description: Some("my note".into()),
+            ..subscription_provider()
+        };
+        let merged = carry_user_metadata(fresh, &existing);
+        assert!(!merged.enabled, "disable toggle preserved");
+        assert!((merged.capability - 0.42).abs() < f32::EPSILON);
+        assert!((merged.priority - 0.1).abs() < f32::EPSILON);
+        assert!((merged.cost - 0.9).abs() < f32::EPSILON);
+        assert_eq!(merged.description.as_deref(), Some("my note"));
+        // Identity fields still come from the template (the codex endpoint/model/protocol).
+        assert_eq!(merged.base_url, CODEX_BASE_URL);
+        assert!(matches!(merged.protocol, Protocol::Openai));
     }
 
     #[test]

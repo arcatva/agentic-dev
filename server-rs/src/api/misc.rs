@@ -516,6 +516,20 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
         )
             .into_response();
     }
+    // Reserve the ChatGPT-subscription name for the OAuth flow. Block only NEW providers with that
+    // name (a manual add would collide with sign-in, which upserts the same row); editing the
+    // existing subscription row — e.g. toggling Enabled from the UI — still works.
+    if p.name.eq_ignore_ascii_case(crate::engine::openai_oauth::PROVIDER_NAME)
+        && !crate::engine::providers::load_list()
+            .iter()
+            .any(|x| x.name.eq_ignore_ascii_case(&p.name))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"the name 'chatgpt' is reserved — use Sign in with ChatGPT"})),
+        )
+            .into_response();
+    }
     // Validate the ROUTER relationship at set time: a provider flagged as the router that can't produce
     // a usable routing reply would silently make every later delegate fan-out fall back to native
     // Claude. Probe it now and reject the save with a clear reason instead. Only runs when router=true,
@@ -558,6 +572,12 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
 pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     match crate::engine::providers::remove(&name) {
         Ok(true) => {
+            // Deleting the ChatGPT row through the generic providers UI must also drop the stored
+            // OAuth tokens, else the user looks signed out but the account stays connected (and boot
+            // would re-register the provider).
+            if name.eq_ignore_ascii_case(crate::engine::openai_oauth::PROVIDER_NAME) {
+                crate::engine::openai_oauth::forget_credentials();
+            }
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
@@ -935,6 +955,13 @@ fn native_model_entries() -> Vec<ModelEntry> {
 fn full_model_entries() -> Vec<ModelEntry> {
     let mut entries = native_model_entries();
     for p in &crate::engine::providers::load_list() {
+        // A signed-out / needs-relogin ChatGPT subscription has no usable bearer and can't route;
+        // don't advertise it in the picker (it would resolve to no keyed provider and fall through).
+        if crate::engine::openai_oauth::is_subscription_provider(p)
+            && crate::engine::openai_oauth::current_access_token().is_none()
+        {
+            continue;
+        }
         entries.push(ModelEntry {
             key: p.name.clone(),
             label: format!("{} ({})", p.model, p.name),
