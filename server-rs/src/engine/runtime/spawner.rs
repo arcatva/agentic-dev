@@ -53,7 +53,37 @@ write it into ./outbox/ (relative to your working directory; create the dir if n
 ./outbox/ are shown in the app to preview and download. Do this whenever the user asks you to send, \
 give, share, or export a file. Do NOT put ordinary source-code edits in ./outbox/.]";
 
+/// Does `text` begin with a slash command (`/lfg`, `/ce-code-review`, …)?
+///
+/// Slash-command expansion in the Agent SDK only fires when the message STARTS with `/<cmd>`.
+/// The command name is a lowercase-initial run of `[a-z0-9_-:]` ending at the first whitespace
+/// (`:` allows an explicitly plugin-namespaced form like `/compound-engineering:lfg`). That shape
+/// leaves real filesystem paths (`/home/user/x` — the token holds a `/`) and prose untouched.
+/// A false positive is harmless anyway: an unregistered command is delivered as plain text.
+pub fn is_slash_command(text: &str) -> bool {
+    let Some(rest) = text.trim_start().strip_prefix('/') else {
+        return false;
+    };
+    // split (not split_whitespace): a space right after the slash ("/ foo") yields an empty first
+    // token, so it's correctly rejected rather than skipping ahead to "foo".
+    let name: &str = rest.split(char::is_whitespace).next().unwrap_or("");
+    !name.is_empty()
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | ':'))
+}
+
 pub fn compose_user_text(text: &str) -> String {
+    // A leading slash command must reach the CLI at the very START of the message or the SDK won't
+    // expand it — the outbox-note prefix would push it off the front. For a slash-command turn we
+    // therefore deliver the text verbatim; the note is a general reminder that reappears on ordinary
+    // turns and is irrelevant to a command invocation.
+    if is_slash_command(text) {
+        // trim_start so the slash sits at offset 0 even if the client sent leading whitespace —
+        // the SDK only expands a command that is truly at the message start.
+        return text.trim_start().to_string();
+    }
     format!("{OUTBOX_NOTE}\n\n---\n\n{text}")
 }
 
@@ -207,4 +237,42 @@ pub fn spawn_claude(opts: SpawnOptions, runner: &dyn Runner) -> SpawnHandle {
     let run: Arc<dyn RunHandle> = Arc::from(runner.start(build_spec(&opts)));
     let tailer = EventTailer::new(&opts.log_path, start_offset);
     SpawnHandle::start(run, tailer)
+}
+
+#[cfg(test)]
+mod slash_tests {
+    use super::{compose_user_text, is_slash_command, OUTBOX_NOTE};
+
+    #[test]
+    fn slash_command_turn_drops_outbox_prefix_so_the_slash_leads() {
+        // /lfg must reach the CLI at the very start, or the SDK won't expand it.
+        let out = compose_user_text("/lfg add a CSV export to the orders page");
+        assert!(out.starts_with("/lfg "), "slash must lead: {out:?}");
+        assert!(!out.contains(OUTBOX_NOTE), "no outbox prefix on a command turn");
+        // namespaced form too
+        assert!(compose_user_text("/compound-engineering:lfg do it").starts_with("/compound"));
+        // leading whitespace is trimmed so the slash still lands at offset 0
+        assert!(compose_user_text("  /lfg go").starts_with("/lfg go"));
+    }
+
+    #[test]
+    fn ordinary_turn_keeps_outbox_prefix() {
+        let out = compose_user_text("add a CSV export, please");
+        assert!(out.starts_with(OUTBOX_NOTE));
+        assert!(out.ends_with("add a CSV export, please"));
+    }
+
+    #[test]
+    fn paths_and_prose_are_not_treated_as_commands() {
+        for t in [
+            "/home/user/project/main.rs please review", // path: slash inside the token
+            "/etc/hosts is the file",
+            "no leading slash here",
+            "/Uppercase is not a command",
+            "/ spaced slash",
+        ] {
+            assert!(!is_slash_command(t), "should not be a command: {t:?}");
+            assert!(compose_user_text(t).starts_with(OUTBOX_NOTE), "keeps prefix: {t:?}");
+        }
+    }
 }
