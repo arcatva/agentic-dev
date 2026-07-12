@@ -88,6 +88,17 @@ fn build_config() -> Vec<(String, String)> {
             base = yaml_q(&p.base_url),
             var = var,
         ));
+        // The ChatGPT subscription endpoint needs codex-specific headers (account id, originator,
+        // responses beta). Inject them as litellm `extra_headers`.
+        // ponytail: the codex endpoint is the Responses API, not chat/completions — litellm must be
+        //   pointed at it in responses mode for a live call; the headers + rotating bearer wiring is
+        //   here, verify the wire shape against a live plan when one is available.
+        if crate::engine::openai_oauth::is_subscription_provider(p) {
+            yaml.push_str("      extra_headers:\n");
+            for (hk, hv) in crate::engine::openai_oauth::codex_extra_headers() {
+                yaml.push_str(&format!("        {hk}: {}\n", yaml_q(&hv)));
+            }
+        }
         envs.push((var, key));
     }
     if let Some(parent) = config_path().parent() {

@@ -574,6 +574,72 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
     }
 }
 
+// ── ChatGPT subscription sign-in (OAuth) ──
+// The GPT model joins the delegate routing pool as an openai provider; tokens live in a tightened
+// store (engine::openai_oauth), never in providers.json. The mobile client runs the interactive
+// browser + loopback-redirect capture and posts the resulting authorization code here.
+
+/// POST /api/providers/chatgpt/login/start — begin an OAuth login. Returns the authorize URL (open
+/// it in a browser) and the `state` to echo back on completion.
+pub async fn chatgpt_login_start() -> Response {
+    let (url, state) = crate::engine::openai_oauth::start_login();
+    Json(json!({ "authorize_url": url, "state": state })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChatgptCompleteReq {
+    code: String,
+    state: String,
+}
+
+/// POST /api/providers/chatgpt/login/complete — exchange the captured code for tokens, persist them
+/// (tightened), and register the GPT provider so it appears in the model list + routing pool.
+pub async fn chatgpt_login_complete(body: axum::body::Bytes) -> Response {
+    let req: ChatgptCompleteReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid body: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    // Blocking token exchange — keep the async worker threads free.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::engine::openai_oauth::complete_login(&req.code, &req.state)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/providers/chatgpt/status — connection state for the UI (account/expiry/needs re-login).
+pub async fn chatgpt_status() -> Response {
+    let s = crate::engine::openai_oauth::status();
+    Json(json!({
+        "connected": s.connected,
+        "email": s.email,
+        "account_id": s.account_id,
+        "expires_at": s.expires_at,
+        "needs_relogin": s.needs_relogin,
+    }))
+    .into_response()
+}
+
+/// POST /api/providers/chatgpt/disconnect — sign out and drop the GPT provider.
+pub async fn chatgpt_disconnect() -> Response {
+    crate::engine::openai_oauth::disconnect();
+    Json(json!({ "ok": true })).into_response()
+}
+
 // ── native Claude per-family routing overrides ──
 
 #[derive(serde::Serialize)]
