@@ -449,7 +449,7 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
         cost: p.cost,
         router: p.router,
         enabled: p.enabled,
-        has_key: !p.resolved_key().is_empty(),
+        has_key: !p.effective_key().is_empty(),
     }
 }
 
