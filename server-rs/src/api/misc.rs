@@ -433,6 +433,7 @@ struct ProviderView {
     priority: f32,
     cost: f32,
     router: bool,
+    enabled: bool,
     has_key: bool,
 }
 
@@ -447,6 +448,7 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
         priority: p.priority,
         cost: p.cost,
         router: p.router,
+        enabled: p.enabled,
         has_key: !p.resolved_key().is_empty(),
     }
 }
@@ -589,6 +591,7 @@ struct NativeFamilyView {
     priority: f32,
     cost: f32,
     description: String,
+    enabled: bool,
     customized: bool,
     editable: bool,
 }
@@ -649,16 +652,18 @@ pub async fn native_models_get() -> Response {
         .into_iter()
         .map(|fam| {
             let (dc, dk) = family_default_metrics(fam);
-            let (capability, priority, cost, description, customized) = match overrides.get(fam) {
-                Some(o) => (
-                    o.capability,
-                    o.priority,
-                    o.cost,
-                    o.description.clone(),
-                    true,
-                ),
-                None => (dc, DEFAULT_NATIVE_PRIORITY, dk, String::new(), false),
-            };
+            let (capability, priority, cost, description, enabled, customized) =
+                match overrides.get(fam) {
+                    Some(o) => (
+                        o.capability,
+                        o.priority,
+                        o.cost,
+                        o.description.clone(),
+                        o.enabled,
+                        true,
+                    ),
+                    None => (dc, DEFAULT_NATIVE_PRIORITY, dk, String::new(), true, false),
+                };
             NativeFamilyView {
                 family: fam.to_string(),
                 label: family_label(fam).to_string(),
@@ -667,6 +672,7 @@ pub async fn native_models_get() -> Response {
                 priority,
                 cost,
                 description,
+                enabled,
                 customized,
                 editable: is_editable_family(fam),
             }
@@ -749,6 +755,53 @@ pub async fn native_models_delete(
     }
     match crate::engine::native_overrides::remove(&family) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/routing — the global cost⇄quality tradeoff knob (0=cheapest .. 1=strongest).
+pub async fn routing_get() -> Response {
+    Json(json!({ "tradeoff": crate::engine::routing_config::load().tradeoff })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RoutingReq {
+    tradeoff: f32,
+}
+
+/// POST /api/routing — set the global tradeoff. Rejects NaN; `save` clamps to [0,1]. Responds with
+/// the effective (clamped) value so the client can reflect it.
+pub async fn routing_post(body: axum::body::Bytes) -> Response {
+    let req: RoutingReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid routing config: {e}")})),
+            )
+                .into_response()
+        }
+    };
+    if req.tradeoff.is_nan() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"tradeoff cannot be NaN"})),
+        )
+            .into_response();
+    }
+    let cfg = crate::engine::routing_config::RoutingConfig {
+        tradeoff: req.tradeoff,
+    };
+    match crate::engine::routing_config::save(&cfg) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "tradeoff": crate::engine::routing_config::load().tradeoff
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -1966,6 +2019,70 @@ mod tests {
             _dir: dir,
             _lock: lock,
         }
+    }
+
+    struct RoutingGuard {
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for RoutingGuard {
+        fn drop(&mut self) {
+            *crate::engine::routing_config::ROUTING_FILE_OVERRIDE.lock() = None;
+        }
+    }
+    fn isolated_routing_file() -> RoutingGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        *crate::engine::routing_config::ROUTING_FILE_OVERRIDE.lock() =
+            Some(dir.path().join("routing.json"));
+        RoutingGuard {
+            _dir: dir,
+            _lock: lock,
+        }
+    }
+
+    #[tokio::test]
+    async fn routing_get_post_roundtrip_and_clamp() {
+        let _rc = isolated_routing_file();
+        let st = test_state().await;
+        let get = |st: AppState| async move {
+            oneshot_req(
+                st.clone(),
+                Request::get("/api/routing")
+                    .header("authorization", auth(&st))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        };
+        let post = |st: AppState, body: &'static str| async move {
+            oneshot_req(
+                st.clone(),
+                Request::post("/api/routing")
+                    .header("authorization", auth(&st))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+        };
+        // Default when no file exists.
+        let (s, b) = get(st.clone()).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!((b["tradeoff"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        // In-range round-trips and GET reflects it.
+        let (s, b) = post(st.clone(), r#"{"tradeoff":0.2}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!((b["tradeoff"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+        let (_s, b) = get(st.clone()).await;
+        assert!((b["tradeoff"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+        // Out-of-range is clamped by `save`, and the response echoes the effective value.
+        let (_s, b) = post(st.clone(), r#"{"tradeoff":1.7}"#).await;
+        assert!((b["tradeoff"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+        // A non-numeric tradeoff (JSON can't carry NaN) fails to parse → 400.
+        let (s, _b) = post(st.clone(), r#"{"tradeoff": null}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
