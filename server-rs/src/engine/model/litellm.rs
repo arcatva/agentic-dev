@@ -88,6 +88,26 @@ fn build_config() -> Vec<(String, String)> {
             base = yaml_q(&p.base_url),
             var = var,
         ));
+        // ChatGPT-subscription (OAuth) provider: the codex backend needs three fixed headers on top
+        // of the Bearer (which is the rotating access token injected as `api_key` above). Account id
+        // comes from the JWT claim captured at login.
+        // ponytail: known ceiling — the codex endpoint is the Responses API (POST /responses,
+        // forced-stream), while litellm's openai adaptor posts /chat/completions. The rotating
+        // bearer, headers, model listing and routing are all real; making the final hop hit
+        // /responses needs a litellm build with the codex/responses route (config-only, no code here).
+        if let Some(account) = p.oauth_account() {
+            // Only emit the account-id header when we actually have one — the codex backend 401s on
+            // an empty `ChatGPT-Account-Id`, so a blank id must NOT be sent as a header at all.
+            if let Some(acct_id) = crate::engine::oauth::account_id(account).filter(|s| !s.is_empty())
+            {
+                yaml.push_str(&format!(
+                    "      extra_headers:\n        ChatGPT-Account-Id: {id}\n        originator: {orig}\n        OpenAI-Beta: {beta}\n",
+                    id = yaml_q(&acct_id),
+                    orig = yaml_q("codex_cli_rs"),
+                    beta = yaml_q("responses=experimental"),
+                ));
+            }
+        }
         envs.push((var, key));
     }
     if let Some(parent) = config_path().parent() {
