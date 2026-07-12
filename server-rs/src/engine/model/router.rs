@@ -260,6 +260,100 @@ pub(crate) fn apply_priority(
         .collect()
 }
 
+/// How close (on the MAIN-axis score) two models must be for `priority` to decide between them.
+/// Priority is a BOUNDED near-tie nudge, not an additive term: an additive `β·priority` is not
+/// scale-consistent — capability is weighted by `t` and cost by `1−t`, so a constant weight would
+/// dominate whichever is down-weighted at extreme `t` (at low `t` a fixed β overrides an arbitrarily
+/// large capability gap). A margin instead makes priority decide ONLY among candidates whose main
+/// scores are within `PRIORITY_MARGIN`, so it can never override a meaningful quality/cost gap at
+/// any `t` — a genuine nudge. `0.05` = "within 5% of the top on the [0,1] main axis".
+pub(crate) const PRIORITY_MARGIN: f32 = 0.05;
+
+/// Deterministic final model choice, replacing `apply_priority`. The LLM's `picked` model sets the
+/// difficulty floor `d = capability(picked)` — a committed judgment, self-anchored (see the design
+/// spec §3/§11). Among candidates AT LEAST that capable, the winner maximizes the MAIN score
+///
+///   `M(m) = (1 − t)·(1 − cost_m) + t·capability_m`     (`t`: 0 = cheapest .. 1 = strongest)
+///
+/// with `priority` acting as a bounded tiebreaker among the near-top band (`M ≥ max − PRIORITY_MARGIN`).
+/// If NO candidate clears the floor (shouldn't happen — `picked` is itself a candidate — but guards a
+/// caller that passes a synthetic pick), fall back to the single most-capable candidate. Within the
+/// band the order is: higher priority → higher M → lower cost → higher capability → registered over
+/// native → lower index (stable).
+pub(crate) fn select_model(picked: &Provider, candidates: &[&Provider], t: f32) -> RouteChoice {
+    const EPS: f32 = 1e-4;
+    let d = picked.capability;
+    let mut pool: Vec<&Provider> = candidates
+        .iter()
+        .copied()
+        .filter(|c| c.capability + EPS >= d)
+        .collect();
+    if pool.is_empty() {
+        if let Some(m) = candidates
+            .iter()
+            .copied()
+            .max_by(|a, b| a.capability.total_cmp(&b.capability))
+        {
+            pool.push(m);
+        }
+    }
+    let main = |m: &Provider| (1.0 - t) * (1.0 - m.cost) + t * m.capability;
+    let best_main = pool.iter().map(|m| main(m)).fold(f32::MIN, f32::max);
+    let is_native = crate::engine::providers::is_native;
+    // Only the near-top band competes on priority; everything else is already beaten on M.
+    let best = pool
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, m)| main(m) + PRIORITY_MARGIN + EPS >= best_main)
+        .max_by(|(ia, a), (ib, b)| {
+            a.priority
+                .total_cmp(&b.priority) // higher priority wins the near-tie
+                .then(main(a).total_cmp(&main(b))) // then higher main score
+                .then(b.cost.total_cmp(&a.cost)) // then lower cost
+                .then(a.capability.total_cmp(&b.capability)) // then higher capability
+                .then(is_native(a).cmp(&is_native(b)).reverse()) // registered (false) beats native (true)
+                .then(ib.cmp(ia)) // lower index wins (stable)
+        })
+        .map(|(_, m)| m)
+        .unwrap_or(picked);
+    // Honest reason: name the runner-up by MAIN score and state what decided. If `best` is also the
+    // top-M candidate we print `≥`; if priority pulled a slightly-lower-M model up, we say so — never
+    // a false `>`.
+    let top_other = pool
+        .iter()
+        .copied()
+        .filter(|m| m.name != best.name)
+        .max_by(|a, b| main(a).total_cmp(&main(b)));
+    let reason: String = match top_other {
+        Some(r) if main(best) + EPS >= main(r) => {
+            format!(
+                "floor {:.2}, M {:.2} ≥ {} {:.2}",
+                d,
+                main(best),
+                r.model,
+                main(r)
+            )
+        }
+        Some(r) => format!(
+            "floor {:.2}, priority pick {} over {} (M {:.2}~{:.2})",
+            d,
+            best.model,
+            r.model,
+            main(best),
+            main(r)
+        ),
+        None => format!("floor {:.2}, only candidate", d),
+    }
+    .chars()
+    .take(80)
+    .collect();
+    RouteChoice {
+        model: best.model.clone(),
+        reason,
+    }
+}
+
 /// Real transport: one Anthropic `/v1/messages` call to the router provider; returns the reply text.
 async fn http_ask(router: &Provider, prompt: &str) -> Result<String, String> {
     let key = router.resolved_key();
@@ -479,6 +573,142 @@ mod tests {
                 write: false,
             },
         ]
+    }
+
+    // ── select_model (joint scorer, replaces apply_priority) ──
+
+    #[test]
+    fn select_model_prefers_more_capable_at_equal_cost_priority() {
+        // The tie pathology the redesign fixes: an equally-priced, equally-prioritized, MORE capable
+        // model (deepseek 0.90) must beat the LLM's pick (sonnet-like 0.85). Lexicographic discarded
+        // the above-floor 0.90 vs 0.85 difference; the joint score keeps it.
+        let strong = p(
+            "deepseek",
+            "deepseek-v4-pro",
+            0.90,
+            0.5,
+            0.50,
+            Protocol::Anthropic,
+            "k",
+        );
+        let weak = p(
+            "sonnetlike",
+            "sonnet-ish",
+            0.85,
+            0.5,
+            0.50,
+            Protocol::Anthropic,
+            "k",
+        );
+        let cat = vec![strong, weak.clone()];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        let got = select_model(&weak, &cands, 0.5);
+        assert_eq!(got.model, "deepseek-v4-pro");
+        assert!(got.reason.contains("floor 0.85"), "reason: {}", got.reason);
+    }
+
+    #[test]
+    fn priority_is_a_bounded_near_tie_nudge_not_an_override() {
+        // A leads B by 0.30 on capability at equal cost; B has priority 1. At t=0.5 that lead is
+        // 0.15 on the main axis — WELL outside PRIORITY_MARGIN (0.05) — so B is not even in the
+        // near-tie band and priority cannot pull it up. Strong A wins. (Unlike an additive β term,
+        // this holds because the margin, not a constant weight, bounds priority's reach.)
+        let a = p("a", "a", 0.85, 0.0, 0.50, Protocol::Anthropic, "k");
+        let b = p("b", "b", 0.55, 1.0, 0.50, Protocol::Anthropic, "k");
+        let cat = vec![a, b.clone()];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        // pick = b so the floor (0.55) lets both through; strong A must still win.
+        assert_eq!(select_model(&b, &cands, 0.5).model, "a");
+    }
+
+    #[test]
+    fn priority_decides_within_the_near_tie_band() {
+        // Two models within PRIORITY_MARGIN on the main axis (cap 0.86 vs 0.85, equal cost) → the
+        // higher-priority one wins. This is the "persistent nudge": among near-equals, priority is
+        // decisive; it just cannot override a gap bigger than the margin (see the test above).
+        let hi_pri = p("hipri", "hipri", 0.85, 1.0, 0.50, Protocol::Anthropic, "k");
+        let hi_cap = p("hicap", "hicap", 0.86, 0.0, 0.50, Protocol::Anthropic, "k");
+        let cat = vec![hi_cap, hi_pri.clone()];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        // pick = hi_pri (floor 0.85, both clear). hi_cap leads main by only 0.005 (t=0.5) → in band
+        // → priority breaks it for hi_pri.
+        let got = select_model(&hi_pri, &cands, 0.5);
+        assert_eq!(got.model, "hipri");
+        assert!(
+            got.reason.contains("priority pick"),
+            "reason should name priority as the basis: {}",
+            got.reason
+        );
+    }
+
+    #[test]
+    fn user_live_config_deepseek_beats_native_sonnet() {
+        // Regression for the reported bug: registered deepseek (0.90/prio0/0.50) must beat native
+        // sonnet (0.85/prio0/0.50) when the LLM picked sonnet — the exact live config. Native opus/
+        // fable stay at their default priority 0.5 but are out of the near-tie band on cost/cap.
+        crate::engine::providers::seed_claude_models_for_tests();
+        use crate::engine::native_overrides::{NativeOverride, OverrideMap};
+        let mut ov = OverrideMap::new();
+        ov.insert(
+            "sonnet".into(),
+            NativeOverride {
+                capability: 0.85,
+                priority: 0.0,
+                cost: 0.5,
+                description: String::new(),
+                enabled: true,
+            },
+        );
+        let ds = p(
+            "deepseek",
+            "deepseek-v4-pro",
+            0.90,
+            0.0,
+            0.50,
+            Protocol::Anthropic,
+            "k",
+        );
+        let mut cat = vec![ds];
+        cat.extend(crate::engine::providers::native_claude_candidates(&ov));
+        let cands: Vec<&Provider> = cat.iter().collect();
+        let sonnet = cands
+            .iter()
+            .copied()
+            .find(|c| c.model.contains("sonnet"))
+            .expect("native sonnet present");
+        let got = select_model(sonnet, &cands, 0.5);
+        assert_eq!(got.model, "deepseek-v4-pro", "reason: {}", got.reason);
+    }
+
+    #[test]
+    fn knob_extremes_move_cheaper_to_stronger() {
+        let cheap = p("cheap", "cheap", 0.85, 0.0, 0.20, Protocol::Anthropic, "k");
+        let strong = p(
+            "strong",
+            "strong",
+            0.97,
+            0.0,
+            0.90,
+            Protocol::Anthropic,
+            "k",
+        );
+        let cat = vec![cheap.clone(), strong];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        // pick = cheap → floor 0.85, both clear it. t=0 → cheapest; t=1 → strongest.
+        assert_eq!(select_model(&cheap, &cands, 0.0).model, "cheap");
+        assert_eq!(select_model(&cheap, &cands, 1.0).model, "strong");
+    }
+
+    #[test]
+    fn empty_floor_falls_back_to_most_capable() {
+        // A synthetic pick more capable than every candidate empties the floor → most-capable wins,
+        // so a hard task still runs on the best available model instead of nothing.
+        let a = p("a", "a", 0.50, 0.0, 0.10, Protocol::Anthropic, "k");
+        let b = p("b", "b", 0.70, 0.0, 0.90, Protocol::Anthropic, "k");
+        let phantom = p("x", "x", 0.99, 0.0, 0.50, Protocol::Anthropic, "k");
+        let cat = vec![a, b];
+        let cands: Vec<&Provider> = cat.iter().collect();
+        assert_eq!(select_model(&phantom, &cands, 0.5).model, "b");
     }
 
     #[test]
