@@ -168,6 +168,18 @@ pub fn app(state: AppState) -> Router {
             get(misc::providers_get).post(misc::providers_post),
         )
         .route("/api/providers/{name}", delete(misc::providers_delete))
+        .route(
+            "/api/providers/oauth/chatgpt/start",
+            post(misc::oauth_chatgpt_start),
+        )
+        .route(
+            "/api/providers/oauth/chatgpt/status",
+            get(misc::oauth_chatgpt_status),
+        )
+        .route(
+            "/api/providers/oauth/chatgpt/logout",
+            post(misc::oauth_chatgpt_logout),
+        )
         .route("/api/native-models", get(misc::native_models_get))
         .route(
             "/api/native-models/{family}",

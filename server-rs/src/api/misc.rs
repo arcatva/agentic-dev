@@ -574,6 +574,60 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
     }
 }
 
+// ── ChatGPT subscription OAuth (connect a paid ChatGPT account as a delegate provider) ──
+
+/// POST /api/providers/oauth/chatgpt/start — begin an OAuth login. Generates PKCE + state, binds the
+/// one-shot loopback callback listener on 127.0.0.1:1455, and returns the authorize URL for the
+/// client to open in a browser. The server-side listener finishes the exchange when the browser
+/// redirects back (the fixed redirect_uri is a loopback, so the callback must land on the host).
+pub async fn oauth_chatgpt_start() -> Response {
+    // Any prior in-flight login holds the loopback port; clear it so a retry can bind.
+    crate::engine::oauth::cancel_pending();
+    match crate::engine::oauth::start_login(crate::engine::oauth::DEFAULT_PROVIDER) {
+        Ok(url) => Json(json!({ "authorize_url": url })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/providers/oauth/chatgpt/status — connection status for the UI.
+pub async fn oauth_chatgpt_status() -> Response {
+    use crate::engine::oauth::ConnectionStatus;
+    let (status, email, expires_at) =
+        match crate::engine::oauth::status(crate::engine::oauth::DEFAULT_PROVIDER) {
+            ConnectionStatus::NotConnected => ("not_connected", None, None),
+            ConnectionStatus::Pending => ("pending", None, None),
+            ConnectionStatus::NeedsReauth => ("needs_reauth", None, None),
+            ConnectionStatus::Connected {
+                account_email,
+                expires_at,
+            } => ("connected", account_email, Some(expires_at)),
+        };
+    Json(json!({
+        "status": status,
+        "account_email": email,
+        "expires_at": expires_at,
+    }))
+    .into_response()
+}
+
+/// POST /api/providers/oauth/chatgpt/logout — disconnect: drop the token + the provider.
+pub async fn oauth_chatgpt_logout() -> Response {
+    crate::engine::oauth::cancel_pending();
+    // Only drop the provider if we actually had a subscription token under that name — never delete a
+    // user's own BYOK provider that merely happens to share the default name.
+    let had_token =
+        crate::engine::oauth::remove_token(crate::engine::oauth::DEFAULT_PROVIDER).unwrap_or(false);
+    if had_token {
+        let _ = crate::engine::providers::remove(crate::engine::oauth::DEFAULT_PROVIDER);
+    }
+    crate::engine::litellm::request_reload();
+    Json(json!({ "ok": true })).into_response()
+}
+
 // ── native Claude per-family routing overrides ──
 
 #[derive(serde::Serialize)]
