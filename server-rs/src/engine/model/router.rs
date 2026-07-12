@@ -478,6 +478,7 @@ mod tests {
             cost,
             router: false,
             enabled: true,
+            chatgpt_oauth: false,
         }
     }
 

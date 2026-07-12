@@ -192,6 +192,9 @@ async fn main() {
     // Start the LiteLLM proxy sidecar so openai-protocol providers can run as delegate workers
     // (translates Anthropic↔OpenAI). No-op when litellm isn't installed.
     crate::engine::litellm::start_supervisor();
+    // Resume refreshing the ChatGPT-subscription OAuth token if one was persisted before restart.
+    // No-op (self-stops) when no token store exists.
+    crate::engine::chatgpt_oauth::spawn_refresher();
     let engine = Arc::new(engine);
     let engine_shutdown = engine.clone();
     let addr = format!("{}:{}", config.host, config.port);

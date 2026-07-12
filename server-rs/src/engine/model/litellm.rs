@@ -68,28 +68,7 @@ fn yaml_q(s: &str) -> String {
 /// in the file. Empty result = no usable openai providers.
 fn build_config() -> Vec<(String, String)> {
     let reg = ProviderRegistry::load();
-    let mut yaml = String::from("model_list:\n");
-    let mut envs: Vec<(String, String)> = Vec::new();
-    for p in reg.providers.iter() {
-        if !matches!(p.protocol, Protocol::Openai) {
-            continue;
-        }
-        let key = p.resolved_key();
-        if key.is_empty() {
-            continue;
-        }
-        let var = format!("AGENTIC_LITELLM_KEY_{}", envs.len());
-        // model_name == the provider's model id (what the worker spawns with). litellm calls
-        // `openai/<model>` at `api_base`, i.e. POST <api_base>/chat/completions.
-        yaml.push_str(&format!(
-            "  - model_name: {name}\n    litellm_params:\n      model: {model}\n      api_base: {base}\n      api_key: os.environ/{var}\n",
-            name = yaml_q(&p.model),
-            model = yaml_q(&format!("openai/{}", p.model)),
-            base = yaml_q(&p.base_url),
-            var = var,
-        ));
-        envs.push((var, key));
-    }
+    let (yaml, envs) = generate_config(&reg, crate::engine::chatgpt_oauth::is_connected());
     if let Some(parent) = config_path().parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::error!("[litellm] create config dir {:?} failed: {e}", parent);
@@ -108,6 +87,73 @@ fn build_config() -> Vec<(String, String)> {
         }
     }
     envs
+}
+
+/// Pure config generation: turn the provider registry into the litellm YAML + the `(env_var, value)`
+/// pairs to inject into the proxy process. No filesystem writes, so it's unit-testable. Secrets go
+/// in the env pairs (referenced via `os.environ/...`), never in the returned YAML.
+fn generate_config(
+    reg: &ProviderRegistry,
+    chatgpt_connected: bool,
+) -> (String, Vec<(String, String)>) {
+    let mut yaml = String::from("model_list:\n");
+    let mut envs: Vec<(String, String)> = Vec::new();
+    for p in reg.providers.iter() {
+        if !matches!(p.protocol, Protocol::Openai) {
+            continue;
+        }
+        // ChatGPT-subscription provider: no static api_key — LiteLLM's `chatgpt/` provider reads
+        // the OAuth token from the auth file we maintain, translates Anthropic→Responses, and adds
+        // the required ChatGPT headers. Emit a `chatgpt/<model>` stanza and point the proxy at our
+        // auth file via env; skip it (like a keyless openai provider) until a token exists.
+        if p.chatgpt_oauth {
+            if !chatgpt_connected {
+                tracing::info!("[litellm] chatgpt provider present but not logged in yet; skipping");
+                continue;
+            }
+            yaml.push_str(&format!(
+                "  - model_name: {name}\n    model_info:\n      mode: responses\n    litellm_params:\n      model: {model}\n",
+                name = yaml_q(&p.model),
+                model = yaml_q(&format!("chatgpt/{}", p.model)),
+            ));
+            let auth = crate::engine::chatgpt_oauth::auth_file_path();
+            let dir = auth
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let file = auth
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "chatgpt-auth.json".to_string());
+            envs.push(("CHATGPT_TOKEN_DIR".to_string(), dir));
+            envs.push(("CHATGPT_AUTH_FILE".to_string(), file));
+            envs.push((
+                "CHATGPT_API_BASE".to_string(),
+                crate::engine::chatgpt_oauth::CHATGPT_API_BASE.to_string(),
+            ));
+            envs.push((
+                "CHATGPT_ORIGINATOR".to_string(),
+                crate::engine::chatgpt_oauth::CHATGPT_ORIGINATOR.to_string(),
+            ));
+            continue;
+        }
+        let key = p.resolved_key();
+        if key.is_empty() {
+            continue;
+        }
+        let var = format!("AGENTIC_LITELLM_KEY_{}", envs.len());
+        // model_name == the provider's model id (what the worker spawns with). litellm calls
+        // `openai/<model>` at `api_base`, i.e. POST <api_base>/chat/completions.
+        yaml.push_str(&format!(
+            "  - model_name: {name}\n    litellm_params:\n      model: {model}\n      api_base: {base}\n      api_key: os.environ/{var}\n",
+            name = yaml_q(&p.model),
+            model = yaml_q(&format!("openai/{}", p.model)),
+            base = yaml_q(&p.base_url),
+            var = var,
+        ));
+        envs.push((var, key));
+    }
+    (yaml, envs)
 }
 
 static RELOAD: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
@@ -211,5 +257,51 @@ mod tests {
     #[test]
     fn proxy_base_url_uses_port() {
         assert!(proxy_base_url().starts_with("http://127.0.0.1:"));
+    }
+
+    fn provider(name: &str, model: &str, proto: Protocol, key: &str, chatgpt: bool) -> crate::engine::providers::Provider {
+        crate::engine::providers::Provider {
+            name: name.into(),
+            base_url: if chatgpt { crate::engine::chatgpt_oauth::CHATGPT_API_BASE.into() } else { "https://api.example.com/v1".into() },
+            api_key: key.into(),
+            api_key_env: None,
+            model: model.into(),
+            protocol: proto,
+            capability: 0.5,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: false,
+            enabled: true,
+            chatgpt_oauth: chatgpt,
+        }
+    }
+
+    #[test]
+    fn generate_config_emits_chatgpt_stanza_when_connected() {
+        let reg = ProviderRegistry {
+            providers: vec![
+                provider("openaiprov", "some-model", Protocol::Openai, "sk-real", false),
+                provider("chatgpt", "gpt-5", Protocol::Openai, "", true),
+            ],
+        };
+        // connected → chatgpt stanza present with responses mode + CHATGPT_* env, no baked key for it
+        let (yaml, envs) = generate_config(&reg, true);
+        assert!(yaml.contains("chatgpt/gpt-5"), "yaml: {yaml}");
+        assert!(yaml.contains("mode: responses"));
+        assert!(envs.iter().any(|(k, _)| k == "CHATGPT_AUTH_FILE"));
+        assert!(envs.iter().any(|(k, _)| k == "CHATGPT_API_BASE"));
+        // the ordinary openai provider still bakes a key env + openai/ stanza (regression)
+        assert!(yaml.contains("openai/some-model"));
+        assert!(envs.iter().any(|(k, v)| k.starts_with("AGENTIC_LITELLM_KEY_") && v == "sk-real"));
+        // the chatgpt access token is never written into the yaml
+        assert!(!yaml.contains("CHATGPT_AUTH_FILE"));
+
+        // not connected → chatgpt stanza absent, no CHATGPT_* env
+        let (yaml2, envs2) = generate_config(&reg, false);
+        assert!(!yaml2.contains("chatgpt/gpt-5"));
+        assert!(!envs2.iter().any(|(k, _)| k.starts_with("CHATGPT_")));
+        // openai provider unaffected
+        assert!(yaml2.contains("openai/some-model"));
     }
 }

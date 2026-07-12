@@ -84,6 +84,12 @@ pub struct Provider {
     /// user's key routing). Defaults `true` (old files / unspecified).
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Marks the ChatGPT-subscription provider. Its bearer is NOT stored here (only this marker
+    /// lives in the human-editable providers file) — the OAuth token is persisted separately by
+    /// `chatgpt_oauth` and read by the LiteLLM `chatgpt/` provider. `build_config` emits a
+    /// `chatgpt/<model>` stanza for it even though `api_key` is empty. Defaults false (old files).
+    #[serde(default)]
+    pub chatgpt_oauth: bool,
 }
 
 impl Provider {
@@ -180,6 +186,7 @@ impl ProviderRegistry {
                 cost: 0.3,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             });
         }
         if let Ok(k) = std::env::var("DEEPSEEK_API_KEY") {
@@ -197,6 +204,7 @@ impl ProviderRegistry {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             });
         }
         Self { providers }
@@ -495,6 +503,7 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
             cost,
             router: false,
             enabled,
+            chatgpt_oauth: false,
         });
     }
     out
@@ -849,6 +858,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    chatgpt_oauth: false,
                 },
                 Provider {
                     name: "deepseek".into(),
@@ -863,6 +873,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    chatgpt_oauth: false,
                 },
                 Provider {
                     name: "opus".into(),
@@ -877,6 +888,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    chatgpt_oauth: false,
                 },
             ],
         }
@@ -958,6 +970,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            chatgpt_oauth: false,
         };
         let native = native_claude_candidates(&Default::default());
         // candidate order mirrors run_delegate: registered FIRST, then native.
@@ -1058,6 +1071,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            chatgpt_oauth: false,
         };
         assert!(load_list_from(&f).unwrap().is_empty());
         upsert_at(&f, mk("minimax", "MiniMax-M3")).unwrap();
@@ -1109,6 +1123,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            chatgpt_oauth: false,
         };
         // seed with a real key
         upsert_at(&f, mk("secret-key", "MiniMax-M3", 0.5)).unwrap();
@@ -1150,6 +1165,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             },
         )
         .unwrap();
@@ -1192,6 +1208,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             },
         )
         .unwrap();
@@ -1215,6 +1232,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             }
         )
         .is_err());

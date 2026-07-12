@@ -694,7 +694,7 @@ pub(crate) mod workflow;
 pub use config::{global_settings, session_guide, templates, user_config};
 pub use extensions::{components, plugin_cli, plugins, skill_install, skills};
 pub use misc::{classify_error, mentions, push, search};
-pub use model::{litellm, native_overrides, providers, router, routing_config};
+pub use model::{chatgpt_oauth, litellm, native_overrides, providers, router, routing_config};
 pub use persistence::{atomic_write, store};
 pub use runtime::{runner, sdk_runner, spawner};
 pub use session::{auto_resume, groups, lifecycle, status, transition};
