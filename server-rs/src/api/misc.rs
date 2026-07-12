@@ -866,6 +866,9 @@ pub async fn mcp_add_route(State(st): State<AppState>, body: axum::body::Bytes) 
         )
             .into_response();
     }
+    if let Err(e) = crate::api::validation::validate_mcp_def(&def) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
     let base = st.config.claude_config_base.clone();
     let skills = st.config.skills_dir.clone();
     match crate::engine::user_config::add_mcp_server(&base, &def) {
@@ -1118,6 +1121,21 @@ pub struct AddPluginBody {
     pub id: String,
 }
 
+/// CLI-reported failures (nonzero exit: unknown plugin/marketplace…) are the caller's
+/// error → 400; spawn/timeout/join failures are ours → 500. Prefixes match the exact
+/// error formats of `plugin_cli::run_plugin_command` plus this file's spawn_blocking wrapper.
+fn plugin_error_status(e: &str) -> StatusCode {
+    if e.starts_with("failed to spawn")
+        || e.starts_with("process error")
+        || e.starts_with("task error")
+        || e.starts_with("plugin command timed out")
+    {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
 pub async fn plugins_add_route(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
     let b: AddPluginBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -1150,7 +1168,7 @@ pub async fn plugins_add_route(State(st): State<AppState>, body: axum::body::Byt
             &skills,
         ))
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+        Err(e) => (plugin_error_status(&e), Json(json!({"error": e}))).into_response(),
     }
 }
 
@@ -1180,7 +1198,7 @@ pub async fn plugins_delete_route(
             &skills,
         ))
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+        Err(e) => (plugin_error_status(&e), Json(json!({"error": e}))).into_response(),
     }
 }
 
@@ -1754,6 +1772,156 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(b["error"].as_str().is_some());
+    }
+
+    async fn post_json(
+        st: &crate::api::state::AppState,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        oneshot_req(
+            st.clone(),
+            Request::post(path)
+                .header("authorization", auth(st))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn mcp_add_rejects_incomplete_defs() {
+        let st = test_state().await;
+        for (body, want) in [
+            (r#"{"name":"x"}"#, "command"),
+            (r#"{"name":"x","command":"  "}"#, "command"),
+            (r#"{"name":"x","type":"stdio"}"#, "command"),
+            (r#"{"name":"x","type":"http"}"#, "url"),
+            (r#"{"name":"x","type":"http","url":"ftp://e.com"}"#, "url"),
+            (r#"{"name":"x","type":"sse","url":"https://"}"#, "url"),
+            (r#"{"name":"x","type":"ws","url":"https://e.com"}"#, "type"),
+            (r#"{"name":"x","command":"c","url":"https://e.com"}"#, "both"),
+            (
+                r#"{"name":"x","type":"http","command":"c","url":"https://e.com"}"#,
+                "command",
+            ),
+        ] {
+            let (s, b) = post_json(&st, "/api/mcp-servers", body).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "body: {body}");
+            assert!(
+                b["error"].as_str().unwrap().contains(want),
+                "{body} -> {b}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_add_http_round_trip() {
+        let st = test_state().await;
+        let (s, _) = post_json(
+            &st,
+            "/api/mcp-servers",
+            r#"{"name":"e2e-http","type":"http","url":"https://example.com/mcp"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let cj = st
+            .config
+            .claude_config_base
+            .parent()
+            .unwrap()
+            .join(".claude.json");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cj).unwrap()).unwrap();
+        assert_eq!(saved["mcpServers"]["e2e-http"]["type"], "http");
+        assert_eq!(
+            saved["mcpServers"]["e2e-http"]["url"],
+            "https://example.com/mcp"
+        );
+        let (s2, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/mcp-servers/e2e-http")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK);
+        // url without "type" is accepted and persists with the default type "http".
+        let (s3, _) = post_json(
+            &st,
+            "/api/mcp-servers",
+            r#"{"name":"e2e-default","url":"https://example.com/mcp"}"#,
+        )
+        .await;
+        assert_eq!(s3, StatusCode::OK);
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cj).unwrap()).unwrap();
+        assert_eq!(saved["mcpServers"]["e2e-default"]["type"], "http");
+    }
+
+    #[tokio::test]
+    async fn skill_sources_crud_round_trip() {
+        let st = test_state().await;
+        let tok = auth(&st);
+        // Default seed present.
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/skills/sources")
+                .header("authorization", tok.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["sources"], serde_json::json!(["anthropics/skills"]));
+        // Add.
+        let (s, b) = post_json(&st, "/api/skills/sources", r#"{"source":"octocat/Hello-World"}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["sources"].as_array().unwrap().len(), 2);
+        // Duplicate (trailing-slash variant) is deduped, not appended.
+        let (s, b) = post_json(&st, "/api/skills/sources", r#"{"source":"octocat/Hello-World/"}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["sources"].as_array().unwrap().len(), 2);
+        // Bad syntax → 400.
+        let (s, _) = post_json(&st, "/api/skills/sources", r#"{"source":"not a source"}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // Remove.
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/skills/sources?source=octocat%2FHello-World")
+                .header("authorization", tok.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["sources"], serde_json::json!(["anthropics/skills"]));
+        // Remove unknown → 404.
+        let (s, _) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/skills/sources?source=never%2Fadded")
+                .header("authorization", tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn skills_install_rejects_bad_source_before_network() {
+        let st = test_state().await;
+        for body in [
+            r#"{"source":"not a source"}"#,
+            r#"{"source":""}"#,
+            r#"{"source":"https://gitlab.com/x/y"}"#,
+        ] {
+            let (s, b) = post_json(&st, "/api/skills/install", body).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "body: {body}");
+            assert!(b["error"].as_str().is_some());
+        }
     }
 
     struct NativeOvGuard {
