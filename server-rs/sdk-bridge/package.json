@@ -13,7 +13,7 @@
     "lint": "eslint sdk-bridge.mjs"
   },
   "devDependencies": {
-    "eslint": "^9.39.0",
+    "eslint": "^10.7.0",
     "@eslint/js": "^9.39.0",
     "globals": "^16.0.0"
   }
