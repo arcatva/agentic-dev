@@ -52,7 +52,7 @@ process.stderr.on("data", (chunk) => {
   if (!STDERR_PATH) return;
   try {
     // Best-effort append; failures here are non-fatal (the parent will see a partial tail at most).
-    require("node:fs").appendFileSync(STDERR_PATH, chunk);
+    appendFileSync(STDERR_PATH, chunk);
   } catch (e) {
     process.stderr.write(`evt=sdk_bridge_stderr_append_failed path=${STDERR_PATH} error=${e.message}\n`);
   }
