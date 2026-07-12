@@ -1,5 +1,6 @@
 mod login;
 pub(crate) mod misc;
+pub(crate) mod oauth;
 mod sessions;
 pub mod stream;
 #[cfg(test)]
@@ -168,6 +169,8 @@ pub fn app(state: AppState) -> Router {
             get(misc::providers_get).post(misc::providers_post),
         )
         .route("/api/providers/{name}", delete(misc::providers_delete))
+        .route("/api/oauth/openai/start", post(oauth::oauth_start))
+        .route("/api/oauth/openai/complete", post(oauth::oauth_complete))
         .route("/api/native-models", get(misc::native_models_get))
         .route(
             "/api/native-models/{family}",
@@ -368,6 +371,7 @@ mod tests {
             usage_cache: Arc::new(Mutex::new(crate::api::state::UsageCache::default())),
             usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
             usage_fn: None,
+            oauth_fn: None,
         }
     }
 

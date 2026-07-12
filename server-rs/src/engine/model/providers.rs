@@ -84,11 +84,23 @@ pub struct Provider {
     /// user's key routing). Defaults `true` (old files / unspecified).
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// This (openai-protocol) provider authenticates with a ChatGPT-subscription OAuth token sourced
+    /// from the oauth store ([`crate::engine::oauth`]), NOT from `api_key`/`api_key_env`. The token
+    /// never lands in this file. Default `false` so old `providers.json` files load unchanged.
+    #[serde(default)]
+    pub oauth: bool,
 }
 
 impl Provider {
-    /// The effective API key: the literal if set, else read from `api_key_env`, else empty.
+    /// The effective API key: for an oauth provider, the live ChatGPT access token from the oauth
+    /// store (empty when disconnected / needs re-auth); otherwise the literal `api_key`, else the
+    /// `api_key_env` var, else empty. Routing every eligibility gate through this one method is what
+    /// makes an oauth provider behave like any keyed openai provider (build_config, delegate router,
+    /// proxy start) without per-site changes.
     pub fn resolved_key(&self) -> String {
+        if self.oauth {
+            return crate::engine::oauth::current_access_token();
+        }
         self.resolved_key_with(|e| std::env::var(e).ok())
     }
 
@@ -180,6 +192,7 @@ impl ProviderRegistry {
                 cost: 0.3,
                 router: false,
                 enabled: true,
+                oauth: false,
             });
         }
         if let Ok(k) = std::env::var("DEEPSEEK_API_KEY") {
@@ -197,6 +210,7 @@ impl ProviderRegistry {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                oauth: false,
             });
         }
         Self { providers }
@@ -495,6 +509,7 @@ fn candidates_from(models: &[ClaudeModel], overrides: &OverrideMap) -> Vec<Provi
             cost,
             router: false,
             enabled,
+            oauth: false,
         });
     }
     out
@@ -849,6 +864,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    oauth: false,
                 },
                 Provider {
                     name: "deepseek".into(),
@@ -863,6 +879,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    oauth: false,
                 },
                 Provider {
                     name: "opus".into(),
@@ -877,6 +894,7 @@ mod tests {
                     cost: 0.5,
                     router: false,
                     enabled: true,
+                    oauth: false,
                 },
             ],
         }
@@ -958,6 +976,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            oauth: false,
         };
         let native = native_claude_candidates(&Default::default());
         // candidate order mirrors run_delegate: registered FIRST, then native.
@@ -1034,6 +1053,50 @@ mod tests {
     }
 
     #[test]
+    fn oauth_provider_resolves_key_from_store() {
+        use crate::engine::oauth;
+        let _guard = oauth::STORE_TEST_LOCK.lock();
+        let dir = tempfile::tempdir().unwrap();
+        *oauth::STORE_OVERRIDE.lock() = Some(dir.path().join("openai.json"));
+
+        let p = Provider {
+            name: "ChatGPT".into(),
+            base_url: oauth::API_BASE.into(),
+            api_key: String::new(),
+            api_key_env: None,
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.7,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: true,
+            enabled: true,
+            oauth: true,
+        };
+
+        // connected → resolved_key sources the live access token from the oauth store
+        oauth::save(&oauth::TokenStore {
+            access_token: "AT_LIVE".into(),
+            refresh_token: "RT".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(p.resolved_key(), "AT_LIVE");
+
+        // needs_reauth → keyless (drops out of routing rather than serving a dead bearer)
+        oauth::save(&oauth::TokenStore {
+            access_token: "AT_LIVE".into(),
+            needs_reauth: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(p.resolved_key(), "");
+
+        *oauth::STORE_OVERRIDE.lock() = None;
+    }
+
+    #[test]
     fn crud_roundtrip_on_a_file() {
         let dir = std::env::temp_dir().join(format!(
             "agentic-crud-{}-{}",
@@ -1058,6 +1121,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            oauth: false,
         };
         assert!(load_list_from(&f).unwrap().is_empty());
         upsert_at(&f, mk("minimax", "MiniMax-M3")).unwrap();
@@ -1109,6 +1173,7 @@ mod tests {
             cost: 0.5,
             router: false,
             enabled: true,
+            oauth: false,
         };
         // seed with a real key
         upsert_at(&f, mk("secret-key", "MiniMax-M3", 0.5)).unwrap();
@@ -1150,6 +1215,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                oauth: false,
             },
         )
         .unwrap();
@@ -1192,6 +1258,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                oauth: false,
             },
         )
         .unwrap();
@@ -1215,6 +1282,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                oauth: false,
             }
         )
         .is_err());

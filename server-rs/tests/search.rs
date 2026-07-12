@@ -95,6 +95,7 @@ async fn make_state() -> AppState {
         )),
         usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
+        oauth_fn: None,
     }
 }
 

@@ -63,11 +63,10 @@ fn yaml_q(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Generate the litellm config from the openai-protocol providers. Returns the `(env_var, key)` pairs
-/// to inject into the proxy process — the keys go in the ENV (referenced via `os.environ/...`), never
-/// in the file. Empty result = no usable openai providers.
-fn build_config() -> Vec<(String, String)> {
-    let reg = ProviderRegistry::load();
+/// Render the litellm `model_list` YAML + the `(env_var, key)` pairs from a registry. Pure (no disk),
+/// so it is unit-testable with an injected registry. Only openai-protocol providers with a resolved
+/// key are emitted (an oauth provider's key is its live access token — empty when disconnected).
+fn render_config(reg: &ProviderRegistry) -> (String, Vec<(String, String)>) {
     let mut yaml = String::from("model_list:\n");
     let mut envs: Vec<(String, String)> = Vec::new();
     for p in reg.providers.iter() {
@@ -88,8 +87,34 @@ fn build_config() -> Vec<(String, String)> {
             base = yaml_q(&p.base_url),
             var = var,
         ));
+        // ChatGPT-subscription OAuth provider: the api_base is the codex backend. Keeping the litellm
+        // provider as `openai/` (not `chatgpt/`) is deliberate — only the "openai" provider takes the
+        // Anthropic-messages → Responses-API path (litellm hardcodes that whitelist), which POSTs to
+        // <api_base>/responses (the endpoint ChatGPT subscriptions actually accept). These extra_headers
+        // supply the codex identity the responses call requires; the rotating bearer rides in `api_key`.
+        if p.oauth {
+            yaml.push_str("      extra_headers:\n");
+            yaml.push_str("        originator: \"codex_cli_rs\"\n");
+            yaml.push_str("        OpenAI-Beta: \"responses=experimental\"\n");
+            let account = crate::engine::oauth::account_id();
+            if !account.is_empty() {
+                yaml.push_str(&format!(
+                    "        ChatGPT-Account-Id: {}\n",
+                    yaml_q(&account)
+                ));
+            }
+        }
         envs.push((var, key));
     }
+    (yaml, envs)
+}
+
+/// Generate the litellm config from the openai-protocol providers. Returns the `(env_var, key)` pairs
+/// to inject into the proxy process — the keys go in the ENV (referenced via `os.environ/...`), never
+/// in the file. Empty result = no usable openai providers.
+fn build_config() -> Vec<(String, String)> {
+    let reg = ProviderRegistry::load();
+    let (yaml, envs) = render_config(&reg);
     if let Some(parent) = config_path().parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::error!("[litellm] create config dir {:?} failed: {e}", parent);
@@ -211,5 +236,97 @@ mod tests {
     #[test]
     fn proxy_base_url_uses_port() {
         assert!(proxy_base_url().starts_with("http://127.0.0.1:"));
+    }
+
+    use crate::engine::providers::{Protocol, Provider, ProviderRegistry};
+
+    fn mk(name: &str, model: &str, proto: Protocol, key: &str, oauth: bool) -> Provider {
+        Provider {
+            name: name.into(),
+            base_url: if oauth { crate::engine::oauth::API_BASE.into() } else { "https://x/v1".into() },
+            api_key: key.into(),
+            api_key_env: None,
+            model: model.into(),
+            protocol: proto,
+            capability: 0.6,
+            description: None,
+            priority: 0.5,
+            cost: 0.5,
+            router: false,
+            enabled: true,
+            oauth,
+        }
+    }
+
+    #[test]
+    fn render_config_emits_openai_entries_and_skips_keyless() {
+        let reg = ProviderRegistry {
+            providers: vec![
+                mk("anthropic-one", "claude-x", Protocol::Anthropic, "k", false), // skipped: not openai
+                mk("openai-one", "deepseek-chat", Protocol::Openai, "sk-1", false),
+                mk("openai-nokey", "gpt-nokey", Protocol::Openai, "", false), // skipped: empty key
+            ],
+        };
+        let (yaml, envs) = render_config(&reg);
+        assert!(yaml.contains("model_name: \"deepseek-chat\""));
+        assert!(yaml.contains("model: \"openai/deepseek-chat\""));
+        assert!(!yaml.contains("claude-x"), "anthropic provider must not appear");
+        assert!(!yaml.contains("gpt-nokey"), "keyless provider must not appear");
+        assert!(!yaml.contains("extra_headers"), "non-oauth provider has no extra_headers");
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].1, "sk-1");
+    }
+
+    #[test]
+    fn render_config_oauth_provider_emits_codex_responses_headers() {
+        use crate::engine::oauth;
+        let _guard = oauth::STORE_TEST_LOCK.lock();
+        let dir = tempfile::tempdir().unwrap();
+        *oauth::STORE_OVERRIDE.lock() = Some(dir.path().join("openai.json"));
+        oauth::save(&oauth::TokenStore {
+            access_token: "AT_BEARER".into(),
+            refresh_token: "RT".into(),
+            account_id: "acct_777".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let reg = ProviderRegistry {
+            providers: vec![mk("ChatGPT", "gpt-5", Protocol::Openai, "", true)],
+        };
+        let (yaml, envs) = render_config(&reg);
+
+        // routed as openai/ (so litellm takes the Responses-API path to <api_base>/responses)
+        assert!(yaml.contains("model: \"openai/gpt-5\""));
+        assert!(yaml.contains(&format!("api_base: \"{}\"", oauth::API_BASE)));
+        // codex identity headers present AND correctly nested: extra_headers is a sibling of
+        // api_key (6-space indent under litellm_params), its entries at 8 spaces. Pinning the exact
+        // indentation guards the YAML structure (a stray indent would make litellm ignore the headers).
+        assert!(yaml.contains(
+            "      api_key: os.environ/AGENTIC_LITELLM_KEY_0\n      extra_headers:\n        originator: \"codex_cli_rs\"\n        OpenAI-Beta: \"responses=experimental\"\n        ChatGPT-Account-Id: \"acct_777\"\n"
+        ), "extra_headers must nest under litellm_params as a sibling of api_key:\n{yaml}");
+        // the rotating bearer is injected via env, never written to the file
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].1, "AT_BEARER");
+        assert!(!yaml.contains("AT_BEARER"), "token must not land in the config file");
+        assert!(yaml.contains("api_key: os.environ/"));
+
+        *oauth::STORE_OVERRIDE.lock() = None;
+    }
+
+    #[test]
+    fn render_config_oauth_disconnected_is_skipped() {
+        use crate::engine::oauth;
+        let _guard = oauth::STORE_TEST_LOCK.lock();
+        let dir = tempfile::tempdir().unwrap();
+        // point at an empty store dir → no token → resolved_key empty → skipped
+        *oauth::STORE_OVERRIDE.lock() = Some(dir.path().join("openai.json"));
+        let reg = ProviderRegistry {
+            providers: vec![mk("ChatGPT", "gpt-5", Protocol::Openai, "", true)],
+        };
+        let (yaml, envs) = render_config(&reg);
+        assert!(envs.is_empty());
+        assert!(!yaml.contains("gpt-5"));
+        *oauth::STORE_OVERRIDE.lock() = None;
     }
 }

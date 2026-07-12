@@ -204,7 +204,11 @@ async fn main() {
         usage_cache: Arc::new(Mutex::new(state::UsageCache::default())),
         usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
+        oauth_fn: None,
     };
+    // Keep the ChatGPT-subscription access token fresh (rotates the litellm bearer). No-op until a
+    // user connects. Started after the litellm supervisor so a refresh can trigger a proxy reload.
+    crate::engine::oauth::spawn_refresher();
     let make_service =
         api::app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let tls_mode = TlsMode::from_config(&config);

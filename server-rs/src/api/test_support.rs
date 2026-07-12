@@ -95,6 +95,7 @@ pub async fn test_state() -> AppState {
         usage_cache: Arc::new(Mutex::new(crate::api::state::UsageCache::default())),
         usage_inflight: Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
+        oauth_fn: None,
     }
 }
 

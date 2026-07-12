@@ -435,9 +435,31 @@ struct ProviderView {
     router: bool,
     enabled: bool,
     has_key: bool,
+    /// True when this provider is authenticated via ChatGPT-subscription OAuth (no BYOK key).
+    oauth: bool,
+    /// ChatGPT account id, populated for a connected oauth provider (non-secret).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    /// Access-token expiry (epoch seconds), for oauth providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
+    /// True when the refresh token is dead and the user must log in again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    needs_reauth: bool,
 }
 
 fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
+    // Surface non-secret OAuth status (account / expiry / needs-reauth) for the connect UI.
+    let (account_id, expires_at, needs_reauth) = if p.oauth {
+        let s = crate::engine::oauth::status();
+        (
+            (!s.account_id.is_empty()).then_some(s.account_id),
+            Some(s.expires_at),
+            s.needs_reauth,
+        )
+    } else {
+        (None, None, false)
+    };
     ProviderView {
         name: p.name.clone(),
         base_url: p.base_url.clone(),
@@ -450,6 +472,10 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
         router: p.router,
         enabled: p.enabled,
         has_key: !p.resolved_key().is_empty(),
+        oauth: p.oauth,
+        account_id,
+        expires_at,
+        needs_reauth,
     }
 }
 
@@ -556,8 +582,16 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
 
 /// DELETE /api/providers/{name} — remove a provider.
 pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    // Disconnecting an oauth provider must also wipe its token store (else the refresher keeps a dead
+    // token around and the next connect can't tell it apart from a fresh one).
+    let was_oauth = crate::engine::providers::load_list()
+        .iter()
+        .any(|p| p.name.eq_ignore_ascii_case(&name) && p.oauth);
     match crate::engine::providers::remove(&name) {
         Ok(true) => {
+            if was_oauth {
+                crate::engine::oauth::disconnect();
+            }
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
@@ -1287,6 +1321,7 @@ mod tests {
             cost: 0.3,
             router: false,
             enabled: true,
+            oauth: false,
         };
         let json = serde_json::to_string(&provider_view(&p)).unwrap();
         assert!(
@@ -1350,6 +1385,7 @@ mod tests {
                 cost: 0.3,
                 router: false,
                 enabled: true,
+                oauth: false,
             },
         )
         .unwrap();
@@ -1390,6 +1426,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                oauth: false,
             },
         )
         .unwrap();
