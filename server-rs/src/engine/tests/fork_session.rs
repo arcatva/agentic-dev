@@ -309,7 +309,7 @@ async fn fork_first_followup_delivers_seed_context_to_claude() {
     );
 
     // The text actually written to claude includes BOTH the seed and the user's message.
-    let claude_text = compose_turn_text(&pushed);
+    let claude_text = compose_turn_text_with(&pushed, &pushed.prompt);
     assert!(
         claude_text.contains("USER: build a parser"),
         "claude must receive the forked context: {claude_text}"
