@@ -2,6 +2,7 @@ mod login;
 pub(crate) mod misc;
 mod sessions;
 pub mod stream;
+pub(crate) mod subscription;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod validation;
@@ -166,6 +167,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/providers",
             get(misc::providers_get).post(misc::providers_post),
+        )
+        .route(
+            "/api/providers/openai-subscription/login",
+            post(subscription::login_start),
+        )
+        .route(
+            "/api/providers/openai-subscription/status",
+            get(subscription::status),
+        )
+        .route(
+            "/api/providers/openai-subscription/logout",
+            post(subscription::logout),
         )
         .route("/api/providers/{name}", delete(misc::providers_delete))
         .route("/api/native-models", get(misc::native_models_get))
