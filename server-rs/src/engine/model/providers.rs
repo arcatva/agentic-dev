@@ -689,6 +689,39 @@ mod tests {
     }
 
     #[test]
+    fn disabled_native_family_yields_disabled_candidate() {
+        use crate::engine::native_overrides::{NativeOverride, OverrideMap};
+        let models = vec![
+            ClaudeModel {
+                id: "claude-sonnet-4-6".into(),
+                display_name: "S".into(),
+            },
+            ClaudeModel {
+                id: "claude-opus-4-8".into(),
+                display_name: "O".into(),
+            },
+        ];
+        let mut ov = OverrideMap::new();
+        ov.insert(
+            "sonnet".into(),
+            NativeOverride {
+                capability: 0.85,
+                priority: 0.0,
+                cost: 0.5,
+                description: String::new(),
+                enabled: false,
+            },
+        );
+        let c = candidates_from(&models, &ov);
+        // The disabled family flows through to the candidate's `enabled` flag, which the delegate
+        // candidate filter (`.filter(|p| p.enabled)`) then drops. Un-overridden families stay on.
+        let sonnet = c.iter().find(|p| p.model.contains("sonnet")).unwrap();
+        assert!(!sonnet.enabled, "disabled family → disabled candidate");
+        let opus = c.iter().find(|p| p.model.contains("opus")).unwrap();
+        assert!(opus.enabled, "un-overridden family stays enabled");
+    }
+
+    #[test]
     fn family_of_classifies_and_metrics_are_unchanged() {
         assert_eq!(family_of("claude-opus-4-8"), "opus");
         assert_eq!(family_of("claude-sonnet-4-6"), "sonnet");
