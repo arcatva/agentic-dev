@@ -851,40 +851,41 @@ impl crate::engine::Engine {
         // Load the provider registry ONCE for the whole fan-out (not per task).
         let registry = crate::engine::providers::ProviderRegistry::load();
 
-        // Candidate catalog = enabled registered keyed providers PLUS the enabled native Claude tiers.
-        // Built UP FRONT (it depends only on static config), so an all-disabled batch fails BEFORE we
-        // mark the watchdog or provision any write worktrees — nothing to unwind on that error path.
+        // Two catalogs, built UP FRONT (they depend only on static config, so an all-disabled batch
+        // fails BEFORE we mark the watchdog or provision write worktrees — nothing to unwind):
+        //   • `all_candidates` — every keyed, protocol-eligible registered provider PLUS the native
+        //     Claude tiers, IGNORING `enabled`. Used to resolve an EXPLICIT `task.model` pin, which is
+        //     a deliberate override and must be honored even for a disabled model. The Enabled toggle
+        //     governs AUTO-routing candidacy only (matching the /api/models manual picker).
+        //   • `candidates` — the ENABLED subset. The router (and the mid-floor degradation) choose
+        //     only from here, so a disabled model is never auto-selected.
         // Native candidates live in a local owned Vec; registered providers stay as references.
         let native_overrides = crate::engine::native_overrides::load_map();
         let native_candidates =
             crate::engine::providers::native_claude_candidates(&native_overrides);
-        let candidates: Vec<&crate::engine::providers::Provider> = registry
+        let all_candidates: Vec<&crate::engine::providers::Provider> = registry
             .providers
             .iter()
             .filter(|p| {
-                // Disabled models never participate in routing (the Enabled toggle). Anthropic
-                // providers run directly; openai providers run via the LiteLLM proxy, so only offer
-                // them when that proxy is actually available.
-                p.enabled
-                    && !p.resolved_key().is_empty()
-                    && (matches!(p.protocol, crate::engine::providers::Protocol::Anthropic)
-                        || (matches!(p.protocol, crate::engine::providers::Protocol::Openai)
-                            && crate::engine::litellm::available()))
-            })
-            .chain(native_candidates.iter().filter(|p| p.enabled))
-            .collect();
-        // Empty pool → fail, but ONLY when disabling CAUSED it. If nothing existed at all (no
-        // registered providers AND native discovery empty — the startup race before init_claude_models
-        // populates the OnceLock, or a permanent auth/network failure) fall through to the
-        // subscription-default path instead, preserving pre-feature behavior (see design spec §11).
-        let existed_before_disable = !native_candidates.is_empty()
-            || registry.providers.iter().any(|p| {
+                // Anthropic providers run directly; openai providers run via the LiteLLM proxy, so
+                // only offer them when that proxy is actually available.
                 !p.resolved_key().is_empty()
                     && (matches!(p.protocol, crate::engine::providers::Protocol::Anthropic)
                         || (matches!(p.protocol, crate::engine::providers::Protocol::Openai)
                             && crate::engine::litellm::available()))
-            });
-        if candidates.is_empty() && existed_before_disable {
+            })
+            .chain(native_candidates.iter())
+            .collect();
+        let candidates: Vec<&crate::engine::providers::Provider> = all_candidates
+            .iter()
+            .copied()
+            .filter(|p| p.enabled)
+            .collect();
+        // Empty ENABLED pool → fail, but ONLY when disabling CAUSED it (`all_candidates` non-empty).
+        // If nothing existed at all (no registered providers AND native discovery empty — the startup
+        // race before init_claude_models populates the OnceLock, or a permanent auth/network failure)
+        // fall through to the subscription-default path, preserving pre-feature behavior (spec §11).
+        if candidates.is_empty() && !all_candidates.is_empty() {
             return Err(
                 "all routing models are disabled — enable at least one provider or native tier"
                     .into(),
@@ -970,7 +971,11 @@ impl crate::engine::Engine {
                 // model id (e.g. "claude-3-5-haiku-latest") substring-contains it and appears earlier.
                 let resolved: Option<(&crate::engine::providers::Provider, Option<String>)> =
                     if let Some(m) = explicit {
-                        crate::engine::providers::resolve_candidate(&candidates, m)
+                        // An EXPLICIT pin is honored against the FULL catalog (incl. disabled models):
+                        // a deliberate `task.model` overrides the Enabled toggle, which only gates
+                        // AUTO-routing. So a pinned-but-disabled provider still runs on ITS endpoint
+                        // (with its key/overlay) instead of falling through to the native default.
+                        crate::engine::providers::resolve_candidate(&all_candidates, m)
                             .map(|p| (p, None))
                     } else {
                         // The LLM pick, already run through select_model upstream. If routing
