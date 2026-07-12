@@ -50,15 +50,8 @@ fn prompt_event_json(text: &str, at: i64) -> serde_json::Value {
 /// when the persisted `agentic_prompt` count hits a multiple of this.
 const RETITLE_EVERY_TURNS: usize = 5;
 
-/// Build the text actually written to claude for a turn. Normally this is just `item.prompt`.
-/// When `item.context_prefix` is set (a fork's first turn), the seed context is prepended ahead
-/// of the user's message so claude sees the forked-from conversation, while the logged/displayed
-/// user message stays `item.prompt` alone.
-pub(crate) fn compose_turn_text(item: &QueueItem) -> String {
-    compose_turn_text_with(item, &item.prompt)
-}
-
-/// [compose_turn_text] with the delivered prompt supplied by the caller — used by the spawn
+/// Build the text actually written to claude for a turn: the delivered prompt, with the fork
+/// seed context prepended when `item.context_prefix` is set — used by the spawn
 /// path to deliver a mention-expanded prompt while keeping the fork seed context (which is a
 /// transcript and may itself quote `@session:` tokens) out of the expansion pass.
 pub(crate) fn compose_turn_text_with(item: &QueueItem, prompt: &str) -> String {
