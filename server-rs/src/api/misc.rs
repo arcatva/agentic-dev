@@ -1263,6 +1263,65 @@ pub async fn plugins_delete_route(
     }
 }
 
+// ── GET /api/commands — available slash commands, DYNAMIC (never hardcoded) ──
+// The list is the SDK's own `supportedCommands()` for the current enabled-plugin set, so it
+// reflects exactly what a session would expand (plugins added/removed change it). Fetched by
+// spawning the bridge in one-shot `commands` mode; cached briefly since it only changes when
+// plugins change. The Android composer's `/` palette reads this.
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "argumentHint", default)]
+    pub argument_hint: String,
+}
+
+static COMMANDS_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<SlashCommandInfo>)>> =
+    std::sync::Mutex::new(None);
+const COMMANDS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub async fn commands_get(State(st): State<AppState>) -> Response {
+    if let Ok(guard) = COMMANDS_CACHE.lock() {
+        if let Some((at, cmds)) = guard.as_ref() {
+            if at.elapsed() < COMMANDS_TTL {
+                return Json(cmds.clone()).into_response();
+            }
+        }
+    }
+    let cmds = fetch_slash_commands(&st).await.unwrap_or_default();
+    if let Ok(mut guard) = COMMANDS_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), cmds.clone()));
+    }
+    Json(cmds).into_response()
+}
+
+async fn fetch_slash_commands(st: &AppState) -> Option<Vec<SlashCommandInfo>> {
+    let bridge = crate::engine::sdk_runner::default_bridge_path();
+    let node = std::env::var("AGENTIC_NODE_BIN").unwrap_or_else(|_| "node".to_string());
+    // Global default plugin set (no per-session hide/force) — matches an ordinary new session.
+    let enabled =
+        crate::engine::plugins::resolve_enabled_plugins(&st.config.claude_config_base, &[], &[]);
+    let enabled_json = serde_json::to_string(&enabled).ok()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new(&node)
+            .arg(&bridge)
+            .env("SDK_BRIDGE_MODE", "commands")
+            .env("SDK_BRIDGE_CWD", &st.config.src_root)
+            .env("SDK_BRIDGE_ENABLED_PLUGINS", enabled_json)
+            .env("CLAUDE_CONFIG_DIR", &st.config.claude_config_base)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    serde_json::from_slice::<Vec<SlashCommandInfo>>(&output.stdout).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,6 +1329,21 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use parking_lot::Mutex;
+
+    #[test]
+    fn slash_command_info_parses_bridge_json_shape() {
+        // exactly what sdk-bridge `commands` mode emits (argumentHint is camelCase on the wire).
+        let wire = r#"[{"name":"lfg","description":"Run the pipeline","argumentHint":"[feature]"},
+                       {"name":"ce-code-review","description":"","argumentHint":""}]"#;
+        let cmds: Vec<SlashCommandInfo> = serde_json::from_str(wire).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].name, "lfg");
+        assert_eq!(cmds[0].argument_hint, "[feature]");
+        // missing fields default to empty (bridge always sends them, but be forgiving)
+        let sparse: Vec<SlashCommandInfo> = serde_json::from_str(r#"[{"name":"x"}]"#).unwrap();
+        assert_eq!(sparse[0].description, "");
+        assert_eq!(sparse[0].argument_hint, "");
+    }
     use std::sync::Arc;
 
     #[test]
