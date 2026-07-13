@@ -163,6 +163,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/templates/start", post(misc::templates_start))
         .route("/api/models", get(misc::models_get))
+        .route("/api/commands", get(misc::commands_get))
         .route(
             "/api/providers",
             get(misc::providers_get).post(misc::providers_post),

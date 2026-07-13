@@ -341,6 +341,41 @@ if (oneShotMode === "title" || oneShotMode === "retitle") {
   return;
 }
 
+// ── one-shot commands mode: dump the session's available slash commands as JSON ──
+// SDK_BRIDGE_MODE=commands → init a query (NO user turn submitted, so no model call / cost),
+// read the SDK's authoritative `supportedCommands()` (captured at initialize), print a compact
+// JSON array to stdout, exit 0. Honors the same SDK_BRIDGE_ENABLED_PLUGINS/settings as a real
+// session (via `extraArgs`), so the list reflects exactly the plugins this config would load.
+if (oneShotMode === "commands") {
+  (async () => {
+    try {
+      const q = query({
+        // never-yielding prompt: we only want initialize + supportedCommands, not a turn.
+        prompt: (async function* () { await new Promise(() => {}); })(),
+        options: {
+          cwd: process.env.SDK_BRIDGE_CWD || process.cwd(),
+          env: process.env,
+          model: "haiku",
+          maxTurns: 1,
+          ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
+        },
+      });
+      const cmds = await q.supportedCommands();
+      const lite = (Array.isArray(cmds) ? cmds : []).map((c) => ({
+        name: c.name,
+        description: c.description || "",
+        argumentHint: c.argumentHint || "",
+      }));
+      process.stdout.write(JSON.stringify(lite));
+    } catch (err) {
+      process.stderr.write(`sdk-bridge commands mode failed: ${err && err.message ? err.message : err}\n`);
+      process.stdout.write("[]");
+    }
+    process.exit(0);
+  })();
+  return;
+}
+
 // ── Tier-1 harness rules → appended system prompt (main session only) ──
 // The engine sets SDK_BRIDGE_APPEND_SYSTEM_PROMPT to the routing + fan-out discipline on the MAIN
 // turn only (worker SpawnOptions leave it unset, so this env is absent for a worker). APPEND — never
