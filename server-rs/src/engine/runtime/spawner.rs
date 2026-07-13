@@ -248,7 +248,10 @@ mod slash_tests {
         // /lfg must reach the CLI at the very start, or the SDK won't expand it.
         let out = compose_user_text("/lfg add a CSV export to the orders page");
         assert!(out.starts_with("/lfg "), "slash must lead: {out:?}");
-        assert!(!out.contains(OUTBOX_NOTE), "no outbox prefix on a command turn");
+        assert!(
+            !out.contains(OUTBOX_NOTE),
+            "no outbox prefix on a command turn"
+        );
         // namespaced form too
         assert!(compose_user_text("/compound-engineering:lfg do it").starts_with("/compound"));
         // leading whitespace is trimmed so the slash still lands at offset 0
@@ -272,7 +275,10 @@ mod slash_tests {
             "/ spaced slash",
         ] {
             assert!(!is_slash_command(t), "should not be a command: {t:?}");
-            assert!(compose_user_text(t).starts_with(OUTBOX_NOTE), "keeps prefix: {t:?}");
+            assert!(
+                compose_user_text(t).starts_with(OUTBOX_NOTE),
+                "keeps prefix: {t:?}"
+            );
         }
     }
 }
