@@ -351,6 +351,7 @@ if (oneShotMode === "commands") {
     try {
       const q = query({
         // never-yielding prompt: we only want initialize + supportedCommands, not a turn.
+        // eslint-disable-next-line require-yield -- intentional: hangs so the query stays open without a turn
         prompt: (async function* () { await new Promise(() => {}); })(),
         options: {
           cwd: process.env.SDK_BRIDGE_CWD || process.cwd(),
