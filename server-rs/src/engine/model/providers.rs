@@ -87,9 +87,22 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// The effective API key: the literal if set, else read from `api_key_env`, else empty.
+    /// The effective API key: the literal if set, else read from `api_key_env`, else — for a
+    /// ChatGPT-subscription (OAuth) provider — the current rotating access token from the secrets
+    /// store (keyed by provider name), else empty. Keeping the OAuth token in the store rather than
+    /// this record is why the providers file never holds a subscription secret.
     pub fn resolved_key(&self) -> String {
-        self.resolved_key_with(|e| std::env::var(e).ok())
+        let k = self.resolved_key_with(|e| std::env::var(e).ok());
+        if !k.is_empty() {
+            return k;
+        }
+        // Only an openai-protocol provider can be a ChatGPT subscription; gating here keeps an
+        // anthropic/native provider whose name happens to collide with a stored token from
+        // silently picking up the OAuth bearer (which would be wrong on the /v1/messages path).
+        if matches!(self.protocol, Protocol::Openai) {
+            return crate::engine::oauth::access_token_for(&self.name).unwrap_or_default();
+        }
+        String::new()
     }
 
     /// [resolved_key] with an injectable env lookup — tests pass a closure instead of mutating
