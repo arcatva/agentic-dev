@@ -1,5 +1,6 @@
 mod login;
 pub(crate) mod misc;
+pub(crate) mod oauth;
 mod sessions;
 pub mod stream;
 #[cfg(test)]
@@ -169,6 +170,9 @@ pub fn app(state: AppState) -> Router {
             get(misc::providers_get).post(misc::providers_post),
         )
         .route("/api/providers/{name}", delete(misc::providers_delete))
+        .route("/api/providers/oauth/chatgpt/start", post(oauth::start))
+        .route("/api/providers/oauth/chatgpt/status", get(oauth::status))
+        .route("/api/providers/oauth/chatgpt/logout", post(oauth::logout))
         .route("/api/native-models", get(misc::native_models_get))
         .route(
             "/api/native-models/{family}",

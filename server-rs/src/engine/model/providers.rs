@@ -98,10 +98,32 @@ impl Provider {
         if !self.api_key.is_empty() {
             return self.api_key.clone();
         }
+        // Subscription OAuth: the effective key is the rotating access token from the 0600 store,
+        // not an env var. (The `oauth:` ref never names a real env var, so the injected `lookup`
+        // is bypassed only for it — env-backed providers keep the test-injectable path.)
+        if let Some(account) = self.oauth_account() {
+            return crate::engine::oauth::access_token(account).unwrap_or_default();
+        }
         self.api_key_env
             .as_ref()
             .and_then(|e| lookup(e))
             .unwrap_or_default()
+    }
+
+    /// If this provider authenticates via a ChatGPT subscription OAuth login (its `api_key_env` is
+    /// an `oauth:<account>` reference), the account key whose rotating bearer backs it — else None.
+    ///
+    /// Gated on the provider pointing at the ChatGPT codex endpoint: any record is registerable via
+    /// `POST /api/providers`, so without this a user-supplied provider with an arbitrary `base_url`
+    /// and `api_key_env = "oauth:chatgpt"` would receive the subscription bearer and exfiltrate it to
+    /// that endpoint. Only a codex-pointed provider may resolve the token.
+    pub fn oauth_account(&self) -> Option<&str> {
+        if !self.base_url.starts_with(crate::engine::oauth::CODEX_BASE_URL) {
+            return None;
+        }
+        self.api_key_env
+            .as_deref()
+            .and_then(crate::engine::oauth::account_from_key_ref)
     }
 
     /// Does this provider match a model `hint` — by provider name or model id, case-insensitive and
