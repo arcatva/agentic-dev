@@ -435,9 +435,18 @@ struct ProviderView {
     router: bool,
     enabled: bool,
     has_key: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    chatgpt_oauth: bool,
 }
 
 fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
+    // A chatgpt-oauth provider has no static key; it's "connected" when the OAuth token store
+    // exists, so surface that as has_key so the client shows it configured.
+    let has_key = if p.chatgpt_oauth {
+        crate::engine::chatgpt_oauth::is_connected()
+    } else {
+        !p.resolved_key().is_empty()
+    };
     ProviderView {
         name: p.name.clone(),
         base_url: p.base_url.clone(),
@@ -449,7 +458,8 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
         cost: p.cost,
         router: p.router,
         enabled: p.enabled,
-        has_key: !p.resolved_key().is_empty(),
+        has_key,
+        chatgpt_oauth: p.chatgpt_oauth,
     }
 }
 
@@ -554,10 +564,16 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
     }
 }
 
-/// DELETE /api/providers/{name} — remove a provider.
+/// DELETE /api/providers/{name} — remove a provider. Removing the "chatgpt" provider also clears
+/// the OAuth token store (logout) so no live token is left behind.
 pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     match crate::engine::providers::remove(&name) {
         Ok(true) => {
+            if name.eq_ignore_ascii_case("chatgpt") {
+                if let Err(e) = crate::engine::chatgpt_oauth::clear() {
+                    tracing::warn!("[chatgpt] clearing token store on logout failed: {e}");
+                }
+            }
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
@@ -572,6 +588,118 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
         )
             .into_response(),
     }
+}
+
+// ── ChatGPT subscription OAuth (connect a ChatGPT plan instead of an API key) ──
+
+#[derive(serde::Deserialize)]
+pub struct ChatgptCompleteBody {
+    code: String,
+    state: String,
+}
+
+/// POST /api/providers/chatgpt/login/start — begin the PKCE login. Returns the authorize URL the
+/// client opens in a browser plus the `state` it must echo back on completion.
+pub async fn chatgpt_login_start() -> Response {
+    let (authorize_url, state) = crate::engine::chatgpt_oauth::begin_login();
+    Json(json!({ "authorize_url": authorize_url, "state": state })).into_response()
+}
+
+/// POST /api/providers/chatgpt/login/complete — exchange the authorization code (paired with the
+/// stored PKCE verifier for `state`) for tokens, persist them (0600), register the `chatgpt`
+/// provider, reload the proxy, and start the refresher.
+pub async fn chatgpt_login_complete(body: axum::body::Bytes) -> Response {
+    let b: ChatgptCompleteBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid body: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let verifier = match crate::engine::chatgpt_oauth::take_verifier(&b.state) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "unknown or expired login state" })),
+            )
+                .into_response()
+        }
+    };
+    let fresh = match crate::engine::chatgpt_oauth::exchange_code(&b.code, &verifier).await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("token exchange failed: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let account_id = crate::engine::chatgpt_oauth::derive_account_id(&fresh);
+    let auth = crate::engine::chatgpt_oauth::AuthFile::from_fresh(&fresh, account_id.clone());
+    if let Err(e) = crate::engine::chatgpt_oauth::save(&auth) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("persisting token failed: {e}") })),
+        )
+            .into_response();
+    }
+    let provider = crate::engine::providers::Provider {
+        name: "chatgpt".to_string(),
+        base_url: crate::engine::chatgpt_oauth::CHATGPT_API_BASE.to_string(),
+        api_key: String::new(),
+        api_key_env: None,
+        model: crate::engine::chatgpt_oauth::chatgpt_model(),
+        protocol: crate::engine::providers::Protocol::Openai,
+        capability: 0.8,
+        description: Some("ChatGPT subscription (GPT via OAuth)".to_string()),
+        priority: 0.5,
+        cost: 0.6,
+        router: false,
+        enabled: true,
+        chatgpt_oauth: true,
+    };
+    if let Err(e) = crate::engine::providers::upsert(provider) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("registering provider failed: {e}") })),
+        )
+            .into_response();
+    }
+    crate::engine::litellm::request_reload();
+    crate::engine::chatgpt_oauth::spawn_refresher();
+    Json(json!({
+        "ok": true,
+        "account_id": account_id,
+        "expires_at": auth.expires_at,
+    }))
+    .into_response()
+}
+
+/// GET /api/providers/chatgpt/status — connection state for the client (account / expiry /
+/// whether a re-login is required because the refresh token died).
+pub async fn chatgpt_status() -> Response {
+    let (connected, account_id, expires_at, needs_relogin) =
+        match crate::engine::chatgpt_oauth::load() {
+            Some(a) => (
+                !a.tokens.access_token.is_empty(),
+                a.tokens.account_id.clone(),
+                a.expires_at,
+                a.needs_relogin,
+            ),
+            None => (false, None, 0, false),
+        };
+    Json(json!({
+        "connected": connected,
+        "account_id": account_id,
+        "expires_at": expires_at,
+        "needs_relogin": needs_relogin,
+    }))
+    .into_response()
 }
 
 // ── native Claude per-family routing overrides ──
@@ -1361,6 +1489,7 @@ mod tests {
             cost: 0.3,
             router: false,
             enabled: true,
+            chatgpt_oauth: false,
         };
         let json = serde_json::to_string(&provider_view(&p)).unwrap();
         assert!(
@@ -1424,6 +1553,7 @@ mod tests {
                 cost: 0.3,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             },
         )
         .unwrap();
@@ -1441,6 +1571,198 @@ mod tests {
         let models = b["models"].as_array().unwrap();
         assert!(models.iter().any(|m| m["key"] == "minimax"));
         assert!(models.iter().any(|m| m["native"] == false));
+    }
+
+    // ── ChatGPT OAuth handler tests ──
+
+    /// Isolate both the providers file AND the chatgpt token store (+ mock token endpoint) for a
+    /// test. Reuses `isolated_providers_file`'s serializing lock so it never races a provider test.
+    struct ChatgptGuard {
+        _p: ProvidersFileGuard,
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for ChatgptGuard {
+        fn drop(&mut self) {
+            crate::engine::chatgpt_oauth::test_override_auth_file(None);
+            crate::engine::chatgpt_oauth::test_override_token_url(None);
+        }
+    }
+    fn isolated_chatgpt() -> ChatgptGuard {
+        // Same shared lock the chatgpt_oauth unit tests use → the token-url/auth-file overrides are
+        // never mutated concurrently across modules. Providers-file lock is acquired first here and
+        // by the non-chatgpt provider tests; chatgpt_oauth unit tests take only the override lock —
+        // consistent ordering, no deadlock.
+        let p = isolated_providers_file();
+        let lock = crate::engine::chatgpt_oauth::TEST_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        crate::engine::chatgpt_oauth::test_override_auth_file(Some(
+            dir.path().join("chatgpt-auth.json"),
+        ));
+        ChatgptGuard {
+            _p: p,
+            _dir: dir,
+            _lock: lock,
+        }
+    }
+
+    #[tokio::test]
+    async fn chatgpt_login_complete_rejects_unknown_state() {
+        let _g = isolated_chatgpt();
+        let st = test_state().await;
+        let (s, _b) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers/chatgpt/login/complete")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"code":"c","state":"never-issued"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // no provider registered
+        assert!(crate::engine::providers::load_list().is_empty());
+        assert!(!crate::engine::chatgpt_oauth::is_connected());
+    }
+
+    #[tokio::test]
+    async fn chatgpt_login_flow_registers_provider_and_exposes_gpt() {
+        let _g = isolated_chatgpt();
+        let st = test_state().await;
+        crate::engine::providers::seed_claude_models_for_tests();
+
+        // Mock the OAuth token endpoint.
+        let server = wiremock::MockServer::start().await;
+        crate::engine::chatgpt_oauth::test_override_token_url(Some(format!("{}/token", server.uri())));
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT", "id_token": "IT", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        // start → get a real state
+        let (s0, b0) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers/chatgpt/login/start")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s0, StatusCode::OK);
+        let state = b0["state"].as_str().unwrap().to_string();
+        assert!(b0["authorize_url"].as_str().unwrap().contains("code_challenge_method=S256"));
+
+        // complete
+        let (s1, b1) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers/chatgpt/login/complete")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"code":"the-code","state":state}).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s1, StatusCode::OK, "complete body: {b1}");
+        assert_eq!(b1["ok"], true);
+
+        // provider now registered and connected
+        let list = crate::engine::providers::load_list();
+        let cg = list.iter().find(|p| p.name == "chatgpt").expect("chatgpt provider");
+        assert!(cg.chatgpt_oauth);
+        assert!(matches!(cg.protocol, crate::engine::providers::Protocol::Openai));
+        assert!(crate::engine::chatgpt_oauth::is_connected());
+
+        // token file exists and is 0600
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::engine::chatgpt_oauth::auth_file_path();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // GET /api/models default scope now lists the chatgpt provider (Covers R4)
+        let (sm, bm) = oneshot_req(
+            st.clone(),
+            Request::get("/api/models")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(sm, StatusCode::OK);
+        assert!(bm["models"].as_array().unwrap().iter().any(|m| m["key"] == "chatgpt"));
+
+        // status reflects connection
+        let (ss, bs) = oneshot_req(
+            st.clone(),
+            Request::get("/api/providers/chatgpt/status")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(ss, StatusCode::OK);
+        assert_eq!(bs["connected"], true);
+        assert_eq!(bs["needs_relogin"], false);
+
+        // DELETE logs out: provider gone AND token file cleared
+        let (sd, _bd) = oneshot_req(
+            st.clone(),
+            Request::delete("/api/providers/chatgpt")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(sd, StatusCode::OK);
+        assert!(!crate::engine::providers::load_list().iter().any(|p| p.name == "chatgpt"));
+        assert!(!crate::engine::chatgpt_oauth::is_connected());
+    }
+
+    #[tokio::test]
+    async fn chatgpt_login_complete_token_exchange_failure_is_502() {
+        let _g = isolated_chatgpt();
+        let st = test_state().await;
+        // Token endpoint rejects the exchange.
+        let server = wiremock::MockServer::start().await;
+        crate::engine::chatgpt_oauth::test_override_token_url(Some(format!("{}/token", server.uri())));
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+
+        let (_s0, b0) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers/chatgpt/login/start")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let state = b0["state"].as_str().unwrap().to_string();
+
+        let (s1, _b1) = oneshot_req(
+            st.clone(),
+            Request::post("/api/providers/chatgpt/login/complete")
+                .header("authorization", auth(&st))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"code":"c","state":state}).to_string()))
+                .unwrap(),
+        )
+        .await;
+        // 502 (upstream failure), and NOTHING persisted: no provider, no token file.
+        assert_eq!(s1, StatusCode::BAD_GATEWAY);
+        assert!(!crate::engine::providers::load_list().iter().any(|p| p.name == "chatgpt"));
+        assert!(!crate::engine::chatgpt_oauth::is_connected());
     }
 
     #[tokio::test]
@@ -1464,6 +1786,7 @@ mod tests {
                 cost: 0.5,
                 router: false,
                 enabled: true,
+                chatgpt_oauth: false,
             },
         )
         .unwrap();
