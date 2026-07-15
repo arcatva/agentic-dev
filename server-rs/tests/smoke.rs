@@ -88,6 +88,7 @@ async fn router_builds_and_healthz_is_reachable() {
         )),
         usage_inflight: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
+        oauth_fn: None,
     };
     let resp = api::app(state)
         .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
@@ -178,6 +179,7 @@ async fn patch_session_updates_model_effort_mode_permission_mode() {
         )),
         usage_inflight: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         usage_fn: None,
+        oauth_fn: None,
     };
 
     // Mint a valid Bearer token for the auth gate.

@@ -26,6 +26,11 @@ pub type UsageFn = Arc<
         + Sync,
 >;
 
+/// Injectable ChatGPT-OAuth token-endpoint call (test seam): `(url, body) -> Ok(json) | Err(status)`.
+/// `None` in production ⇒ a real HTTPS POST. Mirrors [`UsageFn`].
+pub type OauthFn =
+    Arc<dyn Fn(&str, &str) -> Result<serde_json::Value, u16> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -36,4 +41,6 @@ pub struct AppState {
     pub usage_cache: Arc<Mutex<UsageCache>>,
     pub usage_inflight: Arc<tokio::sync::Mutex<()>>,
     pub usage_fn: Option<UsageFn>,
+    /// Test seam for the ChatGPT-OAuth token exchange (None in production).
+    pub oauth_fn: Option<OauthFn>,
 }
