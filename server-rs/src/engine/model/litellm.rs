@@ -68,6 +68,30 @@ fn yaml_q(s: &str) -> String {
 /// in the file. Empty result = no usable openai providers.
 fn build_config() -> Vec<(String, String)> {
     let reg = ProviderRegistry::load();
+    let (yaml, envs) = render_config(&reg);
+    if let Some(parent) = config_path().parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("[litellm] create config dir {:?} failed: {e}", parent);
+        }
+    }
+    if let Err(e) = std::fs::write(config_path(), &yaml) {
+        tracing::error!("[litellm] write config {:?} failed: {e}", config_path());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(config_path(), std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::warn!("[litellm] chmod 600 config failed: {e}");
+        }
+    }
+    envs
+}
+
+/// Pure YAML+env renderer (no file I/O) so the config shape is unit-testable. Returns the config
+/// text and the `(env_var, key)` pairs whose keys are injected into the proxy env, never the file.
+fn render_config(reg: &ProviderRegistry) -> (String, Vec<(String, String)>) {
     let mut yaml = String::from("model_list:\n");
     let mut envs: Vec<(String, String)> = Vec::new();
     for p in reg.providers.iter() {
@@ -88,26 +112,28 @@ fn build_config() -> Vec<(String, String)> {
             base = yaml_q(&p.base_url),
             var = var,
         ));
+        // ChatGPT subscription (OAuth) providers need the Codex/Responses headers on every request.
+        // The rotating bearer still flows through `key` above (resolved_key reads the live token);
+        // only these constant/account headers are added here.
+        if p.is_oauth_subscription() {
+            yaml.push_str("      extra_headers:\n");
+            let account = crate::engine::oauth_store::current_account_id();
+            if !account.is_empty() {
+                yaml.push_str(&format!(
+                    "        {}: {}\n",
+                    crate::engine::oauth_store::ACCOUNT_HEADER,
+                    yaml_q(&account)
+                ));
+            }
+            yaml.push_str(&format!(
+                "        originator: {}\n        OpenAI-Beta: {}\n",
+                yaml_q(crate::engine::oauth_store::ORIGINATOR),
+                yaml_q(crate::engine::oauth_store::OPENAI_BETA),
+            ));
+        }
         envs.push((var, key));
     }
-    if let Some(parent) = config_path().parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("[litellm] create config dir {:?} failed: {e}", parent);
-        }
-    }
-    if let Err(e) = std::fs::write(config_path(), &yaml) {
-        tracing::error!("[litellm] write config {:?} failed: {e}", config_path());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(config_path(), std::fs::Permissions::from_mode(0o600))
-        {
-            tracing::warn!("[litellm] chmod 600 config failed: {e}");
-        }
-    }
-    envs
+    (yaml, envs)
 }
 
 static RELOAD: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
@@ -211,5 +237,72 @@ mod tests {
     #[test]
     fn proxy_base_url_uses_port() {
         assert!(proxy_base_url().starts_with("http://127.0.0.1:"));
+    }
+
+    use crate::engine::providers::{Protocol, Provider, ProviderRegistry};
+
+    fn openai_provider(name: &str, key_env: Option<&str>, api_key: &str) -> Provider {
+        Provider {
+            name: name.into(),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            api_key: api_key.into(),
+            api_key_env: key_env.map(str::to_string),
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.7,
+            description: None,
+            priority: 0.5,
+            cost: 0.4,
+            router: false,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn oauth_provider_emits_codex_headers() {
+        use crate::engine::oauth_store;
+        let _guard = oauth_store::test_util::isolate();
+        oauth_store::save(&oauth_store::ChatGptTokens {
+            access_token: "sk-live".into(),
+            refresh_token: "rt".into(),
+            account_id: "acct_42".into(),
+            expires_at: 9_999_999_999_000,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // OAuth subscription provider → rotating bearer via env + Codex headers.
+        let oauth = openai_provider("chatgpt", Some(oauth_store::SENTINEL), "");
+        // Ordinary BYOK openai provider → no extra headers.
+        let byok = openai_provider("plainoai", None, "sk-static");
+        let reg = ProviderRegistry {
+            providers: vec![oauth, byok],
+        };
+        let (yaml, envs) = render_config(&reg);
+
+        // Codex headers present for the oauth provider.
+        assert!(yaml.contains("extra_headers:"), "yaml: {yaml}");
+        assert!(yaml.contains("ChatGPT-Account-Id: \"acct_42\""));
+        assert!(yaml.contains("originator: \"codex_cli_rs\""));
+        assert!(yaml.contains("OpenAI-Beta: \"responses=experimental\""));
+        // The live token is injected via env, never written into the yaml.
+        assert!(!yaml.contains("sk-live"));
+        assert!(envs.iter().any(|(_, v)| v == "sk-live"));
+        assert!(envs.iter().any(|(_, v)| v == "sk-static"));
+        // The BYOK provider block carries no ChatGPT headers.
+        assert_eq!(yaml.matches("extra_headers:").count(), 1);
+    }
+
+    #[test]
+    fn oauth_provider_without_login_is_skipped() {
+        use crate::engine::oauth_store;
+        let _guard = oauth_store::test_util::isolate();
+        // No token saved → resolved_key empty → provider omitted from the proxy config entirely.
+        let reg = ProviderRegistry {
+            providers: vec![openai_provider("chatgpt", Some(oauth_store::SENTINEL), "")],
+        };
+        let (yaml, envs) = render_config(&reg);
+        assert!(envs.is_empty());
+        assert!(!yaml.contains("chatgpt") && !yaml.contains("extra_headers"));
     }
 }
