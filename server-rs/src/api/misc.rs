@@ -516,6 +516,20 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
         )
             .into_response();
     }
+    // Reserve the ChatGPT-subscription name for the OAuth flow. Block only NEW providers with that
+    // name (a manual add would collide with sign-in, which upserts the same row); editing the
+    // existing subscription row — e.g. toggling Enabled from the UI — still works.
+    if p.name.eq_ignore_ascii_case(crate::engine::openai_oauth::PROVIDER_NAME)
+        && !crate::engine::providers::load_list()
+            .iter()
+            .any(|x| x.name.eq_ignore_ascii_case(&p.name))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"the name 'chatgpt' is reserved — use Sign in with ChatGPT"})),
+        )
+            .into_response();
+    }
     // Validate the ROUTER relationship at set time: a provider flagged as the router that can't produce
     // a usable routing reply would silently make every later delegate fan-out fall back to native
     // Claude. Probe it now and reject the save with a clear reason instead. Only runs when router=true,
@@ -558,6 +572,12 @@ pub async fn providers_post(body: axum::body::Bytes) -> Response {
 pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     match crate::engine::providers::remove(&name) {
         Ok(true) => {
+            // Deleting the ChatGPT row through the generic providers UI must also drop the stored
+            // OAuth tokens, else the user looks signed out but the account stays connected (and boot
+            // would re-register the provider).
+            if name.eq_ignore_ascii_case(crate::engine::openai_oauth::PROVIDER_NAME) {
+                crate::engine::openai_oauth::forget_credentials();
+            }
             crate::engine::litellm::request_reload();
             Json(json!({"ok": true})).into_response()
         }
@@ -572,6 +592,72 @@ pub async fn providers_delete(axum::extract::Path(name): axum::extract::Path<Str
         )
             .into_response(),
     }
+}
+
+// ── ChatGPT subscription sign-in (OAuth) ──
+// The GPT model joins the delegate routing pool as an openai provider; tokens live in a tightened
+// store (engine::openai_oauth), never in providers.json. The mobile client runs the interactive
+// browser + loopback-redirect capture and posts the resulting authorization code here.
+
+/// POST /api/providers/chatgpt/login/start — begin an OAuth login. Returns the authorize URL (open
+/// it in a browser) and the `state` to echo back on completion.
+pub async fn chatgpt_login_start() -> Response {
+    let (url, state) = crate::engine::openai_oauth::start_login();
+    Json(json!({ "authorize_url": url, "state": state })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChatgptCompleteReq {
+    code: String,
+    state: String,
+}
+
+/// POST /api/providers/chatgpt/login/complete — exchange the captured code for tokens, persist them
+/// (tightened), and register the GPT provider so it appears in the model list + routing pool.
+pub async fn chatgpt_login_complete(body: axum::body::Bytes) -> Response {
+    let req: ChatgptCompleteReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid body: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    // Blocking token exchange — keep the async worker threads free.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::engine::openai_oauth::complete_login(&req.code, &req.state)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/providers/chatgpt/status — connection state for the UI (account/expiry/needs re-login).
+pub async fn chatgpt_status() -> Response {
+    let s = crate::engine::openai_oauth::status();
+    Json(json!({
+        "connected": s.connected,
+        "email": s.email,
+        "account_id": s.account_id,
+        "expires_at": s.expires_at,
+        "needs_relogin": s.needs_relogin,
+    }))
+    .into_response()
+}
+
+/// POST /api/providers/chatgpt/disconnect — sign out and drop the GPT provider.
+pub async fn chatgpt_disconnect() -> Response {
+    crate::engine::openai_oauth::disconnect();
+    Json(json!({ "ok": true })).into_response()
 }
 
 // ── native Claude per-family routing overrides ──
@@ -869,6 +955,13 @@ fn native_model_entries() -> Vec<ModelEntry> {
 fn full_model_entries() -> Vec<ModelEntry> {
     let mut entries = native_model_entries();
     for p in &crate::engine::providers::load_list() {
+        // A signed-out / needs-relogin ChatGPT subscription has no usable bearer and can't route;
+        // don't advertise it in the picker (it would resolve to no keyed provider and fall through).
+        if crate::engine::openai_oauth::is_subscription_provider(p)
+            && crate::engine::openai_oauth::current_access_token().is_none()
+        {
+            continue;
+        }
         entries.push(ModelEntry {
             key: p.name.clone(),
             label: format!("{} ({})", p.model, p.name),

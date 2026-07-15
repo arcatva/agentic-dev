@@ -88,7 +88,14 @@ pub struct Provider {
 
 impl Provider {
     /// The effective API key: the literal if set, else read from `api_key_env`, else empty.
+    ///
+    /// The ChatGPT subscription provider is special: it authenticates with a short-lived OAuth
+    /// bearer that rotates on refresh, kept in the tightened credential store (never in this file).
+    /// For it we return the CURRENT access token (empty when signed out / needs re-login).
     pub fn resolved_key(&self) -> String {
+        if crate::engine::openai_oauth::is_subscription_provider(self) {
+            return crate::engine::openai_oauth::current_access_token().unwrap_or_default();
+        }
         self.resolved_key_with(|e| std::env::var(e).ok())
     }
 
