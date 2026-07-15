@@ -189,3 +189,37 @@ The fork's worktree branches (`create_fork_worktrees` in
 
 Failure during fork rolls back any worktrees it created and deletes
 the new sqlite row before returning the error.
+
+## ChatGPT subscription (OAuth) provider
+
+A user can connect a ChatGPT subscription so GPT joins the delegate routing
+pool as an `openai`-protocol worker (never a main-session model — those are
+Claude-only).
+
+- **OAuth (Codex CLI shape):** Authorization-Code + PKCE(S256), fixed client_id
+  and redirect `http://localhost:1455/auth/callback`. `engine::model::openai_oauth`
+  is the HTTP-independent core (PKCE, authorize URL, token exchange/refresh, JWT
+  `chatgpt_account_id` parse, 0600 token store at `~/.agentic-dev/openai-oauth.json`).
+- **Loopback callback:** `POST /api/providers/openai-subscription/login`
+  (`api/subscription.rs`) binds a one-shot listener on `127.0.0.1:1455`, returns
+  the authorize URL, and on the redirect exchanges the code, persists the token,
+  and upserts the well-known `chatgpt` provider (protocol=openai, base_url=codex
+  backend, **no key in providers.json** — the token lives only in the 0600 store).
+  The OAuth consent must be completed in a browser that can reach the server host
+  (loopback :1455) — the same co-location model as Codex CLI.
+- **Rotating bearer:** the subscription's access token reaches routing through
+  `Provider::effective_key()` (reads the store for the `chatgpt` provider). LiteLLM
+  gets it via env at proxy spawn plus the codex headers (`ChatGPT-Account-Id`,
+  `originator: codex_cli_rs`, `OpenAI-Beta: responses=experimental`). A background
+  task (`main.rs`) refreshes the token before expiry and calls
+  `litellm::request_reload()` so the proxy always carries a live bearer.
+- **Status:** `GET /api/providers/openai-subscription/status`
+  (`{connected, account_id, expires_at, needs_reauth}`); `POST .../logout` clears
+  the store + removes the provider. GPT shows up in `GET /api/models` for free
+  once the `chatgpt` provider row exists (`full_model_entries`).
+- ponytail: the codex endpoint speaks the Responses API (`/responses`, forced
+  streaming), which differs from the `/chat/completions` shape LiteLLM translates
+  to by default — the config carries the right base_url/bearer/headers; the exact
+  LiteLLM route for the codex backend is the one integration point needing a live
+  check (untestable via the fake bridge). Upgrade to a custom LiteLLM
+  provider/route if the default shape mismatches.

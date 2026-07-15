@@ -66,15 +66,20 @@ fn yaml_q(s: &str) -> String {
 /// Generate the litellm config from the openai-protocol providers. Returns the `(env_var, key)` pairs
 /// to inject into the proxy process — the keys go in the ENV (referenced via `os.environ/...`), never
 /// in the file. Empty result = no usable openai providers.
-fn build_config() -> Vec<(String, String)> {
-    let reg = ProviderRegistry::load();
+/// Pure config renderer: the YAML for the openai providers + the `(env_var, key)` pairs to inject.
+/// The subscription provider gets the codex `extra_headers` and its rotating bearer via
+/// `effective_key` (the OAuth access token from the 0600 store). Split out so it is unit-testable
+/// without touching the global providers file or the config path.
+fn render_config(
+    providers: &[crate::engine::providers::Provider],
+) -> (String, Vec<(String, String)>) {
     let mut yaml = String::from("model_list:\n");
     let mut envs: Vec<(String, String)> = Vec::new();
-    for p in reg.providers.iter() {
+    for p in providers {
         if !matches!(p.protocol, Protocol::Openai) {
             continue;
         }
-        let key = p.resolved_key();
+        let key = p.effective_key();
         if key.is_empty() {
             continue;
         }
@@ -88,8 +93,31 @@ fn build_config() -> Vec<(String, String)> {
             base = yaml_q(&p.base_url),
             var = var,
         ));
+        // The ChatGPT subscription backend needs the codex headers alongside the rotating bearer.
+        // ponytail: the codex endpoint speaks the Responses API (/responses, forced streaming),
+        // which differs from the default /chat/completions shape litellm translates to; the config
+        // carries the right base_url, bearer, and headers — the exact litellm route for the codex
+        // backend is the one integration point needing a live check (untestable here). Upgrade to a
+        // custom litellm provider/route if the default shape mismatches.
+        if p.is_subscription() {
+            let account_id = crate::engine::model::openai_oauth::load()
+                .map(|t| t.account_id)
+                .unwrap_or_default();
+            yaml.push_str(&format!(
+                "      extra_headers:\n        ChatGPT-Account-Id: {id}\n        originator: {orig}\n        OpenAI-Beta: {beta}\n",
+                id = yaml_q(&account_id),
+                orig = yaml_q("codex_cli_rs"),
+                beta = yaml_q("responses=experimental"),
+            ));
+        }
         envs.push((var, key));
     }
+    (yaml, envs)
+}
+
+fn build_config() -> Vec<(String, String)> {
+    let reg = ProviderRegistry::load();
+    let (yaml, envs) = render_config(&reg.providers);
     if let Some(parent) = config_path().parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::error!("[litellm] create config dir {:?} failed: {e}", parent);
@@ -211,5 +239,61 @@ mod tests {
     #[test]
     fn proxy_base_url_uses_port() {
         assert!(proxy_base_url().starts_with("http://127.0.0.1:"));
+    }
+
+    #[test]
+    fn render_config_subscription_has_codex_base_and_headers() {
+        use crate::engine::model::openai_oauth;
+        use crate::engine::providers::Provider;
+        let _g = openai_oauth::TEST_STORE_LOCK.lock();
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("s.json");
+        *openai_oauth::STORE_FILE_OVERRIDE.lock() = Some(f.clone());
+        openai_oauth::save(&openai_oauth::StoredToken {
+            access_token: "tok".into(),
+            account_id: "acc-9".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let sub = Provider {
+            name: openai_oauth::PROVIDER_NAME.into(),
+            base_url: openai_oauth::CODEX_BASE_URL.into(),
+            api_key: String::new(),
+            api_key_env: None,
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.9,
+            description: None,
+            priority: 0.5,
+            cost: 0.9,
+            router: false,
+            enabled: true,
+        };
+        let (yaml, envs) = render_config(&[sub]);
+        assert!(yaml.contains("api_base: \"https://chatgpt.com/backend-api/codex\""));
+        assert!(yaml.contains("ChatGPT-Account-Id: \"acc-9\""));
+        assert!(yaml.contains("originator: \"codex_cli_rs\""));
+        assert!(yaml.contains("OpenAI-Beta: \"responses=experimental\""));
+        assert_eq!(envs.len(), 1, "rotating bearer injected via env");
+        assert_eq!(envs[0].1, "tok");
+        // A disconnected subscription (empty store) is skipped entirely.
+        openai_oauth::clear();
+        let sub2 = Provider {
+            name: openai_oauth::PROVIDER_NAME.into(),
+            base_url: openai_oauth::CODEX_BASE_URL.into(),
+            api_key: String::new(),
+            api_key_env: None,
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.9,
+            description: None,
+            priority: 0.5,
+            cost: 0.9,
+            router: false,
+            enabled: true,
+        };
+        let (_, envs2) = render_config(&[sub2]);
+        assert!(envs2.is_empty(), "no token → provider omitted");
+        *openai_oauth::STORE_FILE_OVERRIDE.lock() = None;
     }
 }

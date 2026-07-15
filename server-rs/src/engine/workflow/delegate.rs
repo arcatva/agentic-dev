@@ -868,8 +868,9 @@ impl crate::engine::Engine {
             .iter()
             .filter(|p| {
                 // Anthropic providers run directly; openai providers run via the LiteLLM proxy, so
-                // only offer them when that proxy is actually available.
-                !p.resolved_key().is_empty()
+                // only offer them when that proxy is actually available. `effective_key` resolves the
+                // ChatGPT-subscription provider's rotating OAuth token (empty when disconnected).
+                !p.effective_key().is_empty()
                     && (matches!(p.protocol, crate::engine::providers::Protocol::Anthropic)
                         || (matches!(p.protocol, crate::engine::providers::Protocol::Openai)
                             && crate::engine::litellm::available()))

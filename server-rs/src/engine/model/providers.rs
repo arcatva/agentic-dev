@@ -104,6 +104,26 @@ impl Provider {
             .unwrap_or_default()
     }
 
+    /// True for the single well-known ChatGPT-subscription provider. Matched on BOTH the reserved
+    /// name AND the codex base_url so a user's hand-added provider that merely happens to be named
+    /// "chatgpt" (with some other endpoint) is NOT hijacked onto the OAuth store.
+    pub fn is_subscription(&self) -> bool {
+        self.name
+            .eq_ignore_ascii_case(super::openai_oauth::PROVIDER_NAME)
+            && self.base_url == super::openai_oauth::CODEX_BASE_URL
+    }
+
+    /// The key routing/LiteLLM should use: for the subscription provider, the rotating OAuth access
+    /// token from the 0600 store; otherwise the literal / `api_key_env` key. Empty when the
+    /// subscription is disconnected → the delegate candidate filter drops the provider.
+    pub fn effective_key(&self) -> String {
+        if self.is_subscription() {
+            super::openai_oauth::current_access_token().unwrap_or_default()
+        } else {
+            self.resolved_key()
+        }
+    }
+
     /// Does this provider match a model `hint` — by provider name or model id, case-insensitive and
     /// substring-tolerant (so "deepseek-chat" matches the "deepseek" provider, and the router's
     /// abbreviated "MiniMax" matches "MiniMax-M3")?
@@ -792,6 +812,58 @@ mod tests {
             (haiku.capability, haiku.cost),
             family_default_metrics("haiku")
         );
+    }
+
+    #[test]
+    fn subscription_effective_key_reads_oauth_store() {
+        use crate::engine::model::openai_oauth;
+        let _g = openai_oauth::TEST_STORE_LOCK.lock();
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("s.json");
+        *openai_oauth::STORE_FILE_OVERRIDE.lock() = Some(f.clone());
+        let sub = Provider {
+            name: openai_oauth::PROVIDER_NAME.into(),
+            base_url: openai_oauth::CODEX_BASE_URL.into(),
+            api_key: String::new(),
+            api_key_env: None,
+            model: "gpt-5".into(),
+            protocol: Protocol::Openai,
+            capability: 0.9,
+            description: None,
+            priority: 0.5,
+            cost: 0.9,
+            router: false,
+            enabled: true,
+        };
+        assert!(sub.is_subscription());
+        // empty store → empty key (delegate filter drops it)
+        openai_oauth::clear();
+        assert_eq!(sub.effective_key(), "");
+        openai_oauth::save(&openai_oauth::StoredToken {
+            access_token: "tok".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(sub.effective_key(), "tok");
+        // a normal provider ignores the store, uses resolved_key
+        let normal = Provider {
+            name: "minimax".into(),
+            api_key: "literal".into(),
+            ..sub.clone()
+        };
+        assert!(!normal.is_subscription());
+        assert_eq!(normal.effective_key(), "literal");
+        // a user provider that merely happens to be named "chatgpt" with a DIFFERENT base_url is
+        // NOT hijacked onto the OAuth store — it keeps its own key.
+        let lookalike = Provider {
+            name: "chatgpt".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "mine".into(),
+            ..sub.clone()
+        };
+        assert!(!lookalike.is_subscription());
+        assert_eq!(lookalike.effective_key(), "mine");
+        *openai_oauth::STORE_FILE_OVERRIDE.lock() = None;
     }
 
     #[test]

@@ -449,7 +449,7 @@ fn provider_view(p: &crate::engine::providers::Provider) -> ProviderView {
         cost: p.cost,
         router: p.router,
         enabled: p.enabled,
-        has_key: !p.resolved_key().is_empty(),
+        has_key: !p.effective_key().is_empty(),
     }
 }
 
@@ -1441,6 +1441,50 @@ mod tests {
         let models = b["models"].as_array().unwrap();
         assert!(models.iter().any(|m| m["key"] == "minimax"));
         assert!(models.iter().any(|m| m["native"] == false));
+    }
+
+    #[tokio::test]
+    async fn models_get_default_scope_includes_chatgpt_subscription_provider() {
+        // Criterion 2: once the subscription provider row exists, GPT shows up in the default
+        // /api/models catalog (membership is independent of whether a token is present).
+        let _providers = isolated_providers_file();
+        let st = test_state().await;
+        crate::engine::providers::seed_claude_models_for_tests();
+
+        crate::engine::providers::upsert_at(
+            &crate::engine::providers::providers_file_path(),
+            crate::engine::providers::Provider {
+                name: crate::engine::openai_oauth::PROVIDER_NAME.into(),
+                base_url: crate::engine::openai_oauth::CODEX_BASE_URL.into(),
+                api_key: String::new(),
+                api_key_env: None,
+                model: "gpt-5".into(),
+                protocol: crate::engine::providers::Protocol::Openai,
+                capability: 0.9,
+                description: Some("ChatGPT subscription (OAuth) — GPT worker".into()),
+                priority: 0.5,
+                cost: 0.9,
+                router: false,
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let (s, b) = oneshot_req(
+            st.clone(),
+            Request::get("/api/models")
+                .header("authorization", auth(&st))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(s, StatusCode::OK);
+        let models = b["models"].as_array().unwrap();
+        assert!(
+            models.iter().any(|m| m["key"] == "chatgpt"),
+            "chatgpt subscription provider must appear in the default catalog"
+        );
     }
 
     #[tokio::test]
