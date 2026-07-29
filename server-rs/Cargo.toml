@@ -55,6 +55,6 @@ async-trait = "0.1"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 tempfile = "3"
 wiremock = "0.6"
