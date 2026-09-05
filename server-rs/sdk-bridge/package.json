@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Runtime dependency for server-rs/sdk-bridge/sdk-bridge.mjs \u2014 the thin Node bridge the Rust server spawns per turn to drive claude through the Agent SDK (this is what makes AskUserQuestion pause in-turn). Run `npm install` in this directory; node resolves @anthropic-ai/claude-agent-sdk from the adjacent node_modules.",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.183",
-    "zod": "^4.0.0"
+    "@anthropic-ai/claude-agent-sdk": "0.3.258",
+    "zod": "^4.5.4"
   },
   "scripts": {
     "check": "node --check sdk-bridge.mjs",
